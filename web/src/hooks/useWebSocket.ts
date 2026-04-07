@@ -3,7 +3,7 @@ import { useAppStore } from "../stores/appStore";
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<number>();
+  const reconnectTimer = useRef<number | undefined>(undefined);
   const { setInstances, setStats, addLog, updateInstance, setRunning } =
     useAppStore();
 
