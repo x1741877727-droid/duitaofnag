@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+venv/
+env/
+.venv/
+
+# Node
+node_modules/
+web/dist/
+*.log
+npm-debug.log*
+
+# 运行时生成的数据（不要提交，每台机器独立）
+logs/
+screenshots/
+output/
+build/
+
+# Nuitka 编译产物
+*.build/
+*.dist/
+*.onefile-build/
+*.exe
+
+# 配置（可能含 API key, 各机器独立）
+# 注意: 如果团队共用 git，建议提交 .example 模板
+# settings.json
+# accounts.json
+
+# Cloudflared
+cloudflared.exe
+cloudflared
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

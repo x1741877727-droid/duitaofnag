@@ -1,0 +1,50 @@
+[
+  {
+    "qq": "账号1",
+    "nickname": "TestUpdated",
+    "game_id": "ID1",
+    "group": "A",
+    "role": "captain",
+    "instance_index": 0
+  },
+  {
+    "qq": "账号2",
+    "nickname": "玩家2",
+    "game_id": "ID2",
+    "group": "A",
+    "role": "member",
+    "instance_index": 1
+  },
+  {
+    "qq": "账号3",
+    "nickname": "玩家3",
+    "game_id": "ID3",
+    "group": "A",
+    "role": "member",
+    "instance_index": 2
+  },
+  {
+    "qq": "账号4",
+    "nickname": "玩家4",
+    "game_id": "ID4",
+    "group": "B",
+    "role": "captain",
+    "instance_index": 3
+  },
+  {
+    "qq": "账号5",
+    "nickname": "玩家5",
+    "game_id": "ID5",
+    "group": "B",
+    "role": "member",
+    "instance_index": 4
+  },
+  {
+    "qq": "账号6",
+    "nickname": "玩家6",
+    "game_id": "ID6",
+    "group": "B",
+    "role": "member",
+    "instance_index": 5
+  }
+]
