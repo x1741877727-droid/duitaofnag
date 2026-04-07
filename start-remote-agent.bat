@@ -10,20 +10,16 @@ echo.
 REM 1. 检查 fastapi 是否已安装
 python -c "import fastapi, uvicorn" 2>nul
 if errorlevel 1 (
-    echo [1/2] 安装 FastAPI 和 uvicorn (一次性, 1-2 分钟)...
-    pip install fastapi uvicorn -i https://pypi.tuna.tsinghua.edu.cn/simple
+    echo [1/2] Installing FastAPI and uvicorn (one-time, 1-2 min)...
+    pip install fastapi uvicorn
     if errorlevel 1 (
         echo.
-        echo [错误] FastAPI 安装失败
-        echo 尝试默认源:
-        pip install fastapi uvicorn
-        if errorlevel 1 (
-            pause
-            exit /b 1
-        )
+        echo [ERROR] FastAPI install failed
+        pause
+        exit /b 1
     )
 ) else (
-    echo [1/2] FastAPI 已安装
+    echo [1/2] FastAPI already installed
 )
 
 REM 2. 启动 remote_agent.py
