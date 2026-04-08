@@ -54,6 +54,9 @@ ALLOWED_COMMANDS = {
     "tasklist", "chcp", "set",
     "cloudflared",
     "powershell",  # 用于一些特殊查询
+    "adb",  # Android 调试，用于 logcat / install / shell
+    "findstr", "find",  # Windows/通用 文本过滤
+    "more",  # 分页查看
 }
 
 # 危险关键词（命令中包含就拒绝）
@@ -77,6 +80,13 @@ COMMAND_TIMEOUT = 600  # 10 分钟（pip install 可能很久）
 # =====================
 
 PASSWORD = secrets.token_urlsafe(16)  # 启动时生成的随机密码
+
+# 把密码写到磁盘，方便远程获取（避免你看图打字）
+try:
+    _pwd_file = Path(__file__).parent / ".remote_agent_password.txt"
+    _pwd_file.write_text(PASSWORD, encoding="utf-8")
+except Exception:
+    pass
 START_TIME = time.time()
 COMMAND_HISTORY: list[dict] = []
 CURRENT_DIR = WORK_DIR
