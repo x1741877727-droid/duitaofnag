@@ -39,7 +39,6 @@ def setup_logging(debug: bool = False):
         datefmt="%H:%M:%S",
     )
     # 降低第三方库日志级别
-    logging.getLogger("transitions.core").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 

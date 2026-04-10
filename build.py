@@ -53,7 +53,7 @@ def check_dependencies():
         print("  PyInstaller: ✗ (可选, pip install pyinstaller)")
 
     # 核心依赖
-    deps = ["fastapi", "uvicorn", "cv2", "numpy", "transitions", "adbutils"]
+    deps = ["fastapi", "uvicorn", "cv2", "numpy", "rapidocr"]
     for dep in deps:
         try:
             __import__(dep)
@@ -99,12 +99,15 @@ def build_nuitka():
         "--include-package=backend",
         "--include-package=fastapi",
         "--include-package=uvicorn",
-        "--include-package=transitions",
         "--include-package=cv2",
         "--include-package=numpy",
+        "--include-package=rapidocr",
 
         # 包含前端构建产物
         f"--include-data-dir={WEB_DIST}=web/dist",
+
+        # 包含模板文件
+        f"--include-data-dir={os.path.join(ROOT, 'fixtures', 'templates')}=fixtures/templates",
 
         # 包含配置文件模板
         f"--include-data-files={os.path.join(ROOT, 'settings.json')}=settings.json",
@@ -147,9 +150,9 @@ a = Analysis(
     pathex=[ROOT],
     datas=[
         (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
+        (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
         (os.path.join(ROOT, 'settings.json'), '.'),
         (os.path.join(ROOT, 'accounts.json'), '.'),
-        (os.path.join(ROOT, 'backend', 'recognition', 'templates'), 'backend/recognition/templates'),
     ],
     hiddenimports=[
         'uvicorn.logging',
@@ -162,8 +165,7 @@ a = Analysis(
         'uvicorn.protocols.websockets.auto',
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
-        'transitions',
-        'engineio.async_drivers.threading',
+        'rapidocr',
     ],
 )
 

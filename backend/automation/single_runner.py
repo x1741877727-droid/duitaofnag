@@ -16,6 +16,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from .adb_lite import ADBController
 from .screen_matcher import MatchHit, ScreenMatcher
 from .popup_dismisser import PopupDismisser
 from .ocr_dismisser import OcrDismisser
@@ -36,118 +37,6 @@ class Phase(str, Enum):
     TEAM_JOIN = "team_join"
     DONE = "done"
     ERROR = "error"
-
-
-class ADBController:
-    """
-    ADB控制器 — 直接调用adb命令
-    专门为雷电模拟器优化
-    """
-
-    def __init__(self, serial: str, adb_path: str = "adb"):
-        self.serial = serial
-        self.adb_path = adb_path
-        self._proc_timeout = 10
-
-    def _cmd(self, *args) -> str:
-        """同步执行adb命令"""
-        import subprocess
-        cmd = [self.adb_path, "-s", self.serial] + list(args)
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, timeout=self._proc_timeout
-            )
-            # 尝试多种编码解码
-            for enc in ("utf-8", "gbk"):
-                try:
-                    return result.stdout.decode(enc)
-                except UnicodeDecodeError:
-                    continue
-            return result.stdout.decode("utf-8", errors="replace")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"ADB命令超时: {cmd}")
-            return ""
-        except Exception as e:
-            logger.error(f"ADB命令失败: {cmd} -> {e}")
-            return ""
-
-    async def screenshot(self) -> Optional[np.ndarray]:
-        """截图并返回numpy数组 (BGR)"""
-        loop = asyncio.get_event_loop()
-        try:
-            raw = await loop.run_in_executor(None, self._screenshot_sync)
-            return raw
-        except Exception as e:
-            logger.error(f"截图失败: {e}")
-            return None
-
-    def _screenshot_sync(self) -> Optional[np.ndarray]:
-        """同步截图"""
-        import subprocess
-        cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap", "-p"]
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=10)
-            if result.returncode != 0:
-                return None
-            png_data = result.stdout
-            if len(png_data) < 100:
-                return None
-            arr = np.frombuffer(png_data, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            return img
-        except Exception:
-            return None
-
-    async def tap(self, x: int, y: int):
-        """点击（带随机抖动）"""
-        import random
-        jx = x + random.randint(-3, 3)
-        jy = y + random.randint(-3, 3)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, self._cmd, "shell", f"input tap {jx} {jy}"
-        )
-
-    async def key_event(self, key: str):
-        """按键事件"""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, self._cmd, "shell", f"input keyevent {key}"
-        )
-
-    async def start_app(self, package: str, activity: str = ""):
-        """启动应用"""
-        if activity:
-            component = f"{package}/{activity}"
-            await self._async_cmd("shell", f"am start -n {component}")
-        else:
-            await self._async_cmd("shell", f"monkey -p {package} -c android.intent.category.LAUNCHER 1")
-
-    async def stop_app(self, package: str):
-        """强制停止应用"""
-        await self._async_cmd("shell", f"am force-stop {package}")
-
-    async def get_clipboard(self) -> str:
-        """读取剪贴板"""
-        loop = asyncio.get_event_loop()
-        output = await loop.run_in_executor(
-            None, self._cmd, "shell", "am broadcast -a clipper.get"
-        )
-        # 解析剪贴板内容（需要剪贴板服务或特殊方法）
-        return output.strip()
-
-    async def set_clipboard(self, text: str):
-        """写入剪贴板"""
-        # 使用input text方法 或 am broadcast
-        await self._async_cmd("shell", f"am broadcast -a clipper.set -e text '{text}'")
-
-    async def open_url(self, url: str):
-        """通过intent打开URL"""
-        await self._async_cmd("shell", f"am start -a android.intent.action.VIEW -d '{url}'")
-
-    async def _async_cmd(self, *args) -> str:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._cmd, *args)
 
 
 # ====================================================================
@@ -172,16 +61,29 @@ class SingleInstanceRunner:
         role: str = "captain",  # "captain" | "member"
         target_mode: str = "团队竞技",
         target_map: str = "狙击团竞",
+        on_phase_change=None,  # 回调: (Phase) -> None
     ):
         self.adb = adb
         self.matcher = matcher
         self.role = role
         self.target_mode = target_mode
         self.target_map = target_map
-        self.phase = Phase.INIT
+        self._phase = Phase.INIT
+        self._on_phase_change = on_phase_change
         self.popup_dismisser = PopupDismisser(matcher)
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
+
+    @property
+    def phase(self) -> Phase:
+        return self._phase
+
+    @phase.setter
+    def phase(self, value: Phase):
+        old = self._phase
+        self._phase = value
+        if self._on_phase_change and old != value:
+            self._on_phase_change(value)
 
     # ================================================================
     # 阶段 0: 加速器

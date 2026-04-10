@@ -35,8 +35,10 @@ interface AppState {
   logs: LogEntry[];
 
   // UI 状态
-  activeTab: "dashboard" | "settings" | "debug";
-  logFilter: number | null; // null = 全部, 数字 = 按实例过滤
+  activeView: "dashboard" | "settings";
+  selectedInstance: number | null; // 展开截图的实例
+  logFilter: number | null;
+  showLogs: boolean;
 
   // actions
   setRunning: (running: boolean, paused?: boolean) => void;
@@ -44,8 +46,10 @@ interface AppState {
   setStats: (stats: Stats) => void;
   addLog: (entry: LogEntry) => void;
   clearLogs: () => void;
-  setActiveTab: (tab: AppState["activeTab"]) => void;
+  setActiveView: (view: AppState["activeView"]) => void;
+  setSelectedInstance: (idx: number | null) => void;
   setLogFilter: (filter: number | null) => void;
+  setShowLogs: (show: boolean) => void;
   updateInstance: (index: number, old: string, next: string) => void;
 }
 
@@ -63,8 +67,10 @@ export const useAppStore = create<AppState>((set) => ({
     running_duration: 0,
   },
   logs: [],
-  activeTab: "dashboard",
+  activeView: "dashboard",
+  selectedInstance: null,
   logFilter: null,
+  showLogs: true,
 
   setRunning: (running, paused) =>
     set((s) => ({ running, paused: paused ?? s.paused })),
@@ -80,9 +86,13 @@ export const useAppStore = create<AppState>((set) => ({
 
   clearLogs: () => set({ logs: [] }),
 
-  setActiveTab: (activeTab) => set({ activeTab }),
+  setActiveView: (activeView) => set({ activeView }),
+
+  setSelectedInstance: (selectedInstance) => set({ selectedInstance }),
 
   setLogFilter: (logFilter) => set({ logFilter }),
+
+  setShowLogs: (showLogs) => set({ showLogs }),
 
   updateInstance: (index, _old, next) =>
     set((s) => {
