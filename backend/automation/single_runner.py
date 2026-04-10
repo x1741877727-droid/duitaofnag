@@ -170,6 +170,7 @@ class SingleInstanceRunner:
         SUCCESS_KEYWORDS = ["验证成功", "端口验证", "六花端口"]
         FAIL_KEYWORDS = ["百度", "搜索", "热搜"]
 
+        result = None
         for check in range(4):  # 总共约8秒
             shot = await self.adb.screenshot()
             if shot is None:
@@ -182,22 +183,26 @@ class SingleInstanceRunner:
 
             if any(kw in all_text for kw in SUCCESS_KEYWORDS):
                 logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
-                await self.adb.key_event("KEYCODE_HOME")
-                await asyncio.sleep(0.5)
-                return True
+                result = True
+                break
 
             if any(kw in all_text for kw in FAIL_KEYWORDS):
                 logger.warning("[阶段0] 网络验证失败: 看到百度真实页面，加速器未工作")
-                await self.adb.key_event("KEYCODE_HOME")
-                await asyncio.sleep(0.5)
-                return False
+                result = False
+                break
 
             await asyncio.sleep(1.5)
 
-        logger.warning("[阶段0] 网络验证失败: 8秒内未检测到成功标志")
+        if result is None:
+            logger.warning("[阶段0] 网络验证失败: 8秒内未检测到成功标志")
+            result = False
+
+        # 无论成功失败，都杀掉浏览器进程再回桌面
+        await self.adb.stop_app("com.android.browser")
+        await asyncio.sleep(0.3)
         await self.adb.key_event("KEYCODE_HOME")
         await asyncio.sleep(0.5)
-        return False
+        return result
 
     # ================================================================
     # 阶段 1: 启动游戏
