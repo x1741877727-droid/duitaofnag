@@ -298,56 +298,146 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_map_setup(self) -> bool:
-        """队长设置地图和模式"""
+        """队长设置地图和模式（OCR驱动，单次扫描提取所有目标）"""
         self.phase = Phase.MAP_SETUP
         logger.info(f"[阶段6] 地图设置: {self.target_mode} - {self.target_map}")
 
-        # 确认在大厅
-        shot = await self.adb.screenshot()
-        if shot is None or not self.matcher.is_at_lobby(shot):
-            logger.error("[阶段6] 不在大厅")
-            return False
+        ocr = OcrDismisser()
 
-        # 点击地图区域（左上角"开始游戏"下方的模式名）
-        await self.adb.tap(100, 105)
-        await asyncio.sleep(2)
+        # 构建地图模糊关键词（OCR 常把"狙击"识别为"姐击"/"阻击"等）
+        map_keywords = [self.target_map]
+        if "狙击" in self.target_map:
+            map_keywords.extend(["击团竞大桥", "击团竞"])
+        elif "经典" in self.target_map:
+            map_keywords.extend(["经典团竞仓库", "经典团竞"])
+        elif "军备" in self.target_map:
+            map_keywords.extend(["军备团竞图书", "军备团竞"])
 
-        # 等待地图选择面板打开
+        # ── 步骤1: 打开地图面板（模板优先，不用OCR）──
         shot = await self.adb.screenshot()
         if shot is None:
             return False
 
-        # 检测"团队竞技"模式入口 — 用模板匹配
-        mode_hit = self.matcher.find_button(shot, "btn_team_battle_entry", threshold=0.65)
-        if mode_hit:
-            logger.info(f"[阶段6] 点击团队竞技: ({mode_hit.cx},{mode_hit.cy})")
-            await self.adb.tap(mode_hit.cx, mode_hit.cy)
-            await asyncio.sleep(1)
-            shot = await self.adb.screenshot()
-            if shot is None:
+        hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+        if hit:
+            await self.adb.tap(hit.cx, hit.cy + 60)
+            logger.info(f"[阶段6] 模板定位，点击模式名 ({hit.cx},{hit.cy + 60})")
+        else:
+            # OCR 兜底找"开始游戏"
+            hits = ocr._ocr_all(shot)
+            for h in hits:
+                if "开始游戏" in h.text:
+                    await self.adb.tap(h.cx, h.cy + 60)
+                    logger.info(f"[阶段6] OCR定位，点击模式名 ({h.cx},{h.cy + 60})")
+                    break
+            else:
+                logger.error("[阶段6] 找不到'开始游戏'按钮")
                 return False
 
-        # 检测狙击团竞是否可见 — 用模板匹配
-        sniper_hit = self.matcher.find_button(shot, "card_sniper_team", threshold=0.65)
-        if sniper_hit:
-            logger.info(f"[阶段6] 点击狙击团竞: ({sniper_hit.cx},{sniper_hit.cy})")
-            await self.adb.tap(sniper_hit.cx, sniper_hit.cy)
-            await asyncio.sleep(1)
+        # ── 轮询等面板打开 ──
+        hits = []
+        for _ in range(15):
+            await asyncio.sleep(0.4)
+            shot = await self.adb.screenshot()
+            if shot is None:
+                continue
+            hits = ocr._ocr_all(shot)
+            if len(hits) > 25:
+                break
 
-        # 点击"确定"按钮 — 用模板匹配定位
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            confirm = self.matcher.find_button(shot, "btn_confirm_map", threshold=0.70)
-            if confirm:
-                logger.info(f"[阶段6] 点击确定: ({confirm.cx},{confirm.cy})")
-                await self.adb.tap(confirm.cx, confirm.cy)
+        if len(hits) < 20:
+            logger.warning("[阶段6] 地图面板未打开")
+            return False
+
+        logger.info(f"[阶段6] 面板已打开 ({len(hits)}个文字)")
+
+        # ── 一次性提取所有目标 ──
+        team_battle_hit = None
+        map_hit = None
+        fill_hit = None
+        confirm_hit = None
+
+        for h in hits:
+            if "团队竞技" in h.text and h.cx < 200:
+                team_battle_hit = h
+            if "确定" in h.text and h.cx > 1000:
+                confirm_hit = h
+            if "补位" in h.text:
+                fill_hit = h
+            if not map_hit:
+                for kw in map_keywords:
+                    if kw in h.text:
+                        map_hit = h
+                        break
+
+        # ── 判断是否需要切换模式（没看到"补位" = 不在团竞模式）──
+        if fill_hit is None:
+            if team_battle_hit:
+                logger.info(f"[阶段6] 切换到团队竞技 ({team_battle_hit.cx},{team_battle_hit.cy})")
+                await self.adb.tap(team_battle_hit.cx, team_battle_hit.cy)
                 await asyncio.sleep(1)
-                logger.info("[阶段6] 地图设置完成 ✓")
-                return True
+                # 重新 OCR
+                shot = await self.adb.screenshot()
+                if shot is not None:
+                    hits = ocr._ocr_all(shot)
+                    map_hit = None
+                    fill_hit = None
+                    confirm_hit = None
+                    for h in hits:
+                        if "确定" in h.text and h.cx > 1000:
+                            confirm_hit = h
+                        if "补位" in h.text:
+                            fill_hit = h
+                        if not map_hit:
+                            for kw in map_keywords:
+                                if kw in h.text:
+                                    map_hit = h
+                                    break
+            else:
+                logger.warning("[阶段6] 未找到团队竞技入口")
+                return False
+        else:
+            logger.info("[阶段6] 已在团队竞技，跳过切换")
 
-        # 兜底：按返回键退出
-        await self.adb.key_event("KEYCODE_BACK")
-        await asyncio.sleep(1)
+        # ── 选择地图 ──
+        if map_hit:
+            logger.info(f"[阶段6] 选择地图 '{map_hit.text}' ({map_hit.cx},{map_hit.cy})")
+            await self.adb.tap(map_hit.cx, map_hit.cy)
+            await asyncio.sleep(0.3)
+        else:
+            logger.warning(f"[阶段6] 未找到目标地图 '{self.target_map}'")
+
+        # ── 检查补位（像素检测勾选状态）──
+        if fill_hit:
+            shot = await self.adb.screenshot()
+            if shot is not None:
+                check_x = max(0, fill_hit.cx - 60)
+                check_y = fill_hit.cy
+                y1 = max(0, check_y - 5)
+                y2 = min(shot.shape[0], check_y + 5)
+                x1 = max(0, check_x - 5)
+                x2 = min(shot.shape[1], check_x + 5)
+                region = shot[y1:y2, x1:x2]
+                if region.size > 0:
+                    r_ch = region[:, :, 2]
+                    g_ch = region[:, :, 1]
+                    b_ch = region[:, :, 0]
+                    orange_count = int(((r_ch > 150) & (g_ch > 80) & (b_ch < 80)).sum())
+                    if orange_count > 5:
+                        logger.info("[阶段6] 补位已开启 → 点击取消")
+                        await self.adb.tap(fill_hit.cx, fill_hit.cy)
+                        await asyncio.sleep(0.3)
+                    else:
+                        logger.info("[阶段6] 补位已关闭 → 跳过")
+
+        # ── 点击确定 ──
+        if confirm_hit:
+            logger.info(f"[阶段6] 点击确定 ({confirm_hit.cx},{confirm_hit.cy})")
+            await self.adb.tap(confirm_hit.cx, confirm_hit.cy)
+        else:
+            await self._ocr_tap(ocr, ["确定"], step="确定")
+
+        logger.info("[阶段6] 地图设置完成 ✓")
         return True
 
     # ================================================================

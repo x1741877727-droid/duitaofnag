@@ -265,13 +265,22 @@ class MultiRunnerService:
             self._instances[idx].state = "lobby"
             self._broadcast_state_change(idx, "dismiss_popups", "lobby")
 
-            # 阶段 4: 队长创建队伍
+            # 队长执行: 阶段6(地图设置) → 阶段4(创建队伍)
             if runner.role == "captain":
+                # 阶段 6: 地图设置
+                ok = await runner.phase_map_setup()
+                if not ok:
+                    logger.warning(f"[实例{idx}] 地图设置失败，继续创建队伍")
+                self._instances[idx].state = "map_setup"
+                self._broadcast_state_change(idx, "lobby", "map_setup")
+
+                # 阶段 4: 创建队伍
                 code = await runner.phase_team_create()
                 if code:
                     runner._team_code = code
                     logger.info(f"[实例{idx}] 队长已创建队伍，口令码: {code}")
                     self._instances[idx].state = "team_create"
+                    self._broadcast_state_change(idx, "map_setup", "team_create")
                 else:
                     self._instances[idx].state = "error"
                     self._instances[idx].error = "创建队伍失败"
