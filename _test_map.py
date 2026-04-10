@@ -179,14 +179,14 @@ async def fast_map_setup(target="狙击团竞"):
     import time, numpy as np
     t0 = time.time()
 
-    # 构建地图模糊关键词
+    # 构建地图模糊关键词（优先匹配标题，不匹配描述文字）
     map_keywords = [target]
     if "狙击" in target:
-        map_keywords.extend(["击团竞", "大桥", "军事基地"])
+        map_keywords.extend(["击团竞大桥", "击团竞"])  # 标题格式: "X击团竞大桥/军事基地"
     elif "经典" in target:
-        map_keywords.extend(["经典团竞", "仓库", "滨海"])
+        map_keywords.extend(["经典团竞仓库", "经典团竞"])
     elif "军备" in target:
-        map_keywords.extend(["军备团竞", "图书馆"])
+        map_keywords.extend(["军备团竞图书", "军备团竞"])
 
     # ── 步骤1: 打开面板（模板优先，不用OCR）──
     shot = await adb.screenshot()
