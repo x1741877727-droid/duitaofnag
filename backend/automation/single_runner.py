@@ -160,12 +160,15 @@ class SingleInstanceRunner:
         return False
 
     async def _verify_network(self) -> bool:
-        """打开百度验证网络是否真通。8秒内加载出百度页面=成功"""
+        """打开百度验证网络。加速器会劫持URL显示验证结果，看到"验证成功"=网络通了"""
         logger.info("[阶段0] 网络验证: 打开百度...")
         await self.adb.open_url("https://m.baidu.com/")
-        await asyncio.sleep(3)  # 等浏览器启动+页面开始加载
+        await asyncio.sleep(3)
 
-        for check in range(4):  # 3+1+1+1+1+1 ≈ 最多再等5秒，总共8秒
+        # 验证成功的标志：加速器劫持后显示"验证成功"，或真正加载出百度
+        SUCCESS_KEYWORDS = ["验证成功", "百度", "搜索"]
+
+        for check in range(4):  # 总共约8秒
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(1)
@@ -175,18 +178,15 @@ class SingleInstanceRunner:
             all_text = " ".join(h.text for h in hits)
             logger.info(f"[阶段0] 网络验证R{check+1}: OCR={all_text[:60]}")
 
-            # 百度页面加载成功的标志
-            if any(kw in all_text for kw in ["百度", "搜索", "热搜", "资讯", "新闻"]):
-                logger.info("[阶段0] 网络验证通过 ✓ 百度页面已加载")
-                # 关掉浏览器回桌面
+            if any(kw in all_text for kw in SUCCESS_KEYWORDS):
+                logger.info("[阶段0] 网络验证通过 ✓")
                 await self.adb.key_event("KEYCODE_HOME")
                 await asyncio.sleep(0.5)
                 return True
 
             await asyncio.sleep(1.5)
 
-        logger.warning("[阶段0] 网络验证失败: 8秒内百度未加载")
-        # 关掉浏览器
+        logger.warning("[阶段0] 网络验证失败: 8秒内未检测到成功标志")
         await self.adb.key_event("KEYCODE_HOME")
         await asyncio.sleep(0.5)
         return False
