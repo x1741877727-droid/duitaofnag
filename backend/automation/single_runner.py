@@ -360,7 +360,9 @@ class SingleInstanceRunner:
         map_hit = None
         fill_hit = None
         confirm_hit = None
+        is_team_battle = False
 
+        all_text = " ".join(h.text for h in hits)
         for h in hits:
             if "团队竞技" in h.text and h.cx < 200:
                 team_battle_hit = h
@@ -374,8 +376,16 @@ class SingleInstanceRunner:
                         map_hit = h
                         break
 
-        # ── 判断是否需要切换模式（没看到"补位" = 不在团竞模式）──
-        if fill_hit is None:
+        # 判断是否已在团竞模式：补位按钮 或 团竞特征词
+        is_team_battle = (fill_hit is not None or
+                          "团竞手册" in all_text or
+                          "团竞详情" in all_text or
+                          "军备团竞" in all_text or
+                          "击团竞" in all_text or
+                          "迷你战争" in all_text)
+
+        # ── 判断是否需要切换模式 ──
+        if not is_team_battle:
             if team_battle_hit:
                 logger.info(f"[阶段6] 切换到团队竞技 ({team_battle_hit.cx},{team_battle_hit.cy})")
                 await self.adb.tap(team_battle_hit.cx, team_battle_hit.cy)
