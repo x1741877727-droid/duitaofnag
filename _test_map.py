@@ -137,25 +137,30 @@ async def step4_disable_auto_fill():
         if "补位" in h.text:
             print(f"  找到: '{h.text}' @ ({h.cx},{h.cy})")
 
-            # 检查文字左侧 30~50 像素处的颜色（勾选图标区域）
-            check_x = max(0, h.cx - 45)
+            # 勾选图标在文字左侧约 60px 处
+            # ON = 橙黄色勾 (R>150, G>100, B<50)
+            # OFF = 深灰色 (RGB 都 < 80)
+            check_x = max(0, h.cx - 60)
             check_y = h.cy
-            # 取周围 10x10 区域的平均颜色
-            region = shot[max(0,check_y-5):check_y+5, max(0,check_x-5):check_x+5]
+            # 取 10x10 区域采样
+            y1, y2 = max(0, check_y - 5), min(shot.shape[0], check_y + 5)
+            x1, x2 = max(0, check_x - 5), min(shot.shape[1], check_x + 5)
+            region = shot[y1:y2, x1:x2]
             if region.size > 0:
-                avg_color = region.mean(axis=(0, 1))  # BGR
-                b, g, r = avg_color
-                print(f"  勾选区域颜色 BGR=({b:.0f},{g:.0f},{r:.0f})")
+                # 检查区域内是否有橙黄色像素（勾选标记）
+                b, g, r = region[:,:,0], region[:,:,1], region[:,:,2]
+                orange_mask = (r > 150) & (g > 80) & (b < 80)
+                orange_count = orange_mask.sum()
+                avg_b, avg_g, avg_r = region.mean(axis=(0,1))
+                print(f"  图标区域({x1},{y1}) 平均BGR=({avg_b:.0f},{avg_g:.0f},{avg_r:.0f}) 橙色像素={orange_count}")
 
-                # 绿色判断：G通道明显大于R和B
-                is_green = g > 120 and g > r * 1.3 and g > b * 1.3
-                if is_green:
-                    print(f"  状态: 已开启(绿色) → 点击取消")
+                if orange_count > 5:
+                    print(f"  状态: 已开启(有勾) → 点击取消")
                     await adb.tap(h.cx, h.cy)
                     await asyncio.sleep(0.5)
                     return True
                 else:
-                    print(f"  状态: 已关闭 → 跳过")
+                    print(f"  状态: 已关闭(无勾) → 跳过")
                     return True
 
     print("  未找到补位按钮")
