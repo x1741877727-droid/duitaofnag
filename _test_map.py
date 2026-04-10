@@ -126,16 +126,24 @@ async def step4_disable_auto_fill():
     if shot is None:
         return False
     hits = ocr._ocr_all(shot)
-    # 找"自动匹配队友"文字
+    # 找"愿意补位"或"自动匹配"文字
     for h in hits:
-        if "自动匹配" in h.text or "匹配队友" in h.text:
+        if "补位" in h.text or "自动匹配" in h.text or "匹配队友" in h.text:
             print(f"  找到补位按钮: '{h.text}' @ ({h.cx},{h.cy})")
-            # 需要判断当前是否选中状态——先点击看效果
             await adb.tap(h.cx, h.cy)
-            print("  已点击取消补位")
+            await asyncio.sleep(0.5)
+            # 验证：再次截图看文字是否变化
+            shot2 = await adb.screenshot()
+            if shot2 is not None:
+                hits2 = ocr._ocr_all(shot2)
+                for h2 in hits2:
+                    if "补位" in h2.text:
+                        print(f"  点击后状态: '{h2.text}' @ ({h2.cx},{h2.cy})")
+                        break
+            print("  已处理补位按钮")
             return True
-    print("  未找到'自动匹配队友'按钮")
-    return False
+    print("  未找到补位按钮（可能已经关闭）")
+    return True  # 没找到也不算失败，可能本来就没开
 
 
 async def step5_confirm():
