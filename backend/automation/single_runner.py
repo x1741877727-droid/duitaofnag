@@ -192,9 +192,10 @@ class SingleInstanceRunner:
         self.phase = Phase.ACCELERATOR
         logger.info("[阶段0] 启动加速器")
 
-        # 启动加速器APK
         await self.adb.start_app(ACCELERATOR_PACKAGE)
         await asyncio.sleep(3)
+
+        play_click_count = 0  # 连续点击play的次数
 
         for attempt in range(15):
             shot = await self.adb.screenshot()
@@ -211,6 +212,15 @@ class SingleInstanceRunner:
                 return True
 
             if status is False:
+                play_click_count += 1
+                # 连续点了3次play还没连上，可能有弹窗挡住了
+                if play_click_count >= 3:
+                    logger.info("[阶段0] 连续点击无效，按返回键清除可能的弹窗")
+                    await self.adb.key_event("KEYCODE_BACK")
+                    play_click_count = 0
+                    await asyncio.sleep(2)
+                    continue
+
                 logger.info("[阶段0] 点击启动按钮")
                 play_hit = self.matcher.match_one(shot, "accelerator_play")
                 if play_hit:
@@ -218,9 +228,10 @@ class SingleInstanceRunner:
                 await asyncio.sleep(3)
                 continue
 
-            # status is None — 可能有公告弹窗遮挡，按返回键尝试关闭
-            logger.info("[阶段0] 不在加速器主界面，按返回键尝试关闭弹窗")
+            # status is None — 按返回键
+            logger.info("[阶段0] 不在加速器主界面，按返回键")
             await self.adb.key_event("KEYCODE_BACK")
+            play_click_count = 0
             await asyncio.sleep(2)
 
         logger.error("[阶段0] 加速器启动超时")
