@@ -521,8 +521,8 @@ class SingleInstanceRunner:
             hits = ocr._ocr_all(shot)
             all_text = " ".join(h.text for h in hits)
 
-            # 检测"使用组队码加入"弹窗（点击组队后剪贴板有码会弹出）
-            if "组队码" in all_text and "取消" in all_text and "加入" in all_text:
+            # 检测"使用组队码加入队伍吗？"弹窗（弹窗特有文字，不会和tab混淆）
+            if "加入队伍" in all_text and "取消" in all_text:
                 for h in hits:
                     if "取消" in h.text and h.cy > 400:
                         logger.info(f"[阶段4] 组队码弹窗出现，点击取消 ({h.cx},{h.cy})")
