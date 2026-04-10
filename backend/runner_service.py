@@ -385,7 +385,7 @@ class MultiRunnerService:
         """查找模板目录（兼容 PyInstaller 打包后）"""
         import sys as _sys
         if getattr(_sys, 'frozen', False):
-            root = _sys._MEIPASS
+            root = os.path.dirname(_sys.executable)
         else:
             root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidates = [

@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # 配置文件路径
-# exe 打包后: 配置文件放在 exe 同目录（可写）
-# 开发模式: 放在项目根目录
+# 打包后: %APPDATA%\GameBot（可写，与只读的程序目录分离）
+# 开发模式: 项目根目录
 import sys as _sys
 if getattr(_sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(_sys.executable)  # exe 所在目录
+    BASE_DIR = os.path.join(os.environ.get('APPDATA', '.'), 'GameBot')
+    os.makedirs(BASE_DIR, exist_ok=True)
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACCOUNTS_PATH = os.path.join(BASE_DIR, "accounts.json")

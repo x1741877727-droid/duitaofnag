@@ -1,16 +1,16 @@
 """
-打包脚本
-在 Windows 上使用 Nuitka 编译为 EXE
+GameBot 构建脚本
+Nuitka standalone 编译（.py → C → .pyd 原生二进制，零源码暴露）
 
 用法:
-  python build.py              # Nuitka 编译 (推荐, 代码保护)
-  python build.py --pyinstaller # PyInstaller 打包 (备选, 更快)
-  python build.py --check      # 仅检查依赖
+  python build.py                # Nuitka standalone 编译
+  python build.py --pyinstaller  # PyInstaller 备选（开发调试用）
+  python build.py --check        # 仅检查依赖
+  python build.py --installer    # 编译后制作 Inno Setup 安装包
 """
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 
@@ -20,82 +20,71 @@ WEB_DIST = os.path.join(ROOT, "web", "dist")
 OUTPUT_DIR = os.path.join(ROOT, "output")
 
 
+def get_version() -> str:
+    """从 version.py 读取版本号"""
+    v = {}
+    with open(os.path.join(ROOT, "version.py"), encoding="utf-8") as f:
+        exec(f.read(), v)
+    return v.get("__version__", "0.0.0")
+
+
 def check_dependencies():
-    """检查打包依赖"""
-    print("检查依赖...")
+    print("=== 依赖检查 ===")
+    print(f"  Python: {sys.version.split()[0]}")
 
-    # Python
-    print(f"  Python: {sys.version}")
-
-    # 前端构建产物
     if os.path.isdir(WEB_DIST):
         files = os.listdir(WEB_DIST)
-        print(f"  前端构建: OK ({len(files)} 个文件)")
+        print(f"  frontend: OK ({len(files)} files)")
     else:
-        print("  前端构建: FAIL 请先运行 cd web && npm run build")
+        print("  frontend: MISSING - run: cd web && npm run build")
         return False
 
-    # Nuitka
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "nuitka", "--version"],
-            capture_output=True, text=True,
-        )
-        print(f"  Nuitka: OK {result.stdout.strip()[:50]}")
-    except Exception:
-        print("  Nuitka: FAIL 请运行 pip install nuitka")
-
-    # PyInstaller (备选)
-    try:
-        import PyInstaller
-        print(f"  PyInstaller: OK {PyInstaller.__version__}")
-    except ImportError:
-        print("  PyInstaller: FAIL (可选, pip install pyinstaller)")
-
-    # 核心依赖
     deps = ["fastapi", "uvicorn", "cv2", "numpy", "rapidocr"]
     for dep in deps:
         try:
             __import__(dep)
             print(f"  {dep}: OK")
         except ImportError:
-            print(f"  {dep}: FAIL")
+            print(f"  {dep}: MISSING")
             return False
 
-    print("依赖检查通过!\n")
+    print(f"  version: {get_version()}")
+    print("=== OK ===\n")
     return True
 
 
 def build_frontend():
-    """构建前端"""
-    print("构建前端...")
+    print("building frontend...")
     web_dir = os.path.join(ROOT, "web")
     if not os.path.exists(os.path.join(web_dir, "node_modules")):
         subprocess.run(["npm", "install"], cwd=web_dir, check=True)
     subprocess.run(["npm", "run", "build"], cwd=web_dir, check=True)
-    print("前端构建完成\n")
 
 
 def build_nuitka():
-    """Nuitka 编译"""
+    """Nuitka standalone 编译 — 文件夹模式，.py 编译为 .pyd"""
+    version = get_version()
+
     print("=" * 60)
-    print("Nuitka 编译开始")
+    print(f"Nuitka Standalone Build v{version}")
     print("=" * 60)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     cmd = [
         sys.executable, "-m", "nuitka",
-        "--standalone",                    # 独立可执行
-        "--onefile",                       # 打成单个 EXE
-        "--output-dir=" + OUTPUT_DIR,
-        "--output-filename=GameAutomation.exe",
+        "--standalone",
+        f"--output-dir={OUTPUT_DIR}",
 
-        # Windows 设置
-        "--windows-console-mode=disable",  # 隐藏控制台窗口
-        "--windows-icon-from-ico=",        # 图标 (留空则用默认)
+        # Windows
+        "--windows-console-mode=disable",
 
-        # 包含的模块
+        # 产品信息
+        f"--product-version={version}",
+        "--product-name=GameBot",
+        "--company-name=GameBot",
+
+        # 包含模块
         "--include-package=backend",
         "--include-package=fastapi",
         "--include-package=uvicorn",
@@ -103,46 +92,68 @@ def build_nuitka():
         "--include-package=numpy",
         "--include-package=rapidocr",
 
-        # 包含前端构建产物
+        # 前端 + 模板
         f"--include-data-dir={WEB_DIST}=web/dist",
-
-        # 包含模板文件
         f"--include-data-dir={os.path.join(ROOT, 'fixtures', 'templates')}=fixtures/templates",
-
-        # 包含配置文件模板
-        f"--include-data-files={os.path.join(ROOT, 'settings.json')}=settings.json",
-        f"--include-data-files={os.path.join(ROOT, 'accounts.json')}=accounts.json",
 
         # 优化
         "--follow-imports",
-        "--assume-yes-for-downloads",       # 自动下载依赖的 C 编译器
+        "--assume-yes-for-downloads",
 
-        # 入口文件
+        # 入口
         os.path.join(BACKEND_DIR, "main.py"),
     ]
 
-    print(f"命令: {' '.join(cmd[:5])}...")
+    # 图标（如果有）
+    icon = os.path.join(ROOT, "assets", "icon.ico")
+    if os.path.exists(icon):
+        cmd.insert(3, f"--windows-icon-from-ico={icon}")
+
+    print(f"command: nuitka --standalone ...")
     subprocess.run(cmd, check=True)
 
     print("\n" + "=" * 60)
-    print("Nuitka 编译完成!")
-    print(f"输出: {OUTPUT_DIR}")
+    dist_dir = os.path.join(OUTPUT_DIR, "main.dist")
+    if os.path.isdir(dist_dir):
+        # 重命名为 GameBot.dist
+        target = os.path.join(OUTPUT_DIR, "GameBot.dist")
+        if os.path.isdir(target):
+            import shutil
+            shutil.rmtree(target)
+        os.rename(dist_dir, target)
+        # 重命名 exe
+        old_exe = os.path.join(target, "main.exe")
+        new_exe = os.path.join(target, "GameBot.exe")
+        if os.path.exists(old_exe):
+            os.rename(old_exe, new_exe)
+        print(f"Output: {target}")
+        print(f"Exe: {new_exe}")
+
+        # 验证无 .py 文件
+        py_count = 0
+        for dirpath, _, filenames in os.walk(target):
+            for fn in filenames:
+                if fn.endswith(('.py', '.pyc')):
+                    py_count += 1
+        print(f"Source files in output: {py_count} (should be 0)")
+    else:
+        print(f"Output: {OUTPUT_DIR}")
     print("=" * 60)
 
 
 def build_pyinstaller():
-    """PyInstaller 打包 — 单文件 exe，所有资源内嵌，字节码加密"""
+    """PyInstaller 文件夹模式 — 开发调试用"""
+    version = get_version()
+
     print("=" * 60)
-    print("PyInstaller 打包开始 (单文件 + 加密)")
+    print(f"PyInstaller Build v{version} (folder mode)")
     print("=" * 60)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 生成 spec 内容 — 单文件 exe
     spec_content = f"""
 # -*- mode: python ; coding: utf-8 -*-
 import os
-
 ROOT = {repr(ROOT)}
 
 a = Analysis(
@@ -153,45 +164,21 @@ a = Analysis(
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
     ],
     hiddenimports=[
-        'uvicorn.logging',
-        'uvicorn.loops',
-        'uvicorn.loops.auto',
-        'uvicorn.protocols',
-        'uvicorn.protocols.http',
-        'uvicorn.protocols.http.auto',
-        'uvicorn.protocols.websockets',
-        'uvicorn.protocols.websockets.auto',
-        'uvicorn.lifespan',
-        'uvicorn.lifespan.on',
+        'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
+        'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',
+        'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto',
+        'uvicorn.lifespan', 'uvicorn.lifespan.on',
         'rapidocr',
-        'backend',
-        'backend.api',
-        'backend.config',
-        'backend.runner_service',
-        'backend.automation',
-        'backend.automation.adb_lite',
-        'backend.automation.guarded_adb',
-        'backend.automation.single_runner',
-        'backend.automation.screen_matcher',
-        'backend.automation.ocr_dismisser',
+        'backend', 'backend.api', 'backend.config', 'backend.runner_service',
+        'backend.automation', 'backend.automation.adb_lite',
+        'backend.automation.guarded_adb', 'backend.automation.single_runner',
+        'backend.automation.screen_matcher', 'backend.automation.ocr_dismisser',
         'backend.automation.popup_dismisser',
     ],
 )
-
 pyz = PYZ(a.pure)
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='GameBot',
-    debug=False,
-    strip=False,
-    upx=True,
-    console=False,
-)
+exe = EXE(pyz, a.scripts, [], name='GameBot', debug=False, console=False)
+coll = COLLECT(exe, a.binaries, a.datas, name='GameBot')
 """
 
     spec_path = os.path.join(OUTPUT_DIR, "GameBot.spec")
@@ -206,20 +193,23 @@ exe = EXE(
         spec_path,
     ]
 
-    print(f"命令: pyinstaller ...")
     subprocess.run(cmd, check=True)
 
-    print("\n" + "=" * 60)
-    print("PyInstaller 打包完成!")
-    print(f"输出: {os.path.join(OUTPUT_DIR, 'dist', 'GameAutomation.exe')}")
+    dist_dir = os.path.join(OUTPUT_DIR, "dist", "GameBot")
+    print(f"\nOutput: {dist_dir}")
+    if os.path.isdir(dist_dir):
+        exe_path = os.path.join(dist_dir, "GameBot.exe")
+        print(f"Exe: {exe_path}")
+        print(f"Exists: {os.path.exists(exe_path)}")
     print("=" * 60)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="打包为 EXE")
-    parser.add_argument("--pyinstaller", action="store_true", help="使用 PyInstaller (备选)")
-    parser.add_argument("--check", action="store_true", help="仅检查依赖")
-    parser.add_argument("--skip-frontend", action="store_true", help="跳过前端构建")
+    parser = argparse.ArgumentParser(description="GameBot Build")
+    parser.add_argument("--pyinstaller", action="store_true", help="Use PyInstaller (dev)")
+    parser.add_argument("--check", action="store_true", help="Check deps only")
+    parser.add_argument("--skip-frontend", action="store_true", help="Skip frontend build")
+    parser.add_argument("--installer", action="store_true", help="Build Inno Setup installer after")
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -229,7 +219,7 @@ def main():
         return
 
     if not check_dependencies():
-        print("依赖检查失败，请先安装缺失的依赖")
+        print("Dependencies missing!")
         sys.exit(1)
 
     if not args.skip_frontend:
@@ -240,6 +230,14 @@ def main():
         build_pyinstaller()
     else:
         build_nuitka()
+
+    if args.installer:
+        print("\nBuilding installer...")
+        iss = os.path.join(ROOT, "installer", "GameBot.iss")
+        if os.path.exists(iss):
+            subprocess.run(["iscc", iss], check=True)
+        else:
+            print(f"Installer script not found: {iss}")
 
 
 if __name__ == "__main__":
