@@ -494,17 +494,6 @@ class SingleInstanceRunner:
 
         ocr = OcrDismisser()
 
-        # ── 先处理可能残留的"使用组队码加入"弹窗 ──
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            hits = ocr._ocr_all(shot)
-            for h in hits:
-                if "取消" in h.text and any("组队码" in h2.text or "加入队伍" in h2.text for h2 in hits):
-                    logger.info(f"[阶段4] 检测到组队码弹窗，点击取消 ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    await asyncio.sleep(0.5)
-                    break
-
         # ── 步骤1: OCR找"组队"并点击 ──
         shot = await self.adb.screenshot()
         if shot is None:
@@ -523,13 +512,26 @@ class SingleInstanceRunner:
             self._restore_guard()
             return None
 
-        # ── 步骤2: 轮询等面板+找"组队码"一起做 ──
+        # ── 步骤2: 轮询等面板+找"组队码"，同时处理可能弹出的组队码加入弹窗 ──
         for _ in range(10):
             await asyncio.sleep(0.3)
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
             hits = ocr._ocr_all(shot)
+            all_text = " ".join(h.text for h in hits)
+
+            # 检测"使用组队码加入"弹窗（点击组队后剪贴板有码会弹出）
+            if "组队码" in all_text and "取消" in all_text and "加入" in all_text:
+                for h in hits:
+                    if "取消" in h.text and h.cy > 400:
+                        logger.info(f"[阶段4] 组队码弹窗出现，点击取消 ({h.cx},{h.cy})")
+                        await self.adb.tap(h.cx, h.cy)
+                        await asyncio.sleep(0.5)
+                        break
+                continue  # 弹窗关闭后重新检测
+
+            # 正常流程：找"组队码" tab
             for h in hits:
                 if "组队码" in h.text and h.cy > 600:
                     logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
