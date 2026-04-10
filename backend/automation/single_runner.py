@@ -153,11 +153,22 @@ class SingleInstanceRunner:
 
         # 等待游戏加载完成，最多90秒
         # 只要检测到"公告"或"开始游戏"或弹窗关键词就说明加载完了
+        # 如果中途有弹窗（如"内存过低"），直接点掉
         for attempt in range(45):
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(2)
                 continue
+
+            # 先检查：如果有弹窗遮罩，尝试点掉（可能是内存提醒等系统弹窗）
+            if self.ocr_dismisser._has_overlay(shot):
+                target = self.ocr_dismisser._find_close_target(shot, self.matcher)
+                if target:
+                    x, y, method = target
+                    logger.info(f"[阶段1] 加载中发现弹窗，点击: {method} @ ({x},{y})")
+                    await self.adb.tap(x, y)
+                    await asyncio.sleep(1)
+                    continue
 
             # 用OCR检测当前画面
             hits = self.ocr_dismisser.ocr_screen(shot)
