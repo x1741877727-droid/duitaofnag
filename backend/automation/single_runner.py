@@ -492,10 +492,18 @@ class SingleInstanceRunner:
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = False
 
-        # 清空剪贴板
-        await self.adb.set_clipboard("")
-
         ocr = OcrDismisser()
+
+        # ── 先处理可能残留的"使用组队码加入"弹窗 ──
+        shot = await self.adb.screenshot()
+        if shot is not None:
+            hits = ocr._ocr_all(shot)
+            for h in hits:
+                if "取消" in h.text and any("组队码" in h2.text or "加入队伍" in h2.text for h2 in hits):
+                    logger.info(f"[阶段4] 检测到组队码弹窗，点击取消 ({h.cx},{h.cy})")
+                    await self.adb.tap(h.cx, h.cy)
+                    await asyncio.sleep(0.5)
+                    break
 
         # ── 步骤1: OCR找"组队"并点击 ──
         shot = await self.adb.screenshot()
