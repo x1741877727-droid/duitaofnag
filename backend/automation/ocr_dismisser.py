@@ -87,9 +87,11 @@ class OcrDismisser:
     def _get_ocr(self):
         """懒加载PaddleOCR（首次调用耗时几秒）"""
         if self._ocr is None:
+            import os
+            os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
             logger.info("初始化 PaddleOCR ...")
             from paddleocr import PaddleOCR
-            self._ocr = PaddleOCR(use_angle_cls=False, lang='ch', show_log=False)
+            self._ocr = PaddleOCR(use_angle_cls=False, lang='ch')
             logger.info("PaddleOCR 初始化完成")
         return self._ocr
 
