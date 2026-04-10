@@ -359,40 +359,67 @@ class SingleInstanceRunner:
         self.phase = Phase.TEAM_CREATE
         logger.info("[阶段4] 队长创建队伍")
 
-        # 1. 打开好友/组队面板：点击左侧"组队"文字
-        await self.adb.tap(35, 385)
+        ocr = OcrDismisser()
+
+        # ── 步骤1: 在大厅找到并点击"组队"按钮 ──
+        if not await self._ocr_tap(ocr, ["组队"], template_fallback="tab_team", step="打开组队面板"):
+            return None
         await asyncio.sleep(2)
 
-        # 2. 点击底部"组队码"按钮 — 用模板匹配定位
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            code_tab = self.matcher.find_button(shot, "btn_team_code_tab", threshold=0.70)
-            if code_tab:
-                await self.adb.tap(code_tab.cx, code_tab.cy)
-            else:
-                # 兜底：底部组队码按钮大约在此位置
-                await self.adb.tap(310, 710)
-            await asyncio.sleep(2)
+        # ── 步骤2: 点击"组队码" tab ──
+        if not await self._ocr_tap(ocr, ["组队码"], template_fallback="btn_team_code_tab", step="组队码tab"):
+            return None
+        await asyncio.sleep(2)
 
-        # 3. 点击"分享组队口令码" — 用模板匹配定位
+        # ── 步骤3: 点击"分享组队口令码"或"分享" ──
+        if not await self._ocr_tap(ocr, ["分享组队口令码", "分享口令", "分享"], template_fallback="btn_share_team_code", step="分享口令码"):
+            return None
+        await asyncio.sleep(1)
+
+        logger.info("[阶段4] 口令码已复制到剪贴板")
+
+        # 关闭组队码面板
         shot = await self.adb.screenshot()
         if shot is not None:
-            share_btn = self.matcher.find_button(shot, "btn_share_team_code", threshold=0.70)
-            if share_btn:
-                logger.info(f"[阶段4] 分享按钮: ({share_btn.cx},{share_btn.cy})")
-                await self.adb.tap(share_btn.cx, share_btn.cy)
+            close = self.matcher.find_dialog_close(shot)
+            if close:
+                await self.adb.tap(close.cx, close.cy)
+
+        return "clipboard"
+
+    async def _ocr_tap(self, ocr: OcrDismisser, keywords: list[str],
+                        template_fallback: str = "", step: str = "",
+                        retries: int = 3) -> bool:
+        """OCR 查找关键词并点击，模板兜底"""
+        for attempt in range(retries):
+            shot = await self.adb.screenshot()
+            if shot is None:
                 await asyncio.sleep(1)
-                # 口令码已静默复制到剪贴板（通过模拟器共享到Windows剪贴板）
-                logger.info("[阶段4] 口令码已复制到剪贴板")
-                # 关闭组队码面板
-                close = self.matcher.find_dialog_close(shot)
-                if close:
-                    await self.adb.tap(close.cx, close.cy)
-                return "clipboard"  # 实际码从Windows剪贴板读取
-            else:
-                logger.warning("[阶段4] 未找到'分享组队口令码'按钮")
+                continue
 
-        return None
+            # 优先 OCR 查找
+            hits = ocr._ocr_all(shot)
+            for kw in keywords:
+                for hit in hits:
+                    if kw in hit.text:
+                        logger.info(f"[{step}] OCR匹配 '{hit.text}' → ({hit.cx},{hit.cy})")
+                        await self.adb.tap(hit.cx, hit.cy)
+                        return True
+
+            # 模板兜底
+            if template_fallback:
+                tmpl_hit = self.matcher.match_one(shot, template_fallback, threshold=0.65)
+                if tmpl_hit:
+                    logger.info(f"[{step}] 模板匹配 '{template_fallback}' → ({tmpl_hit.cx},{tmpl_hit.cy})")
+                    await self.adb.tap(tmpl_hit.cx, tmpl_hit.cy)
+                    return True
+
+            if attempt < retries - 1:
+                logger.debug(f"[{step}] 第{attempt+1}次未找到，重试...")
+                await asyncio.sleep(1)
+
+        logger.warning(f"[{step}] {retries}次尝试均未找到目标")
+        return False
 
     # ================================================================
     # 阶段 5: 组队 — 队员加入
@@ -402,6 +429,8 @@ class SingleInstanceRunner:
         """队员通过口令码加入队伍"""
         self.phase = Phase.TEAM_JOIN
         logger.info("[阶段5] 队员加入队伍")
+
+        ocr = OcrDismisser()
 
         # 先把口令码写入剪贴板
         await self.adb.set_clipboard(team_code)
@@ -414,50 +443,48 @@ class SingleInstanceRunner:
                 await asyncio.sleep(1)
                 continue
 
-            join_hit = self.matcher.match_one(shot, "btn_join", threshold=0.70)
+            # OCR 查找"加入"或"使用组队码"
+            hits = ocr._ocr_all(shot)
+            for hit in hits:
+                if "加入" in hit.text and "队" in hit.text:
+                    logger.info(f"[阶段5] OCR检测到加入提示: '{hit.text}' → ({hit.cx},{hit.cy})")
+                    await self.adb.tap(hit.cx, hit.cy)
+                    await asyncio.sleep(2)
+                    return True
+
+            # 模板兜底
+            join_hit = self.matcher.match_one(shot, "btn_join", threshold=0.65)
             if join_hit:
-                logger.info("[阶段5] 检测到加入提示，点击加入")
+                logger.info("[阶段5] 模板检测到加入提示")
                 await self.adb.tap(join_hit.cx, join_hit.cy)
                 await asyncio.sleep(2)
                 return True
             await asyncio.sleep(1)
 
-        # 如果没自动弹出，手动走组队码路径
+        # 没自动弹出，手动走组队码路径
         logger.info("[阶段5] 未自动弹出，手动走组队码流程")
 
-        # 1. 打开好友/组队面板
-        await self.adb.tap(35, 385)
+        # 1. 点击"组队"
+        if not await self._ocr_tap(ocr, ["组队"], template_fallback="tab_team", step="打开组队面板"):
+            return False
         await asyncio.sleep(2)
 
-        # 2. 点击底部"组队码" — 用模板匹配
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            code_tab = self.matcher.find_button(shot, "btn_team_code_tab", threshold=0.70)
-            if code_tab:
-                await self.adb.tap(code_tab.cx, code_tab.cy)
-            else:
-                await self.adb.tap(310, 710)
-            await asyncio.sleep(2)
+        # 2. 点击"组队码" tab
+        if not await self._ocr_tap(ocr, ["组队码"], template_fallback="btn_team_code_tab", step="组队码tab"):
+            return False
+        await asyncio.sleep(2)
 
-        # 3. 点击"粘贴口令" — 用模板匹配
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            paste_btn = self.matcher.find_button(shot, "btn_paste_code", threshold=0.70)
-            if paste_btn:
-                await self.adb.tap(paste_btn.cx, paste_btn.cy)
-                await asyncio.sleep(1)
+        # 3. 点击"粘贴口令"
+        if not await self._ocr_tap(ocr, ["粘贴口令", "粘贴"], template_fallback="btn_paste_code", step="粘贴口令"):
+            return False
+        await asyncio.sleep(1)
 
-            # 4. 点击"加入队伍" — 用模板匹配
-            shot = await self.adb.screenshot()
-            if shot is not None:
-                join_btn = self.matcher.find_button(shot, "btn_join_team", threshold=0.70)
-                if join_btn:
-                    await self.adb.tap(join_btn.cx, join_btn.cy)
-                    await asyncio.sleep(2)
-                    return True
+        # 4. 点击"加入队伍"
+        if not await self._ocr_tap(ocr, ["加入队伍", "加入"], template_fallback="btn_join_team", step="加入队伍"):
+            return False
+        await asyncio.sleep(2)
 
-        logger.warning("[阶段5] 加入队伍流程异常")
-        return False
+        return True
 
     # ================================================================
     # 主运行循环
