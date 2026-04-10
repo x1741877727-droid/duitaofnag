@@ -120,7 +120,7 @@ def run_desktop_mode(port: int, mock: bool, host: str = ""):
 
     # pywebview 窗口
     window = webview.create_window(
-        title="游戏自动化控制台",
+        title="FightMaster",
         url=url,
         width=1280,
         height=800,

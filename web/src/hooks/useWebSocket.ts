@@ -32,6 +32,7 @@ export function useWebSocket() {
                     error: (v.error as string) || '',
                     stateDuration: (v.state_duration as number) || 0,
                     adbSerial: `emulator-${5554 + (v.index as number) * 2}`,
+                    stageTimes: (v.stage_times as Record<string, number>) || {},
                   }
                 }
               }

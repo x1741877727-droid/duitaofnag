@@ -49,6 +49,7 @@ class InstanceStatus:
     error: str = ""
     state_duration: float = 0.0
     _phase_start: float = field(default_factory=time.time, repr=False)
+    stage_times: dict = field(default_factory=dict)  # {"accelerator": 12.3, ...}
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +60,7 @@ class InstanceStatus:
             "state": self.state,
             "error": self.error,
             "state_duration": round(time.time() - self._phase_start, 1),
+            "stage_times": self.stage_times,
         }
 
 
@@ -252,6 +254,17 @@ class MultiRunnerService:
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
 
+    def _set_instance_state(self, idx: int, new_state: str):
+        """切换实例状态并记录上一阶段耗时"""
+        inst = self._instances[idx]
+        old_state = inst.state
+        if old_state != "init":
+            elapsed = round(time.time() - inst._phase_start, 1)
+            inst.stage_times[old_state] = elapsed
+        inst.state = new_state
+        inst._phase_start = time.time()
+        self._broadcast_state_change(idx, old_state, new_state)
+
     async def _run_instance(self, idx: int, runner: SingleInstanceRunner):
         """单个实例运行（在独立 task 中）"""
         try:
@@ -262,29 +275,24 @@ class MultiRunnerService:
                 self._instances[idx].error = "未能到达大厅"
                 return
 
-            self._instances[idx].state = "lobby"
-            self._broadcast_state_change(idx, "dismiss_popups", "lobby")
+            self._set_instance_state(idx, "lobby")
 
             # 队长执行: 阶段4(创建队伍) → 阶段6(地图设置)
             if runner.role == "captain":
-                # 阶段 4: 创建队伍
                 code = await runner.phase_team_create()
                 if code:
                     runner._team_code = code
                     logger.info(f"[实例{idx}] 队长已创建队伍，口令码: {code}")
-                    self._instances[idx].state = "team_create"
-                    self._broadcast_state_change(idx, "lobby", "team_create")
+                    self._set_instance_state(idx, "team_create")
                 else:
                     self._instances[idx].state = "error"
                     self._instances[idx].error = "创建队伍失败"
                     return
 
-                # 阶段 6: 地图设置
                 ok = await runner.phase_map_setup()
                 if not ok:
                     logger.warning(f"[实例{idx}] 地图设置失败")
-                self._instances[idx].state = "map_setup"
-                self._broadcast_state_change(idx, "team_create", "map_setup")
+                self._set_instance_state(idx, "map_setup")
 
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
@@ -298,14 +306,19 @@ class MultiRunnerService:
             self._broadcast_state_change(idx, "running", self._instances[idx].state)
 
     def _on_phase_change(self, idx: int, phase: Phase):
-        """phase 变化回调"""
+        """phase 变化回调，同时记录上一阶段耗时"""
         if idx not in self._instances:
             return
-        old_state = self._instances[idx].state
+        inst = self._instances[idx]
+        old_state = inst.state
         new_state = phase.value
-        self._instances[idx].state = new_state
-        self._instances[idx].error = ""
-        self._instances[idx]._phase_start = time.time()
+        # 记录上一阶段耗时
+        if old_state != "init":
+            elapsed = round(time.time() - inst._phase_start, 1)
+            inst.stage_times[old_state] = elapsed
+        inst.state = new_state
+        inst.error = ""
+        inst._phase_start = time.time()
         self._broadcast_state_change(idx, old_state, new_state)
 
     def _broadcast_state_change(self, idx: int, old: str, new: str):

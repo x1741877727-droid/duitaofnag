@@ -1,5 +1,6 @@
+import { useEffect } from 'react'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import { useAppStore } from '@/lib/store'
+import { useAppStore, type TeamGroup, type TeamRole } from '@/lib/store'
 import { Header } from '@/components/header'
 import { Dashboard } from '@/components/dashboard'
 import { SettingsView } from '@/components/settings-view'
@@ -7,7 +8,35 @@ import { LogDrawer } from '@/components/log-panel'
 
 function App() {
   useWebSocket()
-  const { currentView, showLogPanel } = useAppStore()
+  const { currentView, showLogPanel, setAccounts, setEmulators } = useAppStore()
+
+  // 启动时加载账号和模拟器（不用等进设置页）
+  useEffect(() => {
+    fetch('/api/accounts').then(r => r.json()).then((data: Record<string, unknown>[]) => {
+      if (Array.isArray(data) && data.length > 0) {
+        setAccounts(data.map(a => ({
+          index: (a.instance_index as number) ?? 0,
+          name: (a.nickname as string) || '',
+          running: false,
+          adbSerial: `emulator-${5554 + ((a.instance_index as number) ?? 0) * 2}`,
+          group: (a.group as TeamGroup) || 'A',
+          role: (a.role as TeamRole) || 'member',
+          nickname: (a.nickname as string) || '',
+          gameId: (a.game_id as string) || '',
+        })))
+      }
+    }).catch(() => {})
+    fetch('/api/emulators').then(r => r.json()).then(json => {
+      if (json.instances) {
+        setEmulators(json.instances.map((e: Record<string, unknown>) => ({
+          index: e.index as number,
+          name: e.name as string,
+          running: e.running as boolean,
+          adbSerial: (e.adb_serial as string) || `emulator-${5554 + (e.index as number) * 2}`,
+        })))
+      }
+    }).catch(() => {})
+  }, [])
 
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">

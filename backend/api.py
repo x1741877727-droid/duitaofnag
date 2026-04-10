@@ -163,7 +163,7 @@ class SettingsUpdate(BaseModel):
 # =====================
 
 def create_app(config: ConfigManager) -> FastAPI:
-    app = FastAPI(title="游戏自动化控制台", version="1.0")
+    app = FastAPI(title="FightMaster", version="1.0")
 
     app.add_middleware(
         CORSMiddleware,

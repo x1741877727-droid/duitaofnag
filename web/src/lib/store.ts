@@ -10,11 +10,9 @@ export interface PipelineStage {
 export const defaultPipelineStages: PipelineStage[] = [
   { key: 'accelerator', label: '加速器', states: ['accelerator'] },
   { key: 'launch_game', label: '启动游戏', states: ['launch_game'] },
-  { key: 'wait_login', label: '等待登录', states: ['wait_login'] },
-  { key: 'dismiss_popups', label: '清理弹窗', states: ['dismiss_popups'] },
+  { key: 'dismiss_popups', label: '清理弹窗', states: ['wait_login', 'dismiss_popups'] },
   { key: 'lobby', label: '进入大厅', states: ['lobby'] },
-  { key: 'team_create', label: '创建队伍', states: ['team_create'] },
-  { key: 'team_join', label: '加入队伍', states: ['team_join'] },
+  { key: 'team', label: '组队', states: ['team_create', 'team_join'] },
   { key: 'map_setup', label: '设置地图', states: ['map_setup'] },
   { key: 'ready', label: '准备就绪', states: ['ready'] },
   { key: 'in_game', label: '游戏中', states: ['in_game'] },
@@ -37,6 +35,7 @@ export interface Instance {
   error: string
   stateDuration: number
   adbSerial?: string
+  stageTimes?: Record<string, number>  // {"accelerator": 12.3, "launch_game": 8.1, ...}
 }
 
 export interface Emulator {
