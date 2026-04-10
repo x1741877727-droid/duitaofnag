@@ -364,17 +364,17 @@ class SingleInstanceRunner:
         # ── 步骤1: 在大厅找到并点击"组队"按钮 ──
         if not await self._ocr_tap(ocr, ["组队"], template_fallback="tab_team", step="打开组队面板"):
             return None
-        # 轮询等待面板出现（检测到"组队码"说明面板已打开）
+        # 轮询等待面板出现
         await self._wait_for_text(ocr, ["组队码", "邀开黑", "好友"], timeout=5)
 
-        # ── 步骤2: 点击"组队码" tab ──
-        if not await self._ocr_tap(ocr, ["组队码"], template_fallback="btn_team_code_tab", step="组队码tab"):
+        # ── 步骤2: 点击"组队码" tab（OCR优先，面板内文字比模板更可靠）──
+        if not await self._ocr_tap(ocr, ["组队码"], template_fallback="", step="组队码tab"):
             return None
-        # 轮询等待组队码面板（检测到"分享"说明已切换）
+        # 轮询等待组队码面板
         await self._wait_for_text(ocr, ["分享", "口令码", "粘贴"], timeout=5)
 
-        # ── 步骤3: 点击"分享组队口令码"或"分享" ──
-        if not await self._ocr_tap(ocr, ["分享组队口令码", "分享口令", "分享"], template_fallback="btn_share_team_code", step="分享口令码"):
+        # ── 步骤3: 点击"分享组队口令码" ──
+        if not await self._ocr_tap(ocr, ["分享组队口令码", "分享口令"], template_fallback="btn_share_team_code", step="分享口令码"):
             return None
         await asyncio.sleep(0.5)
 
