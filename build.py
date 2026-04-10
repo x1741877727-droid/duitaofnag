@@ -138,17 +138,12 @@ def build_pyinstaller():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 加密密钥（防止反编译 .pyc 字节码）
-    ENCRYPT_KEY = "GameBot2026!Kx9z"  # 16 字节 AES key
-
-    # 生成 spec 内容
+    # 生成 spec 内容 — 单文件 exe
     spec_content = f"""
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
 ROOT = {repr(ROOT)}
-
-block_cipher = None
 
 a = Analysis(
     [os.path.join(ROOT, 'backend', 'main.py')],
@@ -169,7 +164,6 @@ a = Analysis(
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
         'rapidocr',
-        'engineio.async_drivers.threading',
         'backend',
         'backend.api',
         'backend.config',
@@ -182,10 +176,9 @@ a = Analysis(
         'backend.automation.ocr_dismisser',
         'backend.automation.popup_dismisser',
     ],
-    cipher=block_cipher,
 )
 
-pyz = PYZ(a.pure, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -198,8 +191,6 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon=None,
-    onefile=True,
 )
 """
 
@@ -210,8 +201,6 @@ exe = EXE(
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--clean",
-        "--onefile",                      # 单文件 exe
-        "--key", ENCRYPT_KEY,             # AES 加密字节码
         "--distpath", os.path.join(OUTPUT_DIR, "dist"),
         "--workpath", os.path.join(OUTPUT_DIR, "build"),
         spec_path,
