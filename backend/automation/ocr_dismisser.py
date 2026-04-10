@@ -291,7 +291,7 @@ class OcrDismisser:
         popups_closed = 0
         stuck_count = 0
         lobby_confirm = 0  # 连续确认大厅次数
-        LOBBY_CONFIRM_NEEDED = 3
+        LOBBY_CONFIRM_NEEDED = 2  # 2次确认即可（计数器已不会被模板miss误重置）
 
         for rnd in range(self.max_rounds):
             shot = await device.screenshot()

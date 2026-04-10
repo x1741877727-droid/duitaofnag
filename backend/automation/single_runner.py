@@ -389,7 +389,7 @@ class SingleInstanceRunner:
             if team_battle_hit:
                 logger.info(f"[阶段6] 切换到团队竞技 ({team_battle_hit.cx},{team_battle_hit.cy})")
                 await self.adb.tap(team_battle_hit.cx, team_battle_hit.cy)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 # 重新 OCR
                 shot = await self.adb.screenshot()
                 if shot is not None:
@@ -463,90 +463,106 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_team_create(self) -> Optional[str]:
-        """队长创建队伍并获取口令码，返回口令码"""
+        """队长创建队伍并获取口令码（优化版：最少OCR调用）"""
         self.phase = Phase.TEAM_CREATE
         logger.info("[阶段4] 队长创建队伍")
 
-        # 禁用守卫（组队面板的X按钮会被守卫误当弹窗关闭）
+        # 禁用守卫
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = False
 
-        # 先清空剪贴板，防止残留组队码触发"使用组队码加入"弹窗
+        # 清空剪贴板
         await self.adb.set_clipboard("")
-        await asyncio.sleep(0.3)
 
         ocr = OcrDismisser()
 
-        # ── 步骤1: 在大厅找到并点击"组队"按钮（OCR优先，左侧栏文字更可靠）──
-        if not await self._ocr_tap(ocr, ["组队"], template_fallback="", step="打开组队面板"):
+        # ── 步骤1: OCR找"组队"并点击 ──
+        shot = await self.adb.screenshot()
+        if shot is None:
+            self._restore_guard()
             return None
-        # 轮询等待面板出现
-        await self._wait_for_text(ocr, ["组队码", "邀开黑", "好友"], timeout=5)
-
-        # ── 步骤2: 点击"组队码" tab（OCR优先，面板内文字比模板更可靠）──
-        if not await self._ocr_tap(ocr, ["组队码"], template_fallback="", step="组队码tab"):
+        hits = ocr._ocr_all(shot)
+        clicked = False
+        for h in hits:
+            if "组队" in h.text and h.cx < 80:
+                logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
+                await self.adb.tap(h.cx, h.cy)
+                clicked = True
+                break
+        if not clicked:
+            logger.warning("[阶段4] 未找到组队按钮")
+            self._restore_guard()
             return None
-        # 轮询等待组队码面板
-        await self._wait_for_text(ocr, ["分享", "口令码", "粘贴"], timeout=5)
 
-        # ── 步骤3: 点击"分享组队口令码" ──
-        if not await self._ocr_tap(ocr, ["分享组队口令码", "分享口令"], template_fallback="btn_share_team_code", step="分享口令码"):
-            return None
-        await asyncio.sleep(0.5)
-
-        logger.info("[阶段4] 口令码已复制到剪贴板")
-
-        # 关闭面板：可能有多层（组队码弹窗 + 好友列表侧栏）
-        for _ in range(3):
-            await asyncio.sleep(0.5)
+        # ── 步骤2: 轮询等面板+找"组队码"一起做 ──
+        for _ in range(10):
+            await asyncio.sleep(0.3)
             shot = await self.adb.screenshot()
             if shot is None:
-                break
-
-            # 检查是否已回到大厅（有"开始游戏"按钮）
-            hits = ocr._ocr_all(shot)
-            if any("开始游戏" in h.text for h in hits):
-                break
-
-            # 优先找 X 关闭按钮（模板匹配）
-            close = self.matcher.find_dialog_close(shot)
-            if close:
-                logger.info(f"[阶段4] 点击关闭按钮 ({close.cx},{close.cy})")
-                await self.adb.tap(close.cx, close.cy)
                 continue
-
-            # OCR 找"关闭"或"×"
+            hits = ocr._ocr_all(shot)
             for h in hits:
-                if h.text in ("×", "✕", "X", "关闭"):
-                    logger.info(f"[阶段4] OCR找到关闭 '{h.text}' ({h.cx},{h.cy})")
+                if "组队码" in h.text and h.cy > 600:
+                    logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     break
             else:
-                # 兜底：点击面板外空白区域
-                h, w = shot.shape[:2]
-                await self.adb.tap(w * 3 // 4, h // 2)
+                continue
+            break
 
-        logger.info("[阶段4] 已关闭组队面板")
-
-        # 恢复守卫
-        if hasattr(self.adb, 'guard_enabled'):
-            self.adb.guard_enabled = True
-
-        return "clipboard"
-
-    async def _wait_for_text(self, ocr: OcrDismisser, keywords: list[str],
-                             timeout: float = 5) -> bool:
-        """轮询等待画面出现指定文字，快电脑秒过，慢电脑也能等到"""
-        for _ in range(int(timeout / 0.5)):
-            await asyncio.sleep(0.5)
+        # ── 步骤3: 轮询等组队码面板+找"分享"一起做 ──
+        for _ in range(10):
+            await asyncio.sleep(0.3)
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
-            # 先模板快速检查大厅状态变化
+            # 模板优先
+            tmpl = self.matcher.match_one(shot, "btn_share_team_code", threshold=0.65)
+            if tmpl:
+                logger.info(f"[阶段4] 模板命中分享按钮 ({tmpl.cx},{tmpl.cy})")
+                await self.adb.tap(tmpl.cx, tmpl.cy)
+                break
+            # OCR 兜底
             hits = ocr._ocr_all(shot)
-            if any(kw in h.text for h in hits for kw in keywords):
-                return True
-        return False
+            for h in hits:
+                if "分享" in h.text and "口令" in h.text:
+                    logger.info(f"[阶段4] OCR命中 '{h.text}' ({h.cx},{h.cy})")
+                    await self.adb.tap(h.cx, h.cy)
+                    break
+            else:
+                continue
+            break
+
+        logger.info("[阶段4] 口令码已复制到剪贴板")
+        await asyncio.sleep(0.3)
+
+        # ── 关闭面板：模板找X → 空白区域，轮询直到回大厅 ──
+        for _ in range(4):
+            shot = await self.adb.screenshot()
+            if shot is None:
+                break
+            # 模板检测是否回到大厅
+            if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7):
+                break
+            # 模板找 X 关闭
+            close = self.matcher.find_dialog_close(shot)
+            if close:
+                logger.info(f"[阶段4] 关闭按钮 ({close.cx},{close.cy})")
+                await self.adb.tap(close.cx, close.cy)
+                await asyncio.sleep(0.3)
+                continue
+            # 点空白区域
+            h, w = shot.shape[:2]
+            await self.adb.tap(w * 3 // 4, h // 2)
+            await asyncio.sleep(0.3)
+
+        logger.info("[阶段4] 已关闭组队面板")
+        self._restore_guard()
+        return "clipboard"
+
+    def _restore_guard(self):
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = True
 
     async def _ocr_tap(self, ocr: OcrDismisser, keywords: list[str],
                         template_fallback: str = "", step: str = "",
