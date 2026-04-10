@@ -180,7 +180,7 @@ class SingleInstanceRunner:
         self.target_map = target_map
         self.phase = Phase.INIT
         self.popup_dismisser = PopupDismisser(matcher)
-        self.ocr_dismisser = OcrDismisser(max_rounds=25, interval=2.0)
+        self.ocr_dismisser = OcrDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
 
     # ================================================================
