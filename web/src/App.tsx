@@ -7,23 +7,18 @@ import { Header } from "./components/Header";
 
 function App() {
   useWebSocket();
-
   const { activeView, showLogs } = useAppStore();
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden" style={{ background: "var(--bg-primary)" }}>
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: "var(--bg)" }}>
       <Header />
-
       <div className="flex-1 flex min-h-0">
-        {/* 主内容区 */}
         <main className="flex-1 overflow-y-auto">
           {activeView === "dashboard" && <Dashboard />}
           {activeView === "settings" && <Settings />}
         </main>
-
-        {/* 日志侧栏 */}
         {showLogs && (
-          <aside className="w-[380px] shrink-0 border-l border-slate-800/60 flex flex-col animate-slide-in">
+          <aside className="w-[360px] shrink-0 border-l animate-in" style={{ borderColor: "var(--border)" }}>
             <LogPanel />
           </aside>
         )}
