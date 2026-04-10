@@ -193,21 +193,56 @@ async def main():
     elif step == "dump":
         await ocr_dump("当前画面")
     elif step == "all":
+        target = sys.argv[2] if len(sys.argv) > 2 else "狙击团竞"
+
+        # 先检查大厅模式名——如果已经是目标地图，跳过选择
+        print("\n=== 预检: 大厅当前模式 ===")
+        shot = await adb.screenshot()
+        if shot is not None:
+            hits = ocr._ocr_all(shot)
+            lobby_text = " ".join(h.text for h in hits if h.cy < 120 and h.cx < 400)
+            print(f"  大厅模式区域文字: '{lobby_text}'")
+
+            # 构建检测关键词
+            check_keywords = [target]
+            if "狙击" in target:
+                check_keywords.extend(["击团竞", "大桥"])
+            if "经典团竞" in target:
+                check_keywords.extend(["经典团竞", "仓库"])
+
+            already_set = any(kw in lobby_text for kw in check_keywords)
+            if already_set:
+                print(f"  当前已是 '{target}'，仅检查补位设置")
+                if not await step1_open_map_panel():
+                    return
+                # 直接到团队竞技（可能已在）
+                shot2 = await adb.screenshot()
+                if shot2 is not None:
+                    hits2 = ocr._ocr_all(shot2)
+                    if not any("补位" in h.text for h in hits2):
+                        # 没看到补位按钮，可能需要先点团队竞技
+                        await step2_select_team_battle()
+                        await asyncio.sleep(0.5)
+                await step4_disable_auto_fill()
+                await step5_confirm()
+                await asyncio.sleep(0.5)
+                print("=== 快速完成 ===")
+                return
+
+        # 正常完整流程
         if not await step1_open_map_panel():
             return
         if not await step2_select_team_battle():
             return
         await asyncio.sleep(1)
-        await ocr_dump("团队竞技面板")
-        target = sys.argv[2] if len(sys.argv) > 2 else "狙击团竞"
         if not await step3_select_map(target):
             print("  地图未找到，dump当前面板文字:")
             await ocr_dump("查找地图失败")
             return
         await step4_disable_auto_fill()
         await step5_confirm()
-        await asyncio.sleep(1)
-        await ocr_dump("完成后")
+        await asyncio.sleep(0.5)
+        print("=== 完成 ===")
     else:
         print("Usage: python _test_map.py [1|2|3|4|5|dump|all]")
         print("  1    - 打开地图面板")
