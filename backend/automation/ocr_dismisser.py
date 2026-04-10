@@ -43,7 +43,8 @@ LEFT_GAME_KEYWORDS = ["CDN节点第", "六花官方通知"]
 
 # 弹窗关闭文字（OCR识别后点击）
 CLOSE_TEXT = ["关闭", "×"]
-CONFIRM_TEXT = ["确定", "确认", "知道了", "我知道了", "同意", "暂不", "跳过", "不需要"]
+CONFIRM_TEXT = ["确定", "确认", "知道了", "我知道了", "同意", "暂不", "跳过", "不需要",
+                "点击屏幕继续", "点击屏幕", "点击继续"]
 CHECKBOX_TEXT = ["今日内不再弹出", "今日不再弹出", "不再弹出", "不再提醒"]
 
 
@@ -196,6 +197,9 @@ class OcrDismisser:
         for h in hits:
             for kw in CONFIRM_TEXT:
                 if kw in h.text:
+                    # "点击屏幕"类 → 点击屏幕中央而不是文字位置
+                    if "屏幕" in kw or "继续" in kw:
+                        return (640, 400, f"点击屏幕:{h.text}")
                     return (h.cx, h.cy, f"确认:{h.text}")
 
         # 级别3: 在右上角区域找小型高对比度元素（通用X检测）
