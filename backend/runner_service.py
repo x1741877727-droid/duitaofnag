@@ -390,6 +390,7 @@ class MultiRunnerService:
             root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidates = [
             os.path.join(root, "fixtures", "templates"),
+            os.path.join(root, "_internal", "fixtures", "templates"),
             os.path.join(root, "backend", "recognition", "templates"),
         ]
         for d in candidates:

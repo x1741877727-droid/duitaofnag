@@ -132,7 +132,10 @@ def run_desktop_mode(port: int, mock: bool, host: str = ""):
 
 def _mount_frontend(app):
     """挂载前端静态文件（如果已构建）"""
+    # PyInstaller 把数据文件放在 _internal/ 里
     web_dist = os.path.join(ROOT_DIR, "web", "dist")
+    if not os.path.isdir(web_dist):
+        web_dist = os.path.join(ROOT_DIR, "_internal", "web", "dist")
     if os.path.isdir(web_dist):
         from fastapi.staticfiles import StaticFiles
         from fastapi.responses import FileResponse
