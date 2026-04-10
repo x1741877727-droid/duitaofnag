@@ -92,7 +92,15 @@ def detect_ldplayer_instances(ldplayer_path: str) -> list[dict]:
             [ldconsole, "list2"],
             capture_output=True, timeout=10,
         )
-        output = result.stdout.decode("utf-8", errors="replace").strip()
+        # ldconsole 在中文 Windows 上输出 GBK 编码
+        for enc in ("utf-8", "gbk"):
+            try:
+                output = result.stdout.decode(enc).strip()
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            output = result.stdout.decode("utf-8", errors="replace").strip()
         if not output:
             return []
 
