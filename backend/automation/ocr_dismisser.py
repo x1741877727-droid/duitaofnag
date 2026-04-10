@@ -318,7 +318,7 @@ class OcrDismisser:
                     logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次，弹窗清理完成！关闭了{popups_closed}个弹窗")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.info(f"[R{rnd+1}] 大厅检测 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                await asyncio.sleep(0.8)  # 等一下看有没有新弹窗冒出来
+                await asyncio.sleep(0.4)  # 等一下看有没有新弹窗冒出来
                 continue
             else:
                 lobby_confirm = 0
@@ -333,7 +333,7 @@ class OcrDismisser:
                     logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次(OCR)，完成！")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.info(f"[R{rnd+1}] 大厅检测OCR ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.4)
                 continue
 
             if state == ScreenState.LEFT_GAME:

@@ -449,6 +449,10 @@ class SingleInstanceRunner:
         self.phase = Phase.TEAM_CREATE
         logger.info("[阶段4] 队长创建队伍")
 
+        # 先清空剪贴板，防止残留组队码触发"使用组队码加入"弹窗
+        await self.adb.set_clipboard("")
+        await asyncio.sleep(0.3)
+
         ocr = OcrDismisser()
 
         # ── 步骤1: 在大厅找到并点击"组队"按钮（OCR优先，左侧栏文字更可靠）──
