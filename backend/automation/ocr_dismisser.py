@@ -1,73 +1,49 @@
 """
-OCR驱动的弹窗清理器
-不依赖模板穷举，通过识别屏幕文字来决定点击哪里。
-逻辑：
-  1. OCR识别全屏文字
-  2. 有"关闭类"文字 → 点击它
-  3. 有"确认类"文字 → 点击它
-  4. 有"开始游戏"且无弹窗文字 → 判定在大厅
-  5. 都没有 → 点击屏幕中央，等待下一轮
+分层弹窗清理器
+速度优先：模板匹配(20ms) → 颜色检测(5ms) → RapidOCR(100ms) → 固定坐标(0ms)
 """
 
 import asyncio
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# 勾选类关键词（点了不会关闭弹窗，只是打勾，之后还需要找X关闭）
-CHECKBOX_KEYWORDS = [
-    "今日内不再弹出",
-    "今日不再弹出",
-    "不再弹出",
-    "今日内不再提醒",
-    "不再提醒",
-]
+# ── 关键词配置 ──
 
-# 关闭类关键词（点了会直接关闭弹窗）
-CLOSE_KEYWORDS = [
-    "关闭",
-]
+# 勾选类（点了不关闭，只打勾，之后还需要找X）
+CHECKBOX_KEYWORDS = ["今日内不再弹出", "今日不再弹出", "不再弹出", "不再提醒"]
 
-# 确认/跳过类关键词（点了会关闭弹窗）
-CONFIRM_KEYWORDS = [
-    "确定",
-    "确认",
-    "知道了",
-    "我知道了",
-    "同意",
-    "已了解",
-    "不需要",
-    "暂不",
-    "跳过",
-]
+# 关闭类（点了直接关闭弹窗）
+CLOSE_KEYWORDS = ["关闭"]
 
-# 大厅标志关键词
-LOBBY_KEYWORDS = [
-    "开始游戏",
-]
+# 确认类（点了关闭弹窗）
+CONFIRM_KEYWORDS = ["确定", "确认", "知道了", "我知道了", "同意", "已了解",
+                    "不需要", "暂不", "跳过"]
 
-# 弹窗标志关键词（如果同时出现这些，说明还有弹窗）
-POPUP_INDICATORS = [
-    "活动",
-    "公告",
-    "更新",
-    "奖励",
-    "限时",
-    "立即前往",
-    "前往观看",
-    "分享",
-    "邀请",
+# 大厅标志
+LOBBY_KEYWORDS = ["开始游戏"]
+
+# 弹窗指标（有这些说明还有弹窗遮挡）
+POPUP_INDICATORS = ["活动", "公告", "更新", "奖励", "限时", "立即前往",
+                    "前往观看", "邀请"]
+
+# 固定X按钮位置（从实测中收集，按优先级排序）
+FIXED_X_POSITIONS = [
+    (1217, 92),   # 活动弹窗右上X（琉璃星纱、新春共创赛等）
+    (1227, 47),   # 活动详情页右上X（老六日等）
+    (1092, 97),   # 公告弹窗X
 ]
 
 
 @dataclass
 class OcrHit:
-    """OCR识别结果"""
     text: str
-    cx: int  # 文字区域中心x
-    cy: int  # 文字区域中心y
+    cx: int
+    cy: int
     confidence: float
 
 
@@ -80,44 +56,70 @@ class DismissResult:
 
 
 class OcrDismisser:
-    """基于OCR的弹窗清理器"""
+    """分层弹窗清理器：模板 → 颜色 → OCR → 固定坐标"""
 
-    def __init__(self, max_rounds: int = 25, interval: float = 2.0):
+    def __init__(self, max_rounds: int = 25, interval: float = 1.5):
         self.max_rounds = max_rounds
         self.interval = interval
         self._ocr = None
 
+    # ── 层1: 模板匹配（由外部matcher提供，这里不重复） ──
+
+    # ── 层2: 颜色检测 — 在右上角找X按钮颜色簇 ──
+
+    def _find_x_by_color(self, screenshot: np.ndarray) -> tuple[int, int] | None:
+        """在右上1/4区域找白色/浅灰色X按钮的像素簇"""
+        h, w = screenshot.shape[:2]
+        # 只扫右上角 (弹窗X几乎都在这里)
+        roi = screenshot[0:h//3, w*2//3:]
+        ox, oy = w*2//3, 0
+
+        # 白色/浅灰X按钮: 高亮像素在暗背景上
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # 找亮度>200的像素（X按钮通常是白色）
+        _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        # 找轮廓
+        contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in contours:
+            area = cv2.contourArea(c)
+            x, y, cw, ch = cv2.boundingRect(c)
+            # X按钮大约 15x15 到 40x40 像素
+            if 100 < area < 2000 and 0.5 < cw/max(ch,1) < 2.0:
+                cx = ox + x + cw // 2
+                cy = oy + y + ch // 2
+                return (cx, cy)
+        return None
+
+    # ── 层3: RapidOCR ──
+
     def _get_ocr(self):
-        """懒加载EasyOCR（首次调用会下载模型，约30秒）"""
         if self._ocr is None:
-            logger.info("初始化 EasyOCR ...")
-            import easyocr
-            self._ocr = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
-            logger.info("EasyOCR 初始化完成")
+            logger.info("初始化 RapidOCR ...")
+            from rapidocr import RapidOCR
+            self._ocr = RapidOCR()
+            logger.info("RapidOCR 初始化完成")
         return self._ocr
 
-    def ocr_screen(self, screenshot) -> list[OcrHit]:
-        """对截图做OCR，返回识别到的文字列表"""
-        import numpy as np
-        ocr = self._get_ocr()
-
+    def ocr_screen(self, screenshot: np.ndarray) -> list[OcrHit]:
+        """RapidOCR识别，返回文字列表"""
         if not isinstance(screenshot, np.ndarray):
             return []
-
-        # EasyOCR 返回 [(bbox, text, confidence), ...]
-        # bbox = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-        results = ocr.readtext(screenshot)
+        ocr = self._get_ocr()
+        result = ocr(screenshot)
         hits = []
-        for (box, text, conf) in results:
-            xs = [p[0] for p in box]
-            ys = [p[1] for p in box]
-            cx = int(sum(xs) / 4)
-            cy = int(sum(ys) / 4)
-            hits.append(OcrHit(text=text, cx=cx, cy=cy, confidence=conf))
+        if result and result.boxes is not None:
+            for box, text, conf in zip(result.boxes, result.txts, result.scores):
+                # box: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                cx = int(sum(xs) / 4)
+                cy = int(sum(ys) / 4)
+                hits.append(OcrHit(text=text, cx=cx, cy=cy, confidence=conf))
         return hits
 
+    # ── 工具方法 ──
+
     def _find_keyword_hit(self, hits: list[OcrHit], keywords: list[str]) -> OcrHit | None:
-        """在OCR结果中查找包含关键词的文字，返回第一个匹配"""
         for kw in keywords:
             for hit in hits:
                 if kw in hit.text:
@@ -125,127 +127,113 @@ class OcrDismisser:
         return None
 
     def _has_any_keyword(self, hits: list[OcrHit], keywords: list[str]) -> bool:
-        """OCR结果中是否包含任一关键词"""
         all_text = " ".join(h.text for h in hits)
         return any(kw in all_text for kw in keywords)
 
     def _is_at_lobby(self, hits: list[OcrHit]) -> bool:
-        """判断是否在大厅（有"开始游戏"且无弹窗指标）"""
         has_lobby = self._has_any_keyword(hits, LOBBY_KEYWORDS)
         has_popup = self._has_any_keyword(hits, POPUP_INDICATORS)
         return has_lobby and not has_popup
 
-    async def dismiss_all(self, device, matcher=None) -> DismissResult:
-        """
-        循环清理弹窗直到到达大厅。
+    # ── 主循环 ──
 
-        Args:
-            device: ADBController实例
-            matcher: ScreenMatcher实例（可选，用于辅助大厅检测）
-        """
+    async def dismiss_all(self, device, matcher=None) -> DismissResult:
         popups_closed = 0
         no_change_count = 0
-        last_action = ""
 
-        for round_num in range(self.max_rounds):
+        for rnd in range(self.max_rounds):
             shot = await device.screenshot()
             if shot is None:
                 await asyncio.sleep(1)
                 continue
 
-            # OCR识别
-            hits = self.ocr_screen(shot)
-            all_text = " | ".join(f"{h.text}({h.cx},{h.cy})" for h in hits[:15])
-            logger.info(f"[弹窗R{round_num+1}] OCR: {all_text}")
-
-            # 1. 检查是否到大厅
-            if self._is_at_lobby(hits):
-                # 二次确认：用模板匹配验证
-                if matcher and matcher.is_at_lobby(shot):
-                    logger.info(f"[弹窗R{round_num+1}] 到达大厅 ✓ (关闭{popups_closed}个弹窗)")
-                    return DismissResult(True, popups_closed, "lobby", round_num + 1)
-                # 模板也没有也可能是对的（模板不够全）
-                if not matcher:
-                    logger.info(f"[弹窗R{round_num+1}] OCR判定在大厅 ✓")
-                    return DismissResult(True, popups_closed, "lobby", round_num + 1)
-
-            # 2. 先检查是否有复选框（"今日内不再弹出"），勾选后找X关闭
-            checkbox_hit = self._find_keyword_hit(hits, CHECKBOX_KEYWORDS)
-            if checkbox_hit:
-                logger.info(f"[弹窗R{round_num+1}] 勾选: '{checkbox_hit.text}' @ ({checkbox_hit.cx},{checkbox_hit.cy})")
-                await device.tap(checkbox_hit.cx, checkbox_hit.cy)
-                await asyncio.sleep(0.5)
-                # 勾选后立刻找X按钮关闭
-                # 方法1: 用模板匹配找X
-                if matcher:
-                    shot2 = await device.screenshot()
-                    if shot2 is not None:
-                        x_hit = matcher.find_close_button(shot2)
-                        if x_hit:
-                            logger.info(f"[弹窗R{round_num+1}] 勾选后点X: ({x_hit.cx},{x_hit.cy})")
-                            await device.tap(x_hit.cx, x_hit.cy)
-                            popups_closed += 1
-                            no_change_count = 0
-                            await asyncio.sleep(self.interval)
-                            continue
-                # 方法2: 没找到X，在右上角区域点击（弹窗X通常在右上角）
-                logger.info(f"[弹窗R{round_num+1}] 勾选后点右上角X区域")
-                await device.tap(1217, 92)  # 大多数活动弹窗X的位置
-                popups_closed += 1
-                no_change_count = 0
-                await asyncio.sleep(self.interval)
-                continue
-
-            # 3. 找"关闭类"文字
-            close_hit = self._find_keyword_hit(hits, CLOSE_KEYWORDS)
-            if close_hit:
-                logger.info(f"[弹窗R{round_num+1}] 点击关闭: '{close_hit.text}' @ ({close_hit.cx},{close_hit.cy})")
-                await device.tap(close_hit.cx, close_hit.cy)
-                popups_closed += 1
-                no_change_count = 0
-                await asyncio.sleep(self.interval)
-                continue
-
-            # 4. 找"确认类"文字
-            confirm_hit = self._find_keyword_hit(hits, CONFIRM_KEYWORDS)
-            if confirm_hit:
-                logger.info(f"[弹窗R{round_num+1}] 点击确认: '{confirm_hit.text}' @ ({confirm_hit.cx},{confirm_hit.cy})")
-                await device.tap(confirm_hit.cx, confirm_hit.cy)
-                popups_closed += 1
-                no_change_count = 0
-                await asyncio.sleep(self.interval)
-                continue
-
-            # 5. 模板匹配兜底：找X按钮
+            # ━━ 层1: 模板匹配找X ━━ (~20ms)
             if matcher:
                 x_hit = matcher.find_close_button(shot)
-                if x_hit:
-                    logger.info(f"[弹窗R{round_num+1}] 模板X: '{x_hit.name}' @ ({x_hit.cx},{x_hit.cy})")
+                if x_hit and x_hit.confidence > 0.80:
+                    logger.info(f"[R{rnd+1}] 模板X: {x_hit.name} {x_hit.confidence:.2f} @ ({x_hit.cx},{x_hit.cy})")
                     await device.tap(x_hit.cx, x_hit.cy)
                     popups_closed += 1
                     no_change_count = 0
                     await asyncio.sleep(self.interval)
                     continue
 
-            # 6. 什么都没找到 → 轮换点击不同位置
+            # ━━ 层2: 颜色检测找X ━━ (~5ms)
+            color_pos = self._find_x_by_color(shot)
+            if color_pos:
+                logger.info(f"[R{rnd+1}] 颜色X @ {color_pos}")
+                await device.tap(color_pos[0], color_pos[1])
+                popups_closed += 1
+                no_change_count = 0
+                await asyncio.sleep(self.interval)
+                continue
+
+            # ━━ 层3: OCR识别文字 ━━ (~100-200ms)
+            hits = self.ocr_screen(shot)
+            all_text = " | ".join(f"{h.text}" for h in hits[:12])
+            logger.info(f"[R{rnd+1}] OCR: {all_text}")
+
+            # 检查大厅
+            if self._is_at_lobby(hits):
+                if matcher and matcher.is_at_lobby(shot):
+                    logger.info(f"[R{rnd+1}] 到达大厅 ✓ (关闭{popups_closed}个)")
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                if not matcher:
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+
+            # 复选框 → 勾选后点X
+            cb = self._find_keyword_hit(hits, CHECKBOX_KEYWORDS)
+            if cb:
+                logger.info(f"[R{rnd+1}] 勾选: '{cb.text}' @ ({cb.cx},{cb.cy})")
+                await device.tap(cb.cx, cb.cy)
+                await asyncio.sleep(0.5)
+                # 勾选后用模板找X
+                shot2 = await device.screenshot()
+                if shot2 is not None and matcher:
+                    x2 = matcher.find_close_button(shot2)
+                    if x2:
+                        await device.tap(x2.cx, x2.cy)
+                        popups_closed += 1
+                        no_change_count = 0
+                        await asyncio.sleep(self.interval)
+                        continue
+                # 兜底：点固定X位置
+                await device.tap(1217, 92)
+                popups_closed += 1
+                no_change_count = 0
+                await asyncio.sleep(self.interval)
+                continue
+
+            # 关闭类文字
+            close = self._find_keyword_hit(hits, CLOSE_KEYWORDS)
+            if close:
+                logger.info(f"[R{rnd+1}] 点关闭: '{close.text}' @ ({close.cx},{close.cy})")
+                await device.tap(close.cx, close.cy)
+                popups_closed += 1
+                no_change_count = 0
+                await asyncio.sleep(self.interval)
+                continue
+
+            # 确认类文字
+            confirm = self._find_keyword_hit(hits, CONFIRM_KEYWORDS)
+            if confirm:
+                logger.info(f"[R{rnd+1}] 点确认: '{confirm.text}' @ ({confirm.cx},{confirm.cy})")
+                await device.tap(confirm.cx, confirm.cy)
+                popups_closed += 1
+                no_change_count = 0
+                await asyncio.sleep(self.interval)
+                continue
+
+            # ━━ 层4: 固定坐标轮换 ━━
             no_change_count += 1
-            positions = [
-                (640, 400),   # 屏幕中央
-                (100, 650),   # 左下
-                (1200, 650),  # 右下
-                (640, 680),   # 底部中央
-            ]
-            pos = positions[no_change_count % len(positions)]
-            logger.info(f"[弹窗R{round_num+1}] 无匹配, 点击{pos}")
+            pos = FIXED_X_POSITIONS[no_change_count % len(FIXED_X_POSITIONS)]
+            logger.info(f"[R{rnd+1}] 固定坐标: {pos}")
             await device.tap(pos[0], pos[1])
             await asyncio.sleep(self.interval)
 
-            # 连续5轮无变化，可能已经在大厅但检测不到
-            if no_change_count >= 5:
-                logger.warning(f"[弹窗R{round_num+1}] 连续{no_change_count}轮无匹配")
-                # 强制检查大厅
-                if matcher and matcher.is_at_lobby(shot):
-                    return DismissResult(True, popups_closed, "lobby_forced", round_num + 1)
+            if no_change_count >= 5 and matcher:
+                if matcher.is_at_lobby(shot):
+                    return DismissResult(True, popups_closed, "lobby_forced", rnd + 1)
 
         logger.warning(f"弹窗清理超时 ({self.max_rounds}轮)")
         return DismissResult(False, popups_closed, "timeout", self.max_rounds)
