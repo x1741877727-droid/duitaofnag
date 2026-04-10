@@ -378,12 +378,13 @@ class SingleInstanceRunner:
 
         logger.info("[阶段4] 口令码已复制到剪贴板")
 
-        # 关闭组队码面板
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            close = self.matcher.find_dialog_close(shot)
-            if close:
-                await self.adb.tap(close.cx, close.cy)
+        # 关闭组队面板：按返回键退出侧滑面板
+        await self.adb.key_event("KEYCODE_BACK")
+        await asyncio.sleep(0.5)
+        # 再按一次确保回到大厅
+        await self.adb.key_event("KEYCODE_BACK")
+        await asyncio.sleep(0.5)
+        logger.info("[阶段4] 已关闭组队面板")
 
         return "clipboard"
 
