@@ -152,23 +152,12 @@ class SingleInstanceRunner:
         await asyncio.sleep(8)  # 游戏启动需要时间
 
         # 等待游戏加载完成，最多90秒
-        # 只要检测到"公告"或"开始游戏"或弹窗关键词就说明加载完了
-        # 如果中途有弹窗（如"内存过低"），直接点掉
+        # GuardedADB 会自动处理加载中弹出的系统弹窗（内存提醒等）
         for attempt in range(45):
-            shot = await self.adb.screenshot()
+            shot = await self.adb.screenshot()  # 守卫自动清弹窗
             if shot is None:
                 await asyncio.sleep(2)
                 continue
-
-            # 先检查：如果有弹窗遮罩，尝试点掉（可能是内存提醒等系统弹窗）
-            if self.ocr_dismisser._has_overlay(shot):
-                target = self.ocr_dismisser._find_close_target(shot, self.matcher)
-                if target:
-                    x, y, method = target
-                    logger.info(f"[阶段1] 加载中发现弹窗，点击: {method} @ ({x},{y})")
-                    await self.adb.tap(x, y)
-                    await asyncio.sleep(1)
-                    continue
 
             # 用OCR检测当前画面
             hits = self.ocr_dismisser.ocr_screen(shot)
@@ -222,7 +211,16 @@ class SingleInstanceRunner:
         self.phase = Phase.DISMISS_POPUPS
         logger.info("[阶段3] 开始弹窗清理 (OCR模式)")
 
+        # 关闭守卫：这个阶段自己完整处理弹窗，避免和守卫冲突
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = False
+
         result = await self.ocr_dismisser.dismiss_all(self.adb, self.matcher)
+
+        # 恢复守卫
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = True
+
         logger.info(f"[阶段3] 结果: {result.final_state}, 关闭{result.popups_closed}个弹窗, 共{result.rounds}轮")
         return result.success
 

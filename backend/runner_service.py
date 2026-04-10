@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from .automation.adb_lite import ADBController
+from .automation.guarded_adb import GuardedADB
 from .automation.screen_matcher import ScreenMatcher
 from .automation.single_runner import SingleInstanceRunner, Phase
 from .config import AccountConfig, Settings
@@ -138,7 +139,12 @@ class MultiRunnerService:
             idx = account.instance_index
             serial = f"emulator-{5554 + idx * 2}"
 
-            adb = ADBController(serial, adb_path)
+            raw_adb = ADBController(serial, adb_path)
+
+            # 用 GuardedADB 包装：任何阶段截图时自动清除意外弹窗
+            from .automation.ocr_dismisser import OcrDismisser
+            dismisser = OcrDismisser(max_rounds=25)
+            guarded_adb = GuardedADB(raw_adb, dismisser, matcher)
 
             # phase 变化回调
             def make_phase_cb(instance_idx):
@@ -147,7 +153,7 @@ class MultiRunnerService:
                 return on_phase
 
             runner = SingleInstanceRunner(
-                adb=adb,
+                adb=guarded_adb,
                 matcher=matcher,
                 role=account.role,
                 on_phase_change=make_phase_cb(idx),
@@ -285,12 +291,15 @@ class MultiRunnerService:
         }
 
     async def get_screenshot(self, instance_index: int) -> Optional[bytes]:
-        """获取指定实例截图，返回 JPEG bytes"""
+        """获取指定实例截图（纯观察，不触发守卫），返回 JPEG bytes"""
         runner = self._runners.get(instance_index)
         if not runner:
             return None
 
-        shot = await runner.adb.screenshot()
+        # 用底层 ADB 截图，避免触发 GuardedADB 的弹窗清除
+        adb = runner.adb
+        raw_adb = getattr(adb, '_adb', adb)  # 如果是 GuardedADB 取底层
+        shot = await raw_adb.screenshot()
         if shot is None:
             return None
 
