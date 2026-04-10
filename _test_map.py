@@ -40,30 +40,40 @@ async def step_read_current():
 
 
 async def step_click_mode_area():
-    """步骤1: 点击模式名区域打开地图选择"""
-    print("\n=== 步骤1: OCR找到模式名并点击 ===")
+    """步骤1: 点击模式名区域打开地图选择
+
+    策略：找到"开始游戏"按钮，往下偏移60像素点击模式名区域。
+    模式名文字不固定（经典/排位/团竞等），但位置相对"开始游戏"是固定的。
+    """
+    print("\n=== 步骤1: 点击模式名区域 ===")
     shot = await adb.screenshot()
     if shot is None:
         return
 
     hits = ocr._ocr_all(shot)
-    # 找左上角 "开始游戏" 下方的模式名文字
+
+    # 找"开始游戏"按钮位置
     for h in hits:
-        if h.cy > 50 and h.cy < 120 and h.cx < 350:
-            print(f"  找到模式名: '{h.text}' @ ({h.cx},{h.cy})")
-            await adb.tap(h.cx, h.cy)
+        if "开始游戏" in h.text:
+            target_x = h.cx
+            target_y = h.cy + 60  # 模式名在"开始游戏"下方约60像素
+            print(f"  '开始游戏' @ ({h.cx},{h.cy})，点击下方模式名 ({target_x},{target_y})")
+            await adb.tap(target_x, target_y)
             print("  已点击，等待面板打开...")
             await asyncio.sleep(2)
             return
 
-    print("  未找到模式名，尝试点击'开始游戏'下方")
-    # 找"开始游戏"位置，往下偏移
-    for h in hits:
-        if "开始" in h.text and "游戏" in h.text:
-            print(f"  找到'开始游戏' @ ({h.cx},{h.cy})，点击下方")
-            await adb.tap(h.cx, h.cy + 40)
-            await asyncio.sleep(2)
-            return
+    # 兜底：模板匹配找 lobby_start_btn
+    hit = matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+    if hit:
+        target_x = hit.cx
+        target_y = hit.cy + 60
+        print(f"  模板 'lobby_start_btn' @ ({hit.cx},{hit.cy})，点击下方 ({target_x},{target_y})")
+        await adb.tap(target_x, target_y)
+        await asyncio.sleep(2)
+        return
+
+    print("  ERROR: 找不到'开始游戏'按钮")
 
 
 async def step_screenshot_map_panel():
