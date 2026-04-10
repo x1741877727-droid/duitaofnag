@@ -59,11 +59,9 @@ class DismissResult:
 class OcrDismisser:
     """状态机驱动的弹窗清理器"""
 
-    def __init__(self, max_rounds: int = 20, interval: float = 1.5):
+    def __init__(self, max_rounds: int = 20):
         self.max_rounds = max_rounds
-        self.interval = interval
         self._ocr = None
-        self._lobby_ref_brightness = None  # 大厅参考亮度
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OCR引擎
@@ -255,23 +253,41 @@ class OcrDismisser:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def dismiss_all(self, device, matcher=None) -> DismissResult:
-        """状态机驱动的弹窗清理"""
+        """
+        状态机驱动的弹窗清理。
+        速度优化：模板命中时快速连点(0.5s/轮)，只有需要OCR时才慢(2s/轮)
+        """
         popups_closed = 0
-        last_state = None
         stuck_count = 0
 
         for rnd in range(self.max_rounds):
             shot = await device.screenshot()
             if shot is None:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
 
-            # ━━ 判断状态 ━━
+            # ━━ 快速路径: 模板匹配找X (~20ms) ━━
+            if matcher:
+                x_hit = matcher.find_close_button(shot)
+                if x_hit and x_hit.confidence > 0.80:
+                    logger.info(f"[R{rnd+1}] 快速关闭: {x_hit.name} @ ({x_hit.cx},{x_hit.cy})")
+                    await device.tap(x_hit.cx, x_hit.cy)
+                    popups_closed += 1
+                    stuck_count = 0
+                    await asyncio.sleep(0.5)  # 快！只等0.5秒动画
+                    continue
+
+            # ━━ 快速路径: 模板匹配检查大厅 (~20ms) ━━
+            if matcher and matcher.is_at_lobby(shot):
+                logger.info(f"[R{rnd+1}] ✓ 到达大厅！关闭了{popups_closed}个弹窗")
+                return DismissResult(True, popups_closed, "lobby", rnd + 1)
+
+            # ━━ 慢速路径: 需要OCR分析 ━━
             state = self.detect_state(shot, matcher)
             logger.info(f"[R{rnd+1}] 状态: {state.value}")
 
             if state == ScreenState.LOBBY:
-                logger.info(f"[R{rnd+1}] ✓ 到达大厅！关闭了{popups_closed}个弹窗")
+                logger.info(f"[R{rnd+1}] ✓ 到达大厅！(OCR确认)")
                 return DismissResult(True, popups_closed, "lobby", rnd + 1)
 
             if state == ScreenState.LEFT_GAME:
@@ -279,18 +295,17 @@ class OcrDismisser:
                 return DismissResult(False, popups_closed, "left_game", rnd + 1)
 
             if state == ScreenState.LOGIN:
-                logger.info(f"[R{rnd+1}] 在登录页，等待自动登录...")
+                logger.info(f"[R{rnd+1}] 登录页，等待...")
                 await asyncio.sleep(3)
                 continue
 
             if state == ScreenState.LOADING:
-                logger.info(f"[R{rnd+1}] 加载中，等待...")
+                logger.info(f"[R{rnd+1}] 加载中...")
                 await asyncio.sleep(2)
                 continue
 
-            # ━━ POPUP 或 UNKNOWN: 尝试关闭 ━━
+            # ━━ POPUP/UNKNOWN: OCR找关闭目标 ━━
             target = self._find_close_target(shot, matcher)
-
             if target:
                 x, y, method = target
                 logger.info(f"[R{rnd+1}] 点击: {method} @ ({x},{y})")
@@ -298,7 +313,7 @@ class OcrDismisser:
                 popups_closed += 1
                 stuck_count = 0
 
-                # 如果是勾选复选框，紧接着再找X关闭
+                # 勾选复选框后紧接找X
                 if "勾选" in method:
                     await asyncio.sleep(0.5)
                     shot2 = await device.screenshot()
@@ -307,23 +322,19 @@ class OcrDismisser:
                         if target2 and "勾选" not in target2[2]:
                             logger.info(f"[R{rnd+1}] 勾选后点: {target2[2]} @ ({target2[0]},{target2[1]})")
                             await device.tap(target2[0], target2[1])
-            else:
-                stuck_count += 1
-                logger.info(f"[R{rnd+1}] 未找到关闭目标 (stuck={stuck_count})")
 
-                # 卡住了 → 尝试点击屏幕中央（处理"点击任意位置继续"类弹窗）
-                if stuck_count >= 2:
-                    logger.info(f"[R{rnd+1}] 点击屏幕中央尝试跳过")
-                    await device.tap(640, 400)
+                await asyncio.sleep(0.8)
+                continue
 
-            # 检测是否卡在同一状态
-            if state == last_state and stuck_count >= 4:
-                logger.warning(f"[R{rnd+1}] 连续{stuck_count}轮卡住，强制检查大厅")
-                if matcher and matcher.is_at_lobby(shot):
-                    return DismissResult(True, popups_closed, "lobby_forced", rnd + 1)
-            last_state = state
+            # ━━ 什么都没找到 ━━
+            stuck_count += 1
+            logger.info(f"[R{rnd+1}] 未找到目标 (stuck={stuck_count})")
+            if stuck_count >= 2:
+                await device.tap(640, 400)  # 点屏幕中央
+            if stuck_count >= 4 and matcher and matcher.is_at_lobby(shot):
+                return DismissResult(True, popups_closed, "lobby_forced", rnd + 1)
 
-            await asyncio.sleep(self.interval)
+            await asyncio.sleep(1.0)
 
         logger.warning(f"弹窗清理超时 ({self.max_rounds}轮)")
         return DismissResult(False, popups_closed, "timeout", self.max_rounds)
