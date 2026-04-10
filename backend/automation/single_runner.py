@@ -378,12 +378,17 @@ class SingleInstanceRunner:
 
         logger.info("[阶段4] 口令码已复制到剪贴板")
 
-        # 关闭组队面板：按返回键退出侧滑面板
-        await self.adb.key_event("KEYCODE_BACK")
-        await asyncio.sleep(0.5)
-        # 再按一次确保回到大厅
-        await self.adb.key_event("KEYCODE_BACK")
-        await asyncio.sleep(0.5)
+        # 关闭组队面板：点击面板外的空白区域
+        # 组队面板占据左半边，点击右侧画面空白处关闭
+        shot = await self.adb.screenshot()
+        if shot is not None:
+            h, w = shot.shape[:2]
+            # 点击画面右侧 3/4 处的中间位置（面板外）
+            await self.adb.tap(w * 3 // 4, h // 2)
+            await asyncio.sleep(0.5)
+            # 再点一次确保关闭（可能有二级面板）
+            await self.adb.tap(w * 3 // 4, h // 2)
+            await asyncio.sleep(0.5)
         logger.info("[阶段4] 已关闭组队面板")
 
         return "clipboard"
