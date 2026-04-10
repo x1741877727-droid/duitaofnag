@@ -8,8 +8,14 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
-# 配置文件路径（相对于 EXE 或项目根目录）
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 配置文件路径
+# exe 打包后: 配置文件放在 exe 同目录（可写）
+# 开发模式: 放在项目根目录
+import sys as _sys
+if getattr(_sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(_sys.executable)  # exe 所在目录
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACCOUNTS_PATH = os.path.join(BASE_DIR, "accounts.json")
 SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
 

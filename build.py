@@ -131,12 +131,15 @@ def build_nuitka():
 
 
 def build_pyinstaller():
-    """PyInstaller 打包 (备选方案)"""
+    """PyInstaller 打包 — 单文件 exe，所有资源内嵌，字节码加密"""
     print("=" * 60)
-    print("PyInstaller 打包开始")
+    print("PyInstaller 打包开始 (单文件 + 加密)")
     print("=" * 60)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # 加密密钥（防止反编译 .pyc 字节码）
+    ENCRYPT_KEY = "GameBot2026!Kx9z"  # 16 字节 AES key
 
     # 生成 spec 内容
     spec_content = f"""
@@ -145,14 +148,14 @@ import os
 
 ROOT = {repr(ROOT)}
 
+block_cipher = None
+
 a = Analysis(
     [os.path.join(ROOT, 'backend', 'main.py')],
     pathex=[ROOT],
     datas=[
         (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
-        (os.path.join(ROOT, 'settings.json'), '.'),
-        (os.path.join(ROOT, 'accounts.json'), '.'),
     ],
     hiddenimports=[
         'uvicorn.logging',
@@ -166,10 +169,23 @@ a = Analysis(
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
         'rapidocr',
+        'engineio.async_drivers.threading',
+        'backend',
+        'backend.api',
+        'backend.config',
+        'backend.runner_service',
+        'backend.automation',
+        'backend.automation.adb_lite',
+        'backend.automation.guarded_adb',
+        'backend.automation.single_runner',
+        'backend.automation.screen_matcher',
+        'backend.automation.ocr_dismisser',
+        'backend.automation.popup_dismisser',
     ],
+    cipher=block_cipher,
 )
 
-pyz = PYZ(a.pure)
+pyz = PYZ(a.pure, cipher=block_cipher)
 
 exe = EXE(
     pyz,
@@ -177,21 +193,25 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='GameAutomation',
+    name='GameBot',
     debug=False,
     strip=False,
     upx=True,
-    console=False,  # 无控制台窗口
+    console=False,
+    icon=None,
+    onefile=True,
 )
 """
 
-    spec_path = os.path.join(OUTPUT_DIR, "GameAutomation.spec")
-    with open(spec_path, "w") as f:
+    spec_path = os.path.join(OUTPUT_DIR, "GameBot.spec")
+    with open(spec_path, "w", encoding="utf-8") as f:
         f.write(spec_content)
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--clean",
+        "--onefile",                      # 单文件 exe
+        "--key", ENCRYPT_KEY,             # AES 加密字节码
         "--distpath", os.path.join(OUTPUT_DIR, "dist"),
         "--workpath", os.path.join(OUTPUT_DIR, "build"),
         spec_path,

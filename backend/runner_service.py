@@ -382,9 +382,12 @@ class MultiRunnerService:
 
     @staticmethod
     def _resolve_template_dir() -> str:
-        """查找模板目录"""
-        # 从项目根目录查找
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        """查找模板目录（兼容 PyInstaller 打包后）"""
+        import sys as _sys
+        if getattr(_sys, 'frozen', False):
+            root = _sys._MEIPASS
+        else:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidates = [
             os.path.join(root, "fixtures", "templates"),
             os.path.join(root, "backend", "recognition", "templates"),
@@ -392,4 +395,4 @@ class MultiRunnerService:
         for d in candidates:
             if os.path.isdir(d):
                 return d
-        return candidates[0]  # 返回第一个作为默认值
+        return candidates[0]

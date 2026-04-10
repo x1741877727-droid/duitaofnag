@@ -14,8 +14,12 @@ import threading
 
 import uvicorn
 
-# 项目根目录
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 项目根目录（兼容 PyInstaller 打包后）
+if getattr(sys, 'frozen', False):
+    # PyInstaller 打包后，数据文件在 _MEIPASS 临时目录
+    ROOT_DIR = sys._MEIPASS
+else:
+    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
 
 from backend.config import config
