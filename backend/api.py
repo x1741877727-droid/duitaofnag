@@ -186,6 +186,16 @@ def create_app(config: ConfigManager) -> FastAPI:
     @app.get("/api/emulators")
     async def get_emulators():
         """检测本机所有雷电模拟器实例"""
+        if config.settings.dev_mock:
+            # Mock 模式：返回假数据
+            return {"instances": [
+                {"index": 0, "name": "雷电模拟器", "running": True, "pid": 1234, "adb_serial": "emulator-5554", "adb_port": 5554},
+                {"index": 1, "name": "雷电模拟器-1", "running": True, "pid": 1235, "adb_serial": "emulator-5556", "adb_port": 5556},
+                {"index": 2, "name": "雷电模拟器-2", "running": True, "pid": 1236, "adb_serial": "emulator-5558", "adb_port": 5558},
+                {"index": 3, "name": "雷电模拟器-3", "running": True, "pid": 1237, "adb_serial": "emulator-5560", "adb_port": 5560},
+                {"index": 4, "name": "雷电模拟器-4", "running": False, "pid": -1, "adb_serial": "emulator-5562", "adb_port": 5562},
+                {"index": 5, "name": "雷电模拟器-5", "running": False, "pid": -1, "adb_serial": "emulator-5564", "adb_port": 5564},
+            ], "ldplayer_path": config.settings.ldplayer_path}
         instances = detect_ldplayer_instances(config.settings.ldplayer_path)
         return {"instances": instances, "ldplayer_path": config.settings.ldplayer_path}
 
@@ -196,23 +206,27 @@ def create_app(config: ConfigManager) -> FastAPI:
         if service.running:
             return {"ok": False, "error": "已在运行中"}
         config.load()
+        if config.settings.dev_mock:
+            await service.start_mock(config.accounts)
+            return {"ok": True}
         await service.start_all(config.settings, config.accounts)
         return {"ok": True}
 
     @app.post("/api/start/{instance_index}")
     async def start_one(instance_index: int):
-        """启动单个实例（测试用，不需要预先配置账号）"""
+        """启动单个实例"""
         if service.running:
             return {"ok": False, "error": "请先停止当前运行"}
         config.load()
-        # 先找已有配置
         accounts = [a for a in config.accounts if a.instance_index == instance_index]
         if not accounts:
-            # 没有配置就自动创建一个临时的
             accounts = [AccountConfig(
                 qq="", nickname=f"实例{instance_index}", game_id="",
                 group="A", role="captain", instance_index=instance_index,
             )]
+        if config.settings.dev_mock:
+            await service.start_mock(accounts)
+            return {"ok": True}
         await service.start_all(config.settings, accounts)
         return {"ok": True}
 

@@ -192,6 +192,66 @@ class MultiRunnerService:
             "state": "",
         }})
 
+    async def start_mock(self, accounts: list[AccountConfig]):
+        """Mock 模式：模拟所有阶段（不需要真实设备）"""
+        if self._running:
+            return
+
+        self._running = True
+        self._start_time = time.time()
+        self._instances.clear()
+        self._tasks.clear()
+
+        import random
+
+        for account in accounts:
+            idx = account.instance_index
+            self._instances[idx] = InstanceStatus(
+                index=idx, group=account.group, role=account.role,
+                nickname=account.nickname,
+            )
+            self._tasks[idx] = asyncio.create_task(self._run_mock_instance(idx))
+
+        self._snapshot_task = asyncio.create_task(self._snapshot_loop())
+
+        self._broadcast({"type": "log", "data": {
+            "timestamp": time.time(), "instance": -1,
+            "level": "info", "message": f"[Mock] 启动 {len(accounts)} 个实例",
+            "state": "",
+        }})
+
+    async def _run_mock_instance(self, idx: int):
+        """模拟单个实例的阶段流转"""
+        import random
+        phases = [
+            ("accelerator", "启动加速器", 2),
+            ("launch_game", "启动游戏", 4),
+            ("dismiss_popups", "清理弹窗", 5),
+            ("lobby", "大厅就绪", 0),
+        ]
+        try:
+            for phase_key, label, base_time in phases:
+                self._instances[idx].state = phase_key
+                self._instances[idx]._phase_start = time.time()
+                self._broadcast_state_change(idx, "prev", phase_key)
+                self._broadcast({"type": "log", "data": {
+                    "timestamp": time.time(), "instance": idx,
+                    "level": "info", "message": f"[Mock] {label}",
+                    "state": phase_key,
+                }})
+                if base_time > 0:
+                    await asyncio.sleep(base_time + random.uniform(0, 2))
+
+            self._instances[idx].state = "lobby"
+            self._instances[idx]._phase_start = time.time()
+            self._broadcast({"type": "log", "data": {
+                "timestamp": time.time(), "instance": idx,
+                "level": "info", "message": "[Mock] 到达大厅 ✓",
+                "state": "lobby",
+            }})
+        except asyncio.CancelledError:
+            self._instances[idx].state = "init"
+
     async def _run_instance(self, idx: int, runner: SingleInstanceRunner):
         """单个实例运行（在独立 task 中）"""
         try:

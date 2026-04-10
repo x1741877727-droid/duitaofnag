@@ -1,96 +1,131 @@
-import { useState } from "react";
-import { useAppStore } from "../stores/appStore";
-
-async function api(method: string, path: string) {
-  const res = await fetch(path, { method });
-  return res.json();
-}
+import { useMemo, useState } from 'react'
+import { useAppStore } from '@/lib/store'
+import { Button } from '@/components/ui/button'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 export function Header() {
-  const { running, activeView, setActiveView, showLogs, setShowLogs, instances, stats, setRunning, setInstances } = useAppStore();
-  const [loading, setLoading] = useState("");
+  const {
+    isRunning,
+    setIsRunning,
+    currentView,
+    setCurrentView,
+    showLogPanel,
+    setShowLogPanel,
+    instances,
+    setInstances,
+  } = useAppStore()
+  const [loading, setLoading] = useState(false)
 
-  const all = Object.values(instances);
-  const total = all.length;
-  const active = all.filter(i => !["init","done","error","lobby"].includes(i.state)).length;
-  const ready = all.filter(i => i.state === "lobby" || i.state === "done").length;
-  const errors = all.filter(i => i.state === "error").length;
-
-  async function handleStart() {
-    setLoading("start");
-    await api("POST", "/api/start");
-    setRunning(true);
-    setLoading("");
-  }
-
-  async function handleStop() {
-    setLoading("stop");
-    await api("POST", "/api/stop");
-    setRunning(false);
-    setInstances({});
-    setLoading("");
-  }
-
-  function fmt(s: number) {
-    if (s <= 0) return "0s";
-    const m = Math.floor(s / 60);
-    return m > 0 ? `${m}m${Math.round(s % 60)}s` : `${Math.round(s)}s`;
-  }
+  const statusCounts = useMemo(() => {
+    const instanceList = Object.values(instances)
+    const total = instanceList.length
+    const running = instanceList.filter(i => 
+      !['init', 'done', 'error', 'ready', 'in_game'].includes(i.state)
+    ).length
+    const ready = instanceList.filter(i => 
+      ['lobby', 'done', 'ready', 'in_game'].includes(i.state)
+    ).length
+    const errors = instanceList.filter(i => i.state === 'error').length
+    return { total, running, ready, errors }
+  }, [instances])
 
   return (
-    <header className="shrink-0 border-b" style={{ borderColor: "var(--border)", background: "white" }}>
-      <div className="flex items-center justify-between px-5 h-12">
-        {/* 左 */}
-        <div className="flex items-center gap-5">
-          <span className="text-sm font-semibold tracking-tight" style={{ color: "var(--text-primary)" }}>GameBot</span>
-          <nav className="flex gap-1">
-            {(["dashboard", "settings"] as const).map(v => (
-              <button key={v} onClick={() => setActiveView(v)}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                  activeView === v ? "bg-neutral-100 text-neutral-900" : "text-neutral-500 hover:text-neutral-700"
-                }`}>
-                {v === "dashboard" ? "控制面板" : "设置"}
-              </button>
-            ))}
-          </nav>
-        </div>
+    <header className="h-12 border-b border-border bg-card flex items-center justify-between px-4 shrink-0">
+      <div className="flex items-center gap-8">
+        <h1 className="text-lg font-bold text-foreground tracking-tight">GameBot</h1>
+        
+        <nav className="flex items-center gap-1">
+          <Button
+            variant={currentView === 'dashboard' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('dashboard')}
+            className="gap-2"
+          >
+            <LayoutDashboard className="h-4 w-4" />
+            控制台
+          </Button>
+          <Button
+            variant={currentView === 'settings' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('settings')}
+            className="gap-2"
+          >
+            <Settings className="h-4 w-4" />
+            设置
+          </Button>
+        </nav>
+      </div>
 
-        {/* 中 */}
-        {running && total > 0 && (
-          <div className="flex items-center gap-4 text-xs" style={{ color: "var(--text-secondary)" }}>
-            <Stat label="运行" value={`${active}/${total}`} color="var(--accent)" />
-            <Stat label="就绪" value={`${ready}/${total}`} color="var(--success)" />
-            {errors > 0 && <Stat label="错误" value={`${errors}`} color="var(--danger)" />}
-            <span className="font-mono text-neutral-400">{fmt(stats.running_duration)}</span>
+      <div className="flex items-center gap-5">
+        {/* 状态统计 */}
+        <div className="flex items-center gap-5 text-sm">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-info" />
+            <span className="text-muted-foreground">运行中</span>
+            <span className="font-semibold text-foreground">{statusCounts.running}</span>
           </div>
-        )}
-
-        {/* 右 */}
-        <div className="flex items-center gap-2">
-          <button className="btn btn-ghost text-xs py-1 px-2" onClick={() => setShowLogs(!showLogs)}>
-            {showLogs ? "隐藏日志" : "日志"}
-          </button>
-          {!running ? (
-            <button className="btn btn-primary" onClick={handleStart} disabled={!!loading}>
-              {loading === "start" ? "启动中..." : "启动全部"}
-            </button>
-          ) : (
-            <button className="btn btn-danger" onClick={handleStop} disabled={!!loading}>
-              {loading === "stop" ? "停止中..." : "停止"}
-            </button>
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-success" />
+            <span className="text-muted-foreground">已就绪</span>
+            <span className="font-semibold text-foreground">{statusCounts.ready}</span>
+          </div>
+          {statusCounts.errors > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-error" />
+              <span className="text-muted-foreground">错误</span>
+              <span className="font-semibold text-foreground">{statusCounts.errors}</span>
+            </div>
           )}
         </div>
+
+        <div className="h-5 w-px bg-border" />
+
+        {/* 日志面板切换 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setShowLogPanel(!showLogPanel)}
+          className={cn('gap-2', showLogPanel && 'bg-secondary')}
+        >
+          <FileText className="h-4 w-4" />
+          日志
+          {showLogPanel ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronUp className="h-4 w-4" />
+          )}
+        </Button>
+
+        {/* 运行控制 */}
+        <Button
+          variant={isRunning ? 'destructive' : 'default'}
+          size="sm"
+          onClick={async () => {
+            setLoading(true)
+            try {
+              if (isRunning) {
+                await fetch('/api/stop', { method: 'POST' })
+                setIsRunning(false)
+                setInstances({})
+              } else {
+                const res = await fetch('/api/start', { method: 'POST' })
+                const json = await res.json()
+                if (json.ok) setIsRunning(true)
+              }
+            } catch {}
+            setLoading(false)
+          }}
+          disabled={loading}
+          className="gap-2 min-w-24"
+        >
+          {isRunning ? (
+            <><Square className="h-4 w-4" />停止</>
+          ) : (
+            <><Play className="h-4 w-4" />{loading ? '启动中...' : '启动'}</>
+          )}
+        </Button>
       </div>
     </header>
-  );
-}
-
-function Stat({ label, value, color }: { label: string; value: string; color: string }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="dot" style={{ background: color, width: 5, height: 5 }} />
-      <span className="text-neutral-400">{label}</span>
-      <span className="font-semibold" style={{ color }}>{value}</span>
-    </span>
-  );
+  )
 }

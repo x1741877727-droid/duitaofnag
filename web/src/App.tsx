@@ -1,30 +1,31 @@
-import { useWebSocket } from "./hooks/useWebSocket";
-import { useAppStore } from "./stores/appStore";
-import { Dashboard } from "./components/Dashboard";
-import { Settings } from "./components/Settings";
-import { LogPanel } from "./components/LogPanel";
-import { Header } from "./components/Header";
+import { useWebSocket } from '@/hooks/useWebSocket'
+import { useAppStore } from '@/lib/store'
+import { Header } from '@/components/header'
+import { Dashboard } from '@/components/dashboard'
+import { SettingsView } from '@/components/settings-view'
+import { LogDrawer } from '@/components/log-panel'
 
 function App() {
-  useWebSocket();
-  const { activeView, showLogs } = useAppStore();
+  useWebSocket()
+  const { currentView, showLogPanel } = useAppStore()
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden" style={{ background: "var(--bg)" }}>
+    <div className="h-screen flex flex-col bg-background overflow-hidden">
       <Header />
+
       <div className="flex-1 flex min-h-0">
-        <main className="flex-1 overflow-y-auto">
-          {activeView === "dashboard" && <Dashboard />}
-          {activeView === "settings" && <Settings />}
+        {/* 主内容 */}
+        <main className="flex-1 overflow-y-auto p-4">
+          <div className="max-w-5xl mx-auto animate-page" key={currentView}>
+            {currentView === 'dashboard' ? <Dashboard /> : <SettingsView />}
+          </div>
         </main>
-        {showLogs && (
-          <aside className="w-[360px] shrink-0 border-l animate-in" style={{ borderColor: "var(--border)" }}>
-            <LogPanel />
-          </aside>
-        )}
+
+        {/* 日志侧边抽屉 */}
+        {showLogPanel && <LogDrawer />}
       </div>
     </div>
-  );
+  )
 }
 
-export default App;
+export default App
