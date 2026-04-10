@@ -106,7 +106,7 @@ class OcrDismisser:
         else:
             return []
 
-        result = ocr.ocr(img, cls=False)
+        result = ocr.ocr(img)
         hits = []
         if result and result[0]:
             for line in result[0]:
