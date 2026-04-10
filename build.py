@@ -153,8 +153,12 @@ def build_pyinstaller():
 
     spec_content = f"""
 # -*- mode: python ; coding: utf-8 -*-
-import os
+import os, importlib
 ROOT = {repr(ROOT)}
+
+# 自动收集 rapidocr 的数据文件（yaml 配置 + ONNX 模型）
+from PyInstaller.utils.hooks import collect_data_files
+rapidocr_datas = collect_data_files('rapidocr', include_py_files=False)
 
 a = Analysis(
     [os.path.join(ROOT, 'backend', 'main.py')],
@@ -162,13 +166,15 @@ a = Analysis(
     datas=[
         (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
-    ],
+    ] + rapidocr_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
         'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',
         'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto',
         'uvicorn.lifespan', 'uvicorn.lifespan.on',
-        'rapidocr',
+        'rapidocr', 'rapidocr.main', 'rapidocr.utils',
+        'rapidocr.ch_ppocr_det', 'rapidocr.ch_ppocr_cls', 'rapidocr.ch_ppocr_rec',
+        'rapidocr.cal_rec_boxes', 'rapidocr.inference_engine',
         'backend', 'backend.api', 'backend.config', 'backend.runner_service',
         'backend.automation', 'backend.automation.adb_lite',
         'backend.automation.guarded_adb', 'backend.automation.single_runner',
