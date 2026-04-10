@@ -277,9 +277,12 @@ class OcrDismisser:
         """
         状态机驱动的弹窗清理。
         速度优化：模板命中时快速连点(0.5s/轮)，只有需要OCR时才慢(2s/轮)
+        大厅确认：连续3次检测到大厅且无遮罩才算真正到达（弹窗可能1-2秒后冒出来）
         """
         popups_closed = 0
         stuck_count = 0
+        lobby_confirm = 0  # 连续确认大厅次数
+        LOBBY_CONFIRM_NEEDED = 3
 
         for rnd in range(self.max_rounds):
             shot = await device.screenshot()
@@ -295,21 +298,34 @@ class OcrDismisser:
                     await device.tap(x_hit.cx, x_hit.cy)
                     popups_closed += 1
                     stuck_count = 0
-                    await asyncio.sleep(0.5)  # 快！只等0.5秒动画
+                    lobby_confirm = 0
+                    await asyncio.sleep(0.5)
                     continue
 
             # ━━ 快速路径: 模板匹配检查大厅 (~20ms) ━━
-            if matcher and matcher.is_at_lobby(shot):
-                logger.info(f"[R{rnd+1}] ✓ 到达大厅！关闭了{popups_closed}个弹窗")
-                return DismissResult(True, popups_closed, "lobby", rnd + 1)
+            if matcher and matcher.is_at_lobby(shot) and not self._has_overlay(shot):
+                lobby_confirm += 1
+                if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
+                    logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次，弹窗清理完成！关闭了{popups_closed}个弹窗")
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                logger.info(f"[R{rnd+1}] 大厅检测 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
+                await asyncio.sleep(1)  # 等一下看有没有新弹窗冒出来
+                continue
+            else:
+                lobby_confirm = 0
 
             # ━━ 慢速路径: 需要OCR分析 ━━
             state = self.detect_state(shot, matcher)
             logger.info(f"[R{rnd+1}] 状态: {state.value}")
 
             if state == ScreenState.LOBBY:
-                logger.info(f"[R{rnd+1}] ✓ 到达大厅！(OCR确认)")
-                return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                lobby_confirm += 1
+                if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
+                    logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次(OCR)，完成！")
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                logger.info(f"[R{rnd+1}] 大厅检测OCR ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
+                await asyncio.sleep(1)
+                continue
 
             if state == ScreenState.LEFT_GAME:
                 logger.warning(f"[R{rnd+1}] ✗ 已退出游戏")
@@ -344,7 +360,7 @@ class OcrDismisser:
                             logger.info(f"[R{rnd+1}] 勾选后点: {target2[2]} @ ({target2[0]},{target2[1]})")
                             await device.tap(target2[0], target2[1])
 
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.5)
                 continue
 
             # ━━ 什么都没找到 ━━
@@ -355,7 +371,7 @@ class OcrDismisser:
             if stuck_count >= 4 and matcher and matcher.is_at_lobby(shot):
                 return DismissResult(True, popups_closed, "lobby_forced", rnd + 1)
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.6)
 
         logger.warning(f"弹窗清理超时 ({self.max_rounds}轮)")
         return DismissResult(False, popups_closed, "timeout", self.max_rounds)
