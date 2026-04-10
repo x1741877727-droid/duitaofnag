@@ -42,7 +42,7 @@ LOGIN_KEYWORDS = ["QQ授权登录", "微信登录", "登录中"]
 LEFT_GAME_KEYWORDS = ["CDN节点第", "六花官方通知"]
 
 # 弹窗关闭文字（OCR识别后点击）
-CLOSE_TEXT = ["关闭", "×"]
+CLOSE_TEXT = ["关闭", "×", "✕", "X"]
 CONFIRM_TEXT = ["确定", "确认", "知道了", "我知道了", "同意", "暂不", "跳过", "不需要",
                 "领取见面礼",
                 "点击屏幕继续", "点击屏幕", "点击继续"]
@@ -210,42 +210,62 @@ class OcrDismisser:
 
     def _find_x_shape(self, screenshot: np.ndarray) -> tuple[int, int] | None:
         """
-        在右上角用形态学找X形状的按钮。
-        X按钮特征：小区域内有交叉线条，形成×形。
+        在右上区域找关闭按钮（X 形状或圆形 ⊗ 按钮）。
+        搜索范围：右半屏幕的上半部分。
+        两种模式：
+          1. 方形 X 交叉线条（游戏内常见）
+          2. 圆形深色按钮（系统/SDK弹窗常见，如"家长提示"的 ⊗）
         """
         h, w = screenshot.shape[:2]
-        # 只看右上角 1/4
-        roi = screenshot[0:h//3, w//2:]
+        # 搜索右半屏幕上 2/3 区域
+        roi = screenshot[0:h*2//3, w//3:]
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        roi_offset_x = w // 3
 
-        # 边缘检测
+        # ── 方法1: 边缘轮廓找方形X ──
         edges = cv2.Canny(gray, 100, 200)
-
-        # 找轮廓
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for c in contours:
             area = cv2.contourArea(c)
             x, y, cw, ch = cv2.boundingRect(c)
-
-            # X按钮通常 20x20 到 50x50
             if not (200 < area < 3000):
                 continue
             if not (15 < cw < 60 and 15 < ch < 60):
                 continue
-            # 宽高比接近1:1
             if not (0.5 < cw / max(ch, 1) < 2.0):
                 continue
 
-            # 检查这个区域的"交叉"特征：中心像素比周围暗
             cx_local = x + cw // 2
             cy_local = y + ch // 2
             center_val = gray[cy_local, cx_local] if cy_local < gray.shape[0] and cx_local < gray.shape[1] else 255
-
-            # X按钮在浅色背景上是深色线条
             surround = gray[max(0,y):y+ch, max(0,x):x+cw].mean()
-            if center_val < surround - 20:  # 中心比周围暗
-                return (w // 2 + cx_local, cy_local)
+            if center_val < surround - 20:
+                return (roi_offset_x + cx_local, cy_local)
+
+        # ── 方法2: 霍夫圆检测找圆形关闭按钮 ──
+        blurred = cv2.GaussianBlur(gray, (9, 9), 2)
+        circles = cv2.HoughCircles(
+            blurred, cv2.HOUGH_GRADIENT, dp=1.2,
+            minDist=30, param1=100, param2=40,
+            minRadius=12, maxRadius=35,
+        )
+        if circles is not None:
+            for circle in circles[0]:
+                cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
+                # 圆形X按钮特征：圆内整体较暗（深色按钮），或者圆内有X纹理
+                region = gray[max(0,cy-r):cy+r, max(0,cx-r):cx+r]
+                if region.size == 0:
+                    continue
+                inner_mean = region.mean()
+                # 取圆周围一圈的平均亮度
+                outer_y1, outer_y2 = max(0, cy-r*2), min(gray.shape[0], cy+r*2)
+                outer_x1, outer_x2 = max(0, cx-r*2), min(gray.shape[1], cx+r*2)
+                outer_mean = gray[outer_y1:outer_y2, outer_x1:outer_x2].mean()
+                # 圆内比周围明显暗 = 深色关闭按钮
+                if inner_mean < outer_mean - 30:
+                    logger.info(f"圆形X检测: 圆心=({roi_offset_x+cx},{cy}) r={r} 内{inner_mean:.0f} 外{outer_mean:.0f}")
+                    return (roi_offset_x + cx, cy)
 
         return None
 
