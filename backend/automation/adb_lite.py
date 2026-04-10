@@ -5,12 +5,17 @@ ADB 控制器 — 基于 subprocess 直接调用 adb 命令
 
 import asyncio
 import logging
+import platform
+import subprocess
 from typing import Optional
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Windows 下隐藏 subprocess 的 cmd 窗口
+_SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 
 
 class ADBController:
@@ -26,11 +31,11 @@ class ADBController:
 
     def _cmd(self, *args) -> str:
         """同步执行adb命令"""
-        import subprocess
         cmd = [self.adb_path, "-s", self.serial] + list(args)
         try:
             result = subprocess.run(
-                cmd, capture_output=True, timeout=self._proc_timeout
+                cmd, capture_output=True, timeout=self._proc_timeout,
+                creationflags=_SUBPROCESS_FLAGS,
             )
             # 尝试多种编码解码
             for enc in ("utf-8", "gbk"):
@@ -61,7 +66,8 @@ class ADBController:
         import subprocess
         cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap", "-p"]
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, timeout=10,
+                                    creationflags=_SUBPROCESS_FLAGS)
             if result.returncode != 0:
                 return None
             png_data = result.stdout

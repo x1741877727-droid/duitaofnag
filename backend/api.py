@@ -8,8 +8,12 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import subprocess
 import time
+
+# Windows 下隐藏 cmd 窗口
+_SF = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -91,6 +95,7 @@ def detect_ldplayer_instances(ldplayer_path: str) -> list[dict]:
         result = subprocess.run(
             [ldconsole, "list2"],
             capture_output=True, timeout=10,
+            creationflags=_SF,
         )
         # ldconsole 在中文 Windows 上输出 GBK 编码
         for enc in ("utf-8", "gbk"):
