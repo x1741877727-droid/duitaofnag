@@ -18,6 +18,7 @@ import numpy as np
 
 from .screen_matcher import MatchHit, ScreenMatcher
 from .popup_dismisser import PopupDismisser
+from .ocr_dismisser import OcrDismisser
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,7 @@ class SingleInstanceRunner:
         self.target_map = target_map
         self.phase = Phase.INIT
         self.popup_dismisser = PopupDismisser(matcher)
+        self.ocr_dismisser = OcrDismisser(max_rounds=25, interval=2.0)
         self._team_code: str = ""  # 队长生成的口令码
 
     # ================================================================
@@ -229,44 +231,34 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_launch_game(self) -> bool:
-        """启动游戏并等待到登录页或大厅"""
+        """启动游戏并等待到大厅或弹窗阶段"""
         self.phase = Phase.LAUNCH_GAME
         logger.info("[阶段1] 启动游戏")
 
         await self.adb.start_app(GAME_PACKAGE)
-        await asyncio.sleep(5)  # 游戏启动需要时间
+        await asyncio.sleep(8)  # 游戏启动需要时间
 
-        # 等待游戏加载，最多60秒
-        for attempt in range(30):
+        # 等待游戏加载完成，最多90秒
+        # 只要检测到"公告"或"开始游戏"或弹窗关键词就说明加载完了
+        for attempt in range(45):
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(2)
                 continue
 
-            # 检测是否已到大厅
-            if self.matcher.is_at_lobby(shot):
-                logger.info("[阶段1] 直接到达大厅 ✓")
+            # 用OCR检测当前画面
+            hits = self.ocr_dismisser.ocr_screen(shot)
+            all_text = " ".join(h.text for h in hits)
+            logger.info(f"[阶段1] 加载中R{attempt+1}: OCR={all_text[:80]}")
+
+            # 检测到大厅标志或弹窗标志 → 加载完成，交给阶段3处理
+            if any(kw in all_text for kw in ["开始游戏", "公告", "活动", "更新公告", "立即前往"]):
+                logger.info("[阶段1] 游戏加载完成，进入弹窗清理阶段")
                 return True
-
-            # 检测公告弹窗（加载过程中可能弹出）
-            x_hit = self.matcher.find_close_button(shot)
-            if x_hit:
-                logger.info(f"[阶段1] 加载中弹出弹窗，关闭: {x_hit.name}")
-                await self.adb.tap(x_hit.cx, x_hit.cy)
-                await asyncio.sleep(1)
-                continue
-
-            # 检测"确定"按钮（内存提醒等）
-            btn = self.matcher.find_action_button(shot)
-            if btn:
-                logger.info(f"[阶段1] 点击按钮: {btn.name}")
-                await self.adb.tap(btn.cx, btn.cy)
-                await asyncio.sleep(1)
-                continue
 
             await asyncio.sleep(2)
 
-        logger.warning("[阶段1] 游戏加载超时(60s)")
+        logger.warning("[阶段1] 游戏加载超时(90s)")
         return False
 
     # ================================================================
@@ -302,12 +294,12 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_dismiss_popups(self) -> bool:
-        """清理所有弹窗直到大厅"""
+        """清理所有弹窗直到大厅（OCR驱动）"""
         self.phase = Phase.DISMISS_POPUPS
-        logger.info("[阶段3] 开始弹窗清理")
+        logger.info("[阶段3] 开始弹窗清理 (OCR模式)")
 
-        result = await self.popup_dismisser.dismiss_all(self.adb)
-        logger.info(f"[阶段3] 结果: {result.final_state}, 关闭{result.popups_closed}个弹窗")
+        result = await self.ocr_dismisser.dismiss_all(self.adb, self.matcher)
+        logger.info(f"[阶段3] 结果: {result.final_state}, 关闭{result.popups_closed}个弹窗, 共{result.rounds}轮")
         return result.success
 
     # ================================================================
