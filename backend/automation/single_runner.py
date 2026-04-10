@@ -163,7 +163,7 @@ class SingleInstanceRunner:
         """打开百度验证网络。加速器会劫持URL显示验证结果，看到"验证成功"=网络通了"""
         logger.info("[阶段0] 网络验证: 打开百度...")
         await self.adb.open_url("https://m.baidu.com/")
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
         # 加速器会劫持URL → 显示"验证成功"等文字 = 加速器工作正常
         # 如果看到真正的百度页面("百度","搜索") = 加速器没劫持 = 没连上
@@ -214,7 +214,7 @@ class SingleInstanceRunner:
         logger.info("[阶段1] 启动游戏")
 
         await self.adb.start_app(GAME_PACKAGE)
-        await asyncio.sleep(8)  # 游戏启动需要时间
+        await asyncio.sleep(5)  # 游戏启动等待
 
         # 等待游戏加载完成，最多90秒
         # GuardedADB 会自动处理加载中弹出的系统弹窗（内存提醒等）

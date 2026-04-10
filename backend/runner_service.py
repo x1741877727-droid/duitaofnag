@@ -128,6 +128,10 @@ class MultiRunnerService:
         if not adb_path:
             adb_path = os.path.join(settings.ldplayer_path, "adb.exe")
 
+        # 预热 OCR（所有实例共享，只初始化一次）
+        from .automation.ocr_dismisser import OcrDismisser
+        OcrDismisser.warmup()
+
         # 加载模板（所有实例共享，只读）
         template_dir = self._resolve_template_dir()
         matcher = ScreenMatcher(template_dir)

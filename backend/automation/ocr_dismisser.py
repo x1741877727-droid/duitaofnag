@@ -60,21 +60,29 @@ class DismissResult:
 class OcrDismisser:
     """状态机驱动的弹窗清理器"""
 
+    # 类级别共享 OCR 实例（所有 OcrDismisser 实例共用，只初始化一次）
+    _shared_ocr = None
+
     def __init__(self, max_rounds: int = 20):
         self.max_rounds = max_rounds
-        self._ocr = None
+
+    @classmethod
+    def warmup(cls):
+        """预热 OCR 引擎（启动时调用一次，避免运行中等待）"""
+        if cls._shared_ocr is None:
+            logger.info("预热 RapidOCR ...")
+            from rapidocr import RapidOCR
+            cls._shared_ocr = RapidOCR()
+            logger.info("RapidOCR 预热完成")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OCR引擎
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _get_ocr(self):
-        if self._ocr is None:
-            logger.info("初始化 RapidOCR ...")
-            from rapidocr import RapidOCR
-            self._ocr = RapidOCR()
-            logger.info("RapidOCR 初始化完成")
-        return self._ocr
+        if OcrDismisser._shared_ocr is None:
+            OcrDismisser.warmup()
+        return OcrDismisser._shared_ocr
 
     @dataclass
     class TextHit:
@@ -310,7 +318,7 @@ class OcrDismisser:
                     logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次，弹窗清理完成！关闭了{popups_closed}个弹窗")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.info(f"[R{rnd+1}] 大厅检测 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                await asyncio.sleep(1)  # 等一下看有没有新弹窗冒出来
+                await asyncio.sleep(0.8)  # 等一下看有没有新弹窗冒出来
                 continue
             else:
                 lobby_confirm = 0
