@@ -165,8 +165,10 @@ class SingleInstanceRunner:
         await self.adb.open_url("https://m.baidu.com/")
         await asyncio.sleep(3)
 
-        # 验证成功的标志：加速器劫持后显示"验证成功"，或真正加载出百度
-        SUCCESS_KEYWORDS = ["验证成功", "百度", "搜索"]
+        # 加速器会劫持URL → 显示"验证成功"等文字 = 加速器工作正常
+        # 如果看到真正的百度页面("百度","搜索") = 加速器没劫持 = 没连上
+        SUCCESS_KEYWORDS = ["验证成功", "端口验证", "六花端口"]
+        FAIL_KEYWORDS = ["百度", "搜索", "热搜"]
 
         for check in range(4):  # 总共约8秒
             shot = await self.adb.screenshot()
@@ -179,10 +181,16 @@ class SingleInstanceRunner:
             logger.info(f"[阶段0] 网络验证R{check+1}: OCR={all_text[:60]}")
 
             if any(kw in all_text for kw in SUCCESS_KEYWORDS):
-                logger.info("[阶段0] 网络验证通过 ✓")
+                logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
                 await self.adb.key_event("KEYCODE_HOME")
                 await asyncio.sleep(0.5)
                 return True
+
+            if any(kw in all_text for kw in FAIL_KEYWORDS):
+                logger.warning("[阶段0] 网络验证失败: 看到百度真实页面，加速器未工作")
+                await self.adb.key_event("KEYCODE_HOME")
+                await asyncio.sleep(0.5)
+                return False
 
             await asyncio.sleep(1.5)
 
