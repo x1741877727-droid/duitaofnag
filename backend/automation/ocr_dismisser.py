@@ -201,10 +201,11 @@ class OcrDismisser:
                         return (640, 400, f"点击屏幕:{h.text}")
                     return (h.cx, h.cy, f"确认:{h.text}")
 
-        # 级别3: 在右上角区域找小型高对比度元素（通用X检测）
-        pos = self._find_x_shape(screenshot)
-        if pos:
-            return (pos[0], pos[1], "形状检测X")
+        # 级别3: 形状检测 — 仅在确认有遮罩层时才用（防止大厅页面误触）
+        if self._has_overlay(screenshot):
+            pos = self._find_x_shape(screenshot)
+            if pos:
+                return (pos[0], pos[1], "形状检测X")
 
         return None
 
