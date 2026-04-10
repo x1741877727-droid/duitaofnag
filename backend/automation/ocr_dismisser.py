@@ -290,13 +290,13 @@ class OcrDismisser:
         """
         popups_closed = 0
         stuck_count = 0
-        lobby_confirm = 0  # 连续确认大厅次数
-        LOBBY_CONFIRM_NEEDED = 2  # 2次确认即可（计数器已不会被模板miss误重置）
+        lobby_confirm = 0
+        LOBBY_CONFIRM_NEEDED = 2
 
         for rnd in range(self.max_rounds):
             shot = await device.screenshot()
             if shot is None:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 continue
 
             # ━━ 快速路径: 模板匹配找X (~20ms) ━━
@@ -308,19 +308,18 @@ class OcrDismisser:
                     popups_closed += 1
                     stuck_count = 0
                     lobby_confirm = 0
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.5)
                     continue
 
-            # ━━ 快速路径: 模板匹配检查大厅 (~20ms) ━━
+            # ━━ 快速路径: 模板匹配大厅 + 无遮罩 (~30ms) ━━
             if matcher and matcher.is_at_lobby(shot) and not self._has_overlay(shot):
                 lobby_confirm += 1
                 if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
-                    logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次，弹窗清理完成！关闭了{popups_closed}个弹窗")
+                    logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次，完成！关闭{popups_closed}个弹窗")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.info(f"[R{rnd+1}] 大厅检测 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.3)  # 短等，快速二次确认
                 continue
-            # 注意: 快速路径未匹配不重置 lobby_confirm，交给慢速路径判断
 
             # ━━ 慢速路径: 需要OCR分析 ━━
             state = self.detect_state(shot, matcher)

@@ -196,22 +196,15 @@ class ScreenMatcher:
     # ----------------------------------------------------------------
 
     def is_at_lobby(self, screenshot: np.ndarray) -> bool:
-        """检测是否在大厅（匹配"开始游戏"按钮，且无弹窗遮挡）"""
+        """检测是否在大厅（匹配"开始游戏"按钮即可，不做反向排除）
+
+        弹窗遮挡由 _has_overlay() 单独判断，这里只负责快速检测大厅标志。
+        阈值降低到 0.75 提高命中率，避免因截图微小变化导致漏检。
+        """
         hit = self.find_any(screenshot, [
             "lobby_start_btn", "lobby_start_game"
-        ], threshold=0.85)
-        if not hit:
-            return False
-        # 额外检查：如果同时检测到弹窗X按钮，说明有弹窗遮挡，不算在大厅
-        x_hit = self.find_close_button(screenshot)
-        if x_hit and x_hit.confidence > 0.80:
-            return False
-        # 只检查明确的弹窗按钮（确认/同意/领取），不检查所有btn_*
-        popup_btns = ["btn_confirm", "btn_agree", "btn_claim_gift", "btn_confirm_privacy"]
-        popup_hit = self.find_any(screenshot, popup_btns, threshold=0.80)
-        if popup_hit:
-            return False
-        return True
+        ], threshold=0.75)
+        return hit is not None
 
     def find_close_button(self, screenshot: np.ndarray) -> Optional[MatchHit]:
         """查找任何X关闭按钮"""
