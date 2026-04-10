@@ -338,16 +338,19 @@ class SingleInstanceRunner:
                 logger.error("[阶段6] 找不到'开始游戏'按钮")
                 return False
 
-        # ── 轮询等面板打开 ──
+        # ── 轮询等面板打开（等文字数量稳定）──
         hits = []
+        prev_count = 0
         for _ in range(15):
             await asyncio.sleep(0.4)
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
             hits = ocr._ocr_all(shot)
-            if len(hits) > 25:
+            # 文字数量 > 30 且连续两次数量接近 = 面板已完全渲染
+            if len(hits) > 30 and abs(len(hits) - prev_count) < 5:
                 break
+            prev_count = len(hits)
 
         if len(hits) < 20:
             logger.warning("[阶段6] 地图面板未打开")
@@ -376,13 +379,17 @@ class SingleInstanceRunner:
                         map_hit = h
                         break
 
-        # 判断是否已在团竞模式：补位按钮 或 团竞特征词
+        # 判断是否已在团竞模式：多种特征词任一命中
         is_team_battle = (fill_hit is not None or
                           "团竞手册" in all_text or
                           "团竞详情" in all_text or
                           "军备团竞" in all_text or
+                          "经典团竞" in all_text or
                           "击团竞" in all_text or
-                          "迷你战争" in all_text)
+                          "迷你战争" in all_text or
+                          "轮换团竞" in all_text or
+                          "突变团竞" in all_text or
+                          map_hit is not None)  # 目标地图能找到说明已在对应分类
 
         # ── 判断是否需要切换模式 ──
         if not is_team_battle:
@@ -408,8 +415,22 @@ class SingleInstanceRunner:
                                     map_hit = h
                                     break
             else:
-                logger.warning("[阶段6] 未找到团队竞技入口")
-                return False
+                # 重试一次 OCR（可能面板还没完全渲染）
+                logger.info("[阶段6] 未找到团队竞技，重试OCR...")
+                await asyncio.sleep(0.5)
+                shot = await self.adb.screenshot()
+                if shot is not None:
+                    hits = ocr._ocr_all(shot)
+                    for h in hits:
+                        if "团队竞技" in h.text:
+                            logger.info(f"[阶段6] 重试找到团队竞技 ({h.cx},{h.cy})")
+                            await self.adb.tap(h.cx, h.cy)
+                            await asyncio.sleep(0.5)
+                            break
+                    else:
+                        logger.warning("[阶段6] 未找到团队竞技入口")
+                        self._restore_guard()
+                        return False
         else:
             logger.info("[阶段6] 已在团队竞技，跳过切换")
 
