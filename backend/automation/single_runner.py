@@ -378,17 +378,36 @@ class SingleInstanceRunner:
 
         logger.info("[阶段4] 口令码已复制到剪贴板")
 
-        # 关闭组队面板：点击面板外的空白区域
-        # 组队面板占据左半边，点击右侧画面空白处关闭
-        shot = await self.adb.screenshot()
-        if shot is not None:
-            h, w = shot.shape[:2]
-            # 点击画面右侧 3/4 处的中间位置（面板外）
-            await self.adb.tap(w * 3 // 4, h // 2)
+        # 关闭面板：可能有多层（组队码弹窗 + 好友列表侧栏）
+        for _ in range(3):
             await asyncio.sleep(0.5)
-            # 再点一次确保关闭（可能有二级面板）
-            await self.adb.tap(w * 3 // 4, h // 2)
-            await asyncio.sleep(0.5)
+            shot = await self.adb.screenshot()
+            if shot is None:
+                break
+
+            # 检查是否已回到大厅（有"开始游戏"按钮）
+            hits = ocr._ocr_all(shot)
+            if any("开始游戏" in h.text for h in hits):
+                break
+
+            # 优先找 X 关闭按钮（模板匹配）
+            close = self.matcher.find_dialog_close(shot)
+            if close:
+                logger.info(f"[阶段4] 点击关闭按钮 ({close.cx},{close.cy})")
+                await self.adb.tap(close.cx, close.cy)
+                continue
+
+            # OCR 找"关闭"或"×"
+            for h in hits:
+                if h.text in ("×", "✕", "X", "关闭"):
+                    logger.info(f"[阶段4] OCR找到关闭 '{h.text}' ({h.cx},{h.cy})")
+                    await self.adb.tap(h.cx, h.cy)
+                    break
+            else:
+                # 兜底：点击面板外空白区域
+                h, w = shot.shape[:2]
+                await self.adb.tap(w * 3 // 4, h // 2)
+
         logger.info("[阶段4] 已关闭组队面板")
 
         return "clipboard"
