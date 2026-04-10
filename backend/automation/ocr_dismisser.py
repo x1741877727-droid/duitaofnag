@@ -85,14 +85,12 @@ class OcrDismisser:
         self._ocr = None
 
     def _get_ocr(self):
-        """懒加载PaddleOCR（首次调用耗时几秒）"""
+        """懒加载EasyOCR（首次调用会下载模型，约30秒）"""
         if self._ocr is None:
-            import os
-            os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-            logger.info("初始化 PaddleOCR ...")
-            from paddleocr import PaddleOCR
-            self._ocr = PaddleOCR(use_angle_cls=False, lang='ch')
-            logger.info("PaddleOCR 初始化完成")
+            logger.info("初始化 EasyOCR ...")
+            import easyocr
+            self._ocr = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+            logger.info("EasyOCR 初始化完成")
         return self._ocr
 
     def ocr_screen(self, screenshot) -> list[OcrHit]:
@@ -100,25 +98,19 @@ class OcrDismisser:
         import numpy as np
         ocr = self._get_ocr()
 
-        # PaddleOCR 接受 numpy array 或文件路径
-        if isinstance(screenshot, np.ndarray):
-            img = screenshot
-        else:
+        if not isinstance(screenshot, np.ndarray):
             return []
 
-        result = ocr.ocr(img)
+        # EasyOCR 返回 [(bbox, text, confidence), ...]
+        # bbox = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+        results = ocr.readtext(screenshot)
         hits = []
-        if result and result[0]:
-            for line in result[0]:
-                box = line[0]  # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-                text = line[1][0]
-                conf = line[1][1]
-                # 计算中心点
-                xs = [p[0] for p in box]
-                ys = [p[1] for p in box]
-                cx = int(sum(xs) / 4)
-                cy = int(sum(ys) / 4)
-                hits.append(OcrHit(text=text, cx=cx, cy=cy, confidence=conf))
+        for (box, text, conf) in results:
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            cx = int(sum(xs) / 4)
+            cy = int(sum(ys) / 4)
+            hits.append(OcrHit(text=text, cx=cx, cy=cy, confidence=conf))
         return hits
 
     def _find_keyword_hit(self, hits: list[OcrHit], keywords: list[str]) -> OcrHit | None:
