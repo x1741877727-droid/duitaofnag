@@ -4,7 +4,7 @@ import logging
 import sys
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -19,96 +19,141 @@ matcher = ScreenMatcher("fixtures/templates")
 matcher.load_all()
 
 
-async def step_read_current():
-    """步骤0: 读取当前大厅显示的模式和地图"""
-    print("\n=== 步骤0: OCR 读取当前模式 ===")
+async def ocr_tap(keywords, step=""):
+    """OCR找关键词并点击"""
+    for attempt in range(3):
+        shot = await adb.screenshot()
+        if shot is None:
+            await asyncio.sleep(0.5)
+            continue
+        hits = ocr._ocr_all(shot)
+        for kw in keywords:
+            for h in hits:
+                if kw in h.text:
+                    print(f"  [{step}] OCR匹配 '{h.text}' → ({h.cx},{h.cy})")
+                    await adb.tap(h.cx, h.cy)
+                    return True
+        if attempt < 2:
+            await asyncio.sleep(0.8)
+    print(f"  [{step}] 未找到 {keywords}")
+    return False
+
+
+async def ocr_dump(label=""):
+    """截图+OCR全文"""
+    import cv2
     shot = await adb.screenshot()
     if shot is None:
         print("截图失败")
         return
-
+    cv2.imwrite("_map_panel.png", shot)
     hits = ocr._ocr_all(shot)
-    print(f"OCR 识别到 {len(hits)} 个文本:")
+    print(f"\n=== {label} ({len(hits)}个文本) ===")
     for h in hits:
         print(f"  [{h.cx:4d},{h.cy:4d}] '{h.text}'")
 
-    # 重点看左上角区域 (x<300, y<150) 的文字
-    print("\n--- 左上角区域 (模式名) ---")
-    for h in hits:
-        if h.cx < 350 and h.cy < 150:
-            print(f"  [{h.cx:4d},{h.cy:4d}] '{h.text}'")
 
-
-async def step_click_mode_area():
-    """步骤1: 点击模式名区域打开地图选择
-
-    策略：找到"开始游戏"按钮，往下偏移60像素点击模式名区域。
-    模式名文字不固定（经典/排位/团竞等），但位置相对"开始游戏"是固定的。
-    """
-    print("\n=== 步骤1: 点击模式名区域 ===")
+async def step1_open_map_panel():
+    """步骤1: 从大厅打开地图选择面板"""
+    print("\n=== 步骤1: 打开地图选择面板 ===")
     shot = await adb.screenshot()
     if shot is None:
-        return
-
+        return False
     hits = ocr._ocr_all(shot)
-
-    # 找"开始游戏"按钮位置
     for h in hits:
         if "开始游戏" in h.text:
-            target_x = h.cx
-            target_y = h.cy + 60  # 模式名在"开始游戏"下方约60像素
-            print(f"  '开始游戏' @ ({h.cx},{h.cy})，点击下方模式名 ({target_x},{target_y})")
-            await adb.tap(target_x, target_y)
-            print("  已点击，等待面板打开...")
-            await asyncio.sleep(2)
-            return
-
-    # 兜底：模板匹配找 lobby_start_btn
-    hit = matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
-    if hit:
-        target_x = hit.cx
-        target_y = hit.cy + 60
-        print(f"  模板 'lobby_start_btn' @ ({hit.cx},{hit.cy})，点击下方 ({target_x},{target_y})")
-        await adb.tap(target_x, target_y)
-        await asyncio.sleep(2)
-        return
-
-    print("  ERROR: 找不到'开始游戏'按钮")
+            target_y = h.cy + 60
+            print(f"  '开始游戏' @ ({h.cx},{h.cy})，点击模式名 ({h.cx},{target_y})")
+            await adb.tap(h.cx, target_y)
+            await asyncio.sleep(1.5)
+            return True
+    print("  未找到'开始游戏'")
+    return False
 
 
-async def step_screenshot_map_panel():
-    """步骤1.5: 截图看地图选择面板"""
-    print("\n=== 截图: 地图选择面板 ===")
+async def step2_select_team_battle():
+    """步骤2: 点击左侧'团队竞技'"""
+    print("\n=== 步骤2: 选择团队竞技 ===")
+    return await ocr_tap(["团队竞技"], step="团队竞技")
+
+
+async def step3_select_map(target="狙击团竞"):
+    """步骤3: 选择目标地图"""
+    print(f"\n=== 步骤3: 选择地图 '{target}' ===")
+    await asyncio.sleep(1)
+    return await ocr_tap([target], step="选择地图")
+
+
+async def step4_disable_auto_fill():
+    """步骤4: 取消'自动匹配队友'补位"""
+    print("\n=== 步骤4: 检查并取消自动补位 ===")
+    await asyncio.sleep(0.5)
     shot = await adb.screenshot()
     if shot is None:
-        return
-
-    import cv2
-    cv2.imwrite("_map_panel.png", shot)
-    print("  已保存 _map_panel.png")
-
+        return False
     hits = ocr._ocr_all(shot)
-    print(f"  OCR 识别到 {len(hits)} 个文本:")
+    # 找"自动匹配队友"文字
     for h in hits:
-        print(f"    [{h.cx:4d},{h.cy:4d}] '{h.text}'")
+        if "自动匹配" in h.text or "匹配队友" in h.text:
+            print(f"  找到补位按钮: '{h.text}' @ ({h.cx},{h.cy})")
+            # 需要判断当前是否选中状态——先点击看效果
+            await adb.tap(h.cx, h.cy)
+            print("  已点击取消补位")
+            return True
+    print("  未找到'自动匹配队友'按钮")
+    return False
+
+
+async def step5_confirm():
+    """步骤5: 点击确定"""
+    print("\n=== 步骤5: 点击确定 ===")
+    await asyncio.sleep(0.5)
+    return await ocr_tap(["确定"], step="确定")
 
 
 async def main():
-    step = sys.argv[1] if len(sys.argv) > 1 else "0"
+    step = sys.argv[1] if len(sys.argv) > 1 else "help"
 
-    if step == "0":
-        await step_read_current()
-    elif step == "1":
-        await step_click_mode_area()
-    elif step == "1.5":
-        await step_screenshot_map_panel()
+    if step == "1":
+        await step1_open_map_panel()
+    elif step == "2":
+        await step2_select_team_battle()
+        await asyncio.sleep(1)
+        await ocr_dump("团队竞技面板")
+    elif step == "3":
+        target = sys.argv[2] if len(sys.argv) > 2 else "狙击团竞"
+        await step3_select_map(target)
+    elif step == "4":
+        await step4_disable_auto_fill()
+    elif step == "5":
+        await step5_confirm()
+    elif step == "dump":
+        await ocr_dump("当前画面")
     elif step == "all":
-        await step_read_current()
-        await step_click_mode_area()
-        await step_screenshot_map_panel()
+        if not await step1_open_map_panel():
+            return
+        if not await step2_select_team_battle():
+            return
+        await asyncio.sleep(1)
+        await ocr_dump("团队竞技面板")
+        target = sys.argv[2] if len(sys.argv) > 2 else "狙击团竞"
+        if not await step3_select_map(target):
+            print("  地图未找到，dump当前面板文字:")
+            await ocr_dump("查找地图失败")
+            return
+        await step4_disable_auto_fill()
+        await step5_confirm()
+        await asyncio.sleep(1)
+        await ocr_dump("完成后")
     else:
-        print(f"Unknown step: {step}")
-        print("Usage: python _test_map.py [0|1|1.5|all]")
+        print("Usage: python _test_map.py [1|2|3|4|5|dump|all]")
+        print("  1    - 打开地图面板")
+        print("  2    - 选择团队竞技")
+        print("  3 [地图名] - 选择地图")
+        print("  4    - 取消自动补位")
+        print("  5    - 点击确定")
+        print("  dump - OCR当前画面")
+        print("  all [地图名] - 全流程")
 
 
 asyncio.run(main())
