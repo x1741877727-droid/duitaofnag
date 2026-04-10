@@ -308,7 +308,7 @@ class OcrDismisser:
                     popups_closed += 1
                     stuck_count = 0
                     lobby_confirm = 0
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.6)
                     continue
 
             # ━━ 快速路径: 模板匹配检查大厅 (~20ms) ━━

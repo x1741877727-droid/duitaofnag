@@ -113,25 +113,24 @@ class SingleInstanceRunner:
         return False
 
     async def _start_accelerator(self) -> bool:
-        """启动加速器并等待连接成功"""
+        """启动加速器并等待连接成功（轮询驱动，不靠固定等待）"""
         logger.info("[阶段0] 启动加速器")
         await self.adb.start_app(ACCELERATOR_PACKAGE)
-        await asyncio.sleep(3)
 
         play_click_count = 0
-
-        for attempt in range(15):
+        # 轮询：每次截图检查，快电脑秒过，慢电脑也能等到
+        for attempt in range(30):  # 最多30次 × ~1.5s ≈ 45秒
+            await asyncio.sleep(1.5)
             shot = await self.adb.screenshot()
             if shot is None:
-                await asyncio.sleep(1)
                 continue
 
             status = self.matcher.is_accelerator_connected(shot)
 
             if status is True:
-                logger.info("[阶段0] 加速器已连接 ✓")
+                logger.info(f"[阶段0] 加速器已连接 ✓ ({attempt+1}轮)")
                 await self.adb.key_event("KEYCODE_HOME")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 return True
 
             if status is False:
@@ -140,41 +139,35 @@ class SingleInstanceRunner:
                     logger.info("[阶段0] 连续点击无效，按返回键清除可能的弹窗")
                     await self.adb.key_event("KEYCODE_BACK")
                     play_click_count = 0
-                    await asyncio.sleep(2)
                     continue
 
                 logger.info("[阶段0] 点击启动按钮")
                 play_hit = self.matcher.match_one(shot, "accelerator_play")
                 if play_hit:
                     await self.adb.tap(play_hit.cx, play_hit.cy)
-                await asyncio.sleep(3)
                 continue
 
             # status is None — 不在主界面
             logger.info("[阶段0] 不在加速器主界面，按返回键")
             await self.adb.key_event("KEYCODE_BACK")
             play_click_count = 0
-            await asyncio.sleep(2)
 
         logger.error("[阶段0] 加速器启动超时")
         return False
 
     async def _verify_network(self) -> bool:
-        """打开百度验证网络。加速器会劫持URL显示验证结果，看到"验证成功"=网络通了"""
+        """打开百度验证网络（轮询驱动，检测到结果立即返回）"""
         logger.info("[阶段0] 网络验证: 打开百度...")
         await self.adb.open_url("https://m.baidu.com/")
-        await asyncio.sleep(2)
 
-        # 加速器会劫持URL → 显示"验证成功"等文字 = 加速器工作正常
-        # 如果看到真正的百度页面("百度","搜索") = 加速器没劫持 = 没连上
         SUCCESS_KEYWORDS = ["验证成功", "端口验证", "六花端口"]
         FAIL_KEYWORDS = ["百度", "搜索", "热搜"]
 
-        result = None
-        for check in range(4):  # 总共约8秒
+        # 每秒检查一次，最多10秒。快电脑2秒出结果，慢电脑也能等到
+        for check in range(10):
+            await asyncio.sleep(1)
             shot = await self.adb.screenshot()
             if shot is None:
-                await asyncio.sleep(1)
                 continue
 
             hits = self.ocr_dismisser.ocr_screen(shot)
@@ -183,26 +176,24 @@ class SingleInstanceRunner:
 
             if any(kw in all_text for kw in SUCCESS_KEYWORDS):
                 logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
-                result = True
-                break
+                await self._close_browser()
+                return True
 
             if any(kw in all_text for kw in FAIL_KEYWORDS):
-                logger.warning("[阶段0] 网络验证失败: 看到百度真实页面，加速器未工作")
-                result = False
-                break
+                logger.warning("[阶段0] 网络验证失败: 百度真实页面，加速器未工作")
+                await self._close_browser()
+                return False
 
-            await asyncio.sleep(1.5)
+        logger.warning("[阶段0] 网络验证失败: 超时")
+        await self._close_browser()
+        return False
 
-        if result is None:
-            logger.warning("[阶段0] 网络验证失败: 8秒内未检测到成功标志")
-            result = False
-
-        # 无论成功失败，都杀掉浏览器进程再回桌面
+    async def _close_browser(self):
+        """关掉浏览器回桌面"""
         await self.adb.stop_app("com.android.browser")
         await asyncio.sleep(0.3)
         await self.adb.key_event("KEYCODE_HOME")
-        await asyncio.sleep(0.5)
-        return result
+        await asyncio.sleep(0.3)
 
     # ================================================================
     # 阶段 1: 启动游戏
@@ -214,27 +205,31 @@ class SingleInstanceRunner:
         logger.info("[阶段1] 启动游戏")
 
         await self.adb.start_app(GAME_PACKAGE)
-        await asyncio.sleep(5)  # 游戏启动等待
 
-        # 等待游戏加载完成，最多90秒
+        # 轮询等待加载完成（不固定等待，快电脑秒过，慢电脑也能等到）
         # GuardedADB 会自动处理加载中弹出的系统弹窗（内存提醒等）
-        for attempt in range(45):
+        for attempt in range(60):  # 最多60次 × 1.5s = 90秒
+            await asyncio.sleep(1.5)
             shot = await self.adb.screenshot()  # 守卫自动清弹窗
             if shot is None:
-                await asyncio.sleep(2)
                 continue
+
+            # 前5轮用模板快速检查（OCR 慢，游戏刚启动不需要OCR）
+            if attempt < 5 and self.matcher:
+                if self.matcher.is_at_lobby(shot):
+                    logger.info("[阶段1] 游戏已在大厅（模板检测）")
+                    return True
+                continue  # 前几秒大概率还在启动画面，跳过 OCR
 
             # 用OCR检测当前画面
             hits = self.ocr_dismisser.ocr_screen(shot)
             all_text = " ".join(h.text for h in hits)
             logger.info(f"[阶段1] 加载中R{attempt+1}: OCR={all_text[:80]}")
 
-            # 检测到大厅标志或弹窗标志 → 加载完成，交给阶段3处理
+            # 检测到大厅标志或弹窗标志 → 加载完成
             if any(kw in all_text for kw in ["开始游戏", "公告", "活动", "更新公告", "立即前往"]):
                 logger.info("[阶段1] 游戏加载完成，进入弹窗清理阶段")
                 return True
-
-            await asyncio.sleep(2)
 
         logger.warning("[阶段1] 游戏加载超时(90s)")
         return False
