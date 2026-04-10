@@ -35,7 +35,6 @@ import {
   Undo2,
   ChevronDown,
   ChevronRight,
-  UserCircle,
 } from 'lucide-react'
 
 // 队伍颜色映射
@@ -405,16 +404,6 @@ function TeamDropZone({
         ))}
       </SortableContext>
 
-      {/* 真人占位 */}
-      <div className="border-t border-dashed border-border/50 pt-2 mt-2 space-y-1.5">
-        {[1, 2].map(i => (
-          <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-muted/30">
-            <UserCircle className="w-4 h-4 text-muted-foreground/50" />
-            <span className="text-xs text-muted-foreground/70">真人位 {i}</span>
-            <span className="text-xs text-muted-foreground/40 ml-auto">待接入</span>
-          </div>
-        ))}
-      </div>
     </div>
   )
 }

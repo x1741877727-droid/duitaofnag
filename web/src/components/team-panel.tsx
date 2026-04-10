@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore, stateConfig, getStageIndex, type Instance, type TeamGroup } from '@/lib/store'
 import { cn } from '@/lib/utils'
-import { ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Users, Star, User } from 'lucide-react'
+import { ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Star, User } from 'lucide-react'
 
 interface TeamPanelProps {
   team: TeamGroup
@@ -92,11 +92,6 @@ export function TeamPanel({ team }: TeamPanelProps) {
           </div>
         )}
 
-        {/* 真人占位 */}
-        <div className="grid grid-cols-2 gap-3 pt-2">
-          <HumanSlot label="真人 1" />
-          <HumanSlot label="真人 2" />
-        </div>
       </div>
     </div>
   )
@@ -278,16 +273,3 @@ function MemberCard({
   )
 }
 
-function HumanSlot({ label }: { label: string }) {
-  return (
-    <div className="rounded-lg border border-dashed border-border p-3 flex items-center gap-3">
-      <div className="w-9 h-9 rounded-full bg-muted/50 flex items-center justify-center">
-        <Users className="w-4 h-4 text-muted-foreground" />
-      </div>
-      <div>
-        <div className="text-sm text-muted-foreground">{label}</div>
-        <div className="text-xs text-muted-foreground/70">待加入</div>
-      </div>
-    </div>
-  )
-}
