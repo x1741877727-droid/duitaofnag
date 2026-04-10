@@ -114,18 +114,19 @@ export function SquadBuilder() {
     const emuIndex = parseInt(String(active.id).replace('emu-', ''))
     const overId = String(over.id)
 
-    // Drop onto a team slot (e.g., "slot-A-0")
+    // Drop onto a team slot (e.g., "slot-A-0") or team zone
     if (overId.startsWith('slot-')) {
-      const [, team, slotStr] = overId.split('-')
-      const slotIdx = parseInt(slotStr)
-      const role = slotIdx === 0 ? 'captain' : 'member'
+      const [, team] = overId.split('-')
 
-      // Check if slot is already full
       const teamAssigned = assigned[team] || []
-      if (teamAssigned.length >= SLOTS_PER_TEAM) {
-        // If dropping on an occupied slot, we could swap — for now just ignore
-        if (!teamAssigned.find(a => a.index === emuIndex)) return
-      }
+      const alreadyInTeam = teamAssigned.find(a => a.index === emuIndex)
+
+      // 已满且不是同队内移动 → 忽略
+      if (teamAssigned.length >= SLOTS_PER_TEAM && !alreadyInTeam) return
+
+      // 自动决定角色：队伍里没有队长 → 当队长，否则当队员
+      const hasCaptain = teamAssigned.some(a => a.role === 'captain' && a.index !== emuIndex)
+      const role = hasCaptain ? 'member' : 'captain'
 
       const emulator = emulators.find(e => e.index === emuIndex)
       const existing = localAccounts.find(a => a.index === emuIndex)
@@ -133,19 +134,19 @@ export function SquadBuilder() {
       let newAccounts: AccountAssignment[]
 
       if (existing) {
-        // Moving from one team to another
-        // If becoming captain, demote existing captain
+        // 从另一个队/同队内移动
         newAccounts = localAccounts.map(a => {
           if (a.index === emuIndex) {
             return { ...a, group: team as TeamGroup, role }
           }
+          // 如果新来的要当队长，原队长降级
           if (role === 'captain' && a.group === team && a.role === 'captain') {
             return { ...a, role: 'member' }
           }
           return a
         })
       } else if (emulator) {
-        // New assignment from unassigned pool
+        // 从未分配池拖入
         const newAccount: AccountAssignment = {
           index: emulator.index,
           name: emulator.name,
@@ -156,7 +157,6 @@ export function SquadBuilder() {
           nickname: emulator.name,
           gameId: '',
         }
-        // Demote existing captain if needed
         newAccounts = localAccounts.map(a => {
           if (role === 'captain' && a.group === team && a.role === 'captain') {
             return { ...a, role: 'member' }
@@ -373,11 +373,16 @@ function TeamDropZone({
   activeId: string | null
 }) {
   const colors = getTeamColor(team)
+
+  // 按角色排列：队长在前，队员在后，空槽补齐到 SLOTS_PER_TEAM
+  const captain = assigned.find(a => a.role === 'captain') || null
+  const members = assigned.filter(a => a.role !== 'captain')
+  const ordered = [captain, ...members]
   const slots = Array.from({ length: SLOTS_PER_TEAM }, (_, i) => ({
     id: `slot-${team}-${i}`,
     label: i === 0 ? '队长' : `队员 ${i}`,
     isCaptain: i === 0,
-    account: assigned[i] || null,
+    account: ordered[i] || null,
   }))
 
   return (
