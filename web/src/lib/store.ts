@@ -25,7 +25,7 @@ export type InstanceState =
   | 'dismiss_popups' | 'lobby' | 'map_setup' | 'team_create'
   | 'team_join' | 'ready' | 'in_game' | 'done' | 'error'
 
-export type TeamGroup = 'A' | 'B' | 'C' | 'D'
+export type TeamGroup = 'A' | 'B' | 'C' | 'D' | 'E' | 'F'
 export type TeamRole = 'captain' | 'member'
 
 export interface Instance {
@@ -184,11 +184,16 @@ export const stateConfig: Record<InstanceState, { label: string; status: 'idle' 
   error: { label: '出错', status: 'error' },
 }
 
-// 大组 → 队伍映射: 大组1=A+B, 大组2=C+D, ...
+// 大组 → 队伍映射: 大组1=A+B, 大组2=C+D, 大组3=E+F
 export const squadTeams: Record<number, TeamGroup[]> = {
   1: ['A', 'B'],
   2: ['C', 'D'],
+  3: ['E', 'F'],
 }
+
+export const allSquadIds = [1, 2, 3] as const
+export const MAX_SQUADS = 3
+export const SLOTS_PER_TEAM = 3
 
 export function getSquadTeams(squad: number): TeamGroup[] {
   return squadTeams[squad] || ['A', 'B']

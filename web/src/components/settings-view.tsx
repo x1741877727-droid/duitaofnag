@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useAppStore, type TeamGroup, type TeamRole, type AccountAssignment } from '@/lib/store'
 import { cn } from '@/lib/utils'
-import { 
-  FolderOpen, 
-  RefreshCw, 
-  Save, 
-  Plus, 
-  Trash2, 
+import {
+  FolderOpen,
+  RefreshCw,
+  Save,
+  Plus,
+  Trash2,
   MonitorSmartphone,
   ArrowDownToLine,
   Settings,
@@ -15,13 +15,14 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { SquadBuilder } from './squad-builder'
 
 export function SettingsView() {
   return (
     <div className="space-y-6 max-w-5xl">
       <EnvConfig />
       <EmulatorScan />
-      <AccountTable />
+      <SquadBuilder />
     </div>
   )
 }

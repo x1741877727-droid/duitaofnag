@@ -31,8 +31,18 @@ export function TeamPanel({ team }: TeamPanelProps) {
   )
   const hasError = teamInstances.some(i => i.state === 'error')
 
-  const teamColorClass = team === 'A' ? 'text-team-a' : 'text-team-b'
-  const teamBgClass = team === 'A' ? 'bg-team-a' : 'bg-team-b'
+  const teamColorMap: Record<string, string> = {
+    A: 'text-team-a', B: 'text-team-b',
+    C: 'text-[var(--color-team-c)]', D: 'text-[var(--color-team-d)]',
+    E: 'text-[var(--color-team-e)]', F: 'text-[var(--color-team-f)]',
+  }
+  const teamBgMap: Record<string, string> = {
+    A: 'bg-team-a', B: 'bg-team-b',
+    C: 'bg-[var(--color-team-c)]', D: 'bg-[var(--color-team-d)]',
+    E: 'bg-[var(--color-team-e)]', F: 'bg-[var(--color-team-f)]',
+  }
+  const teamColorClass = teamColorMap[team] || 'text-team-a'
+  const teamBgClass = teamBgMap[team] || 'bg-team-a'
 
   return (
     <div className="rounded-lg bg-card border border-border">
