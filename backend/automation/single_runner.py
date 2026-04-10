@@ -361,8 +361,8 @@ class SingleInstanceRunner:
 
         ocr = OcrDismisser()
 
-        # ── 步骤1: 在大厅找到并点击"组队"按钮 ──
-        if not await self._ocr_tap(ocr, ["组队"], template_fallback="tab_team", step="打开组队面板"):
+        # ── 步骤1: 在大厅找到并点击"组队"按钮（OCR优先，左侧栏文字更可靠）──
+        if not await self._ocr_tap(ocr, ["组队"], template_fallback="", step="打开组队面板"):
             return None
         # 轮询等待面板出现
         await self._wait_for_text(ocr, ["组队码", "邀开黑", "好友"], timeout=5)
