@@ -16,17 +16,21 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# 关闭类关键词（优先级从高到低）
-CLOSE_KEYWORDS = [
+# 勾选类关键词（点了不会关闭弹窗，只是打勾，之后还需要找X关闭）
+CHECKBOX_KEYWORDS = [
     "今日内不再弹出",
     "今日不再弹出",
     "不再弹出",
-    "关闭",
-    "×",  # X符号
-    "x",  # 小写x
+    "今日内不再提醒",
+    "不再提醒",
 ]
 
-# 确认/跳过类关键词
+# 关闭类关键词（点了会直接关闭弹窗）
+CLOSE_KEYWORDS = [
+    "关闭",
+]
+
+# 确认/跳过类关键词（点了会关闭弹窗）
 CONFIRM_KEYWORDS = [
     "确定",
     "确认",
@@ -37,7 +41,6 @@ CONFIRM_KEYWORDS = [
     "不需要",
     "暂不",
     "跳过",
-    "领取",  # 有些弹窗是"领取奖励"后就关了
 ]
 
 # 大厅标志关键词
@@ -166,7 +169,34 @@ class OcrDismisser:
                     logger.info(f"[弹窗R{round_num+1}] OCR判定在大厅 ✓")
                     return DismissResult(True, popups_closed, "lobby", round_num + 1)
 
-            # 2. 优先找"关闭类"文字
+            # 2. 先检查是否有复选框（"今日内不再弹出"），勾选后找X关闭
+            checkbox_hit = self._find_keyword_hit(hits, CHECKBOX_KEYWORDS)
+            if checkbox_hit:
+                logger.info(f"[弹窗R{round_num+1}] 勾选: '{checkbox_hit.text}' @ ({checkbox_hit.cx},{checkbox_hit.cy})")
+                await device.tap(checkbox_hit.cx, checkbox_hit.cy)
+                await asyncio.sleep(0.5)
+                # 勾选后立刻找X按钮关闭
+                # 方法1: 用模板匹配找X
+                if matcher:
+                    shot2 = await device.screenshot()
+                    if shot2 is not None:
+                        x_hit = matcher.find_close_button(shot2)
+                        if x_hit:
+                            logger.info(f"[弹窗R{round_num+1}] 勾选后点X: ({x_hit.cx},{x_hit.cy})")
+                            await device.tap(x_hit.cx, x_hit.cy)
+                            popups_closed += 1
+                            no_change_count = 0
+                            await asyncio.sleep(self.interval)
+                            continue
+                # 方法2: 没找到X，在右上角区域点击（弹窗X通常在右上角）
+                logger.info(f"[弹窗R{round_num+1}] 勾选后点右上角X区域")
+                await device.tap(1217, 92)  # 大多数活动弹窗X的位置
+                popups_closed += 1
+                no_change_count = 0
+                await asyncio.sleep(self.interval)
+                continue
+
+            # 3. 找"关闭类"文字
             close_hit = self._find_keyword_hit(hits, CLOSE_KEYWORDS)
             if close_hit:
                 logger.info(f"[弹窗R{round_num+1}] 点击关闭: '{close_hit.text}' @ ({close_hit.cx},{close_hit.cy})")
@@ -176,7 +206,7 @@ class OcrDismisser:
                 await asyncio.sleep(self.interval)
                 continue
 
-            # 3. 找"确认类"文字
+            # 4. 找"确认类"文字
             confirm_hit = self._find_keyword_hit(hits, CONFIRM_KEYWORDS)
             if confirm_hit:
                 logger.info(f"[弹窗R{round_num+1}] 点击确认: '{confirm_hit.text}' @ ({confirm_hit.cx},{confirm_hit.cy})")
@@ -186,7 +216,7 @@ class OcrDismisser:
                 await asyncio.sleep(self.interval)
                 continue
 
-            # 4. 模板匹配兜底：找X按钮
+            # 5. 模板匹配兜底：找X按钮
             if matcher:
                 x_hit = matcher.find_close_button(shot)
                 if x_hit:
@@ -197,7 +227,7 @@ class OcrDismisser:
                     await asyncio.sleep(self.interval)
                     continue
 
-            # 5. 什么都没找到 → 轮换点击不同位置
+            # 6. 什么都没找到 → 轮换点击不同位置
             no_change_count += 1
             positions = [
                 (640, 400),   # 屏幕中央
