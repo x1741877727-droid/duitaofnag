@@ -187,7 +187,7 @@ coll = COLLECT(exe, a.binaries, a.datas, name='GameBot')
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--clean",
+        "--clean", "-y",
         "--distpath", os.path.join(OUTPUT_DIR, "dist"),
         "--workpath", os.path.join(OUTPUT_DIR, "build"),
         spec_path,
