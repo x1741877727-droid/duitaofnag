@@ -364,17 +364,19 @@ class SingleInstanceRunner:
         # ── 步骤1: 在大厅找到并点击"组队"按钮 ──
         if not await self._ocr_tap(ocr, ["组队"], template_fallback="tab_team", step="打开组队面板"):
             return None
-        await asyncio.sleep(2)
+        # 轮询等待面板出现（检测到"组队码"说明面板已打开）
+        await self._wait_for_text(ocr, ["组队码", "邀开黑", "好友"], timeout=5)
 
         # ── 步骤2: 点击"组队码" tab ──
         if not await self._ocr_tap(ocr, ["组队码"], template_fallback="btn_team_code_tab", step="组队码tab"):
             return None
-        await asyncio.sleep(2)
+        # 轮询等待组队码面板（检测到"分享"说明已切换）
+        await self._wait_for_text(ocr, ["分享", "口令码", "粘贴"], timeout=5)
 
         # ── 步骤3: 点击"分享组队口令码"或"分享" ──
         if not await self._ocr_tap(ocr, ["分享组队口令码", "分享口令", "分享"], template_fallback="btn_share_team_code", step="分享口令码"):
             return None
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
         logger.info("[阶段4] 口令码已复制到剪贴板")
 
@@ -412,17 +414,39 @@ class SingleInstanceRunner:
 
         return "clipboard"
 
+    async def _wait_for_text(self, ocr: OcrDismisser, keywords: list[str],
+                             timeout: float = 5) -> bool:
+        """轮询等待画面出现指定文字，快电脑秒过，慢电脑也能等到"""
+        for _ in range(int(timeout / 0.5)):
+            await asyncio.sleep(0.5)
+            shot = await self.adb.screenshot()
+            if shot is None:
+                continue
+            # 先模板快速检查大厅状态变化
+            hits = ocr._ocr_all(shot)
+            if any(kw in h.text for h in hits for kw in keywords):
+                return True
+        return False
+
     async def _ocr_tap(self, ocr: OcrDismisser, keywords: list[str],
                         template_fallback: str = "", step: str = "",
                         retries: int = 3) -> bool:
-        """OCR 查找关键词并点击，模板兜底"""
+        """先模板（快~20ms），再OCR（慢~200ms），找到即点"""
         for attempt in range(retries):
             shot = await self.adb.screenshot()
             if shot is None:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
 
-            # 优先 OCR 查找
+            # ── 快速路径: 模板匹配 (~20ms) ──
+            if template_fallback:
+                tmpl_hit = self.matcher.match_one(shot, template_fallback, threshold=0.65)
+                if tmpl_hit:
+                    logger.info(f"[{step}] 模板匹配 '{template_fallback}' → ({tmpl_hit.cx},{tmpl_hit.cy})")
+                    await self.adb.tap(tmpl_hit.cx, tmpl_hit.cy)
+                    return True
+
+            # ── 慢速路径: OCR (~200ms) ──
             hits = ocr._ocr_all(shot)
             for kw in keywords:
                 for hit in hits:
@@ -431,17 +455,9 @@ class SingleInstanceRunner:
                         await self.adb.tap(hit.cx, hit.cy)
                         return True
 
-            # 模板兜底
-            if template_fallback:
-                tmpl_hit = self.matcher.match_one(shot, template_fallback, threshold=0.65)
-                if tmpl_hit:
-                    logger.info(f"[{step}] 模板匹配 '{template_fallback}' → ({tmpl_hit.cx},{tmpl_hit.cy})")
-                    await self.adb.tap(tmpl_hit.cx, tmpl_hit.cy)
-                    return True
-
             if attempt < retries - 1:
                 logger.debug(f"[{step}] 第{attempt+1}次未找到，重试...")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.8)
 
         logger.warning(f"[{step}] {retries}次尝试均未找到目标")
         return False

@@ -199,15 +199,17 @@ class ScreenMatcher:
         """检测是否在大厅（匹配"开始游戏"按钮，且无弹窗遮挡）"""
         hit = self.find_any(screenshot, [
             "lobby_start_btn", "lobby_start_game"
-        ], threshold=0.90)
+        ], threshold=0.85)
         if not hit:
             return False
         # 额外检查：如果同时检测到弹窗X按钮，说明有弹窗遮挡，不算在大厅
         x_hit = self.find_close_button(screenshot)
-        if x_hit:
+        if x_hit and x_hit.confidence > 0.80:
             return False
-        btn_hit = self.find_action_button(screenshot)
-        if btn_hit:
+        # 只检查明确的弹窗按钮（确认/同意/领取），不检查所有btn_*
+        popup_btns = ["btn_confirm", "btn_agree", "btn_claim_gift", "btn_confirm_privacy"]
+        popup_hit = self.find_any(screenshot, popup_btns, threshold=0.80)
+        if popup_hit:
             return False
         return True
 

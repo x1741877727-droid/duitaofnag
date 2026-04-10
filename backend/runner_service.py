@@ -255,12 +255,27 @@ class MultiRunnerService:
     async def _run_instance(self, idx: int, runner: SingleInstanceRunner):
         """单个实例运行（在独立 task 中）"""
         try:
+            # 阶段 0-3: 加速器 → 游戏 → 弹窗 → 大厅
             ok = await runner.run_to_lobby()
-            if ok:
-                self._instances[idx].state = "lobby"
-            else:
+            if not ok:
                 self._instances[idx].state = "error"
                 self._instances[idx].error = "未能到达大厅"
+                return
+
+            self._instances[idx].state = "lobby"
+            self._broadcast_state_change(idx, "dismiss_popups", "lobby")
+
+            # 阶段 4: 队长创建队伍
+            if runner.role == "captain":
+                code = await runner.phase_team_create()
+                if code:
+                    runner._team_code = code
+                    logger.info(f"[实例{idx}] 队长已创建队伍，口令码: {code}")
+                    self._instances[idx].state = "team_create"
+                else:
+                    self._instances[idx].state = "error"
+                    self._instances[idx].error = "创建队伍失败"
+
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
             logger.info(f"[实例{idx}] 已取消")
