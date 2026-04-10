@@ -30,9 +30,9 @@ def check_dependencies():
     # 前端构建产物
     if os.path.isdir(WEB_DIST):
         files = os.listdir(WEB_DIST)
-        print(f"  前端构建: ✓ ({len(files)} 个文件)")
+        print(f"  前端构建: OK ({len(files)} 个文件)")
     else:
-        print("  前端构建: ✗ 请先运行 cd web && npm run build")
+        print("  前端构建: FAIL 请先运行 cd web && npm run build")
         return False
 
     # Nuitka
@@ -41,25 +41,25 @@ def check_dependencies():
             [sys.executable, "-m", "nuitka", "--version"],
             capture_output=True, text=True,
         )
-        print(f"  Nuitka: ✓ {result.stdout.strip()[:50]}")
+        print(f"  Nuitka: OK {result.stdout.strip()[:50]}")
     except Exception:
-        print("  Nuitka: ✗ 请运行 pip install nuitka")
+        print("  Nuitka: FAIL 请运行 pip install nuitka")
 
     # PyInstaller (备选)
     try:
         import PyInstaller
-        print(f"  PyInstaller: ✓ {PyInstaller.__version__}")
+        print(f"  PyInstaller: OK {PyInstaller.__version__}")
     except ImportError:
-        print("  PyInstaller: ✗ (可选, pip install pyinstaller)")
+        print("  PyInstaller: FAIL (可选, pip install pyinstaller)")
 
     # 核心依赖
     deps = ["fastapi", "uvicorn", "cv2", "numpy", "rapidocr"]
     for dep in deps:
         try:
             __import__(dep)
-            print(f"  {dep}: ✓")
+            print(f"  {dep}: OK")
         except ImportError:
-            print(f"  {dep}: ✗")
+            print(f"  {dep}: FAIL")
             return False
 
     print("依赖检查通过!\n")
