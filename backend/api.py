@@ -107,17 +107,22 @@ def detect_ldplayer_instances(ldplayer_path: str) -> list[dict]:
         instances = []
         for line in output.splitlines():
             parts = line.split(",")
-            if len(parts) < 6:
+            if len(parts) < 5:
                 continue
-            # list2 格式: index,name,top_hwnd,bindadb,visible,running,pid,vbox_pid
-            idx = int(parts[0])
+            # list2 格式 (10字段): index,name,top_hwnd,bind_hwnd,running,pid,vbox_pid,width,height,dpi
+            try:
+                idx = int(parts[0])
+            except ValueError:
+                continue
             name = parts[1]
-            is_running = parts[5] == "1"
+            is_running = parts[4] == "1"
+            pid = int(parts[5]) if len(parts) > 5 else -1
             adb_port = 5554 + idx * 2
             instances.append({
                 "index": idx,
                 "name": name,
                 "running": is_running,
+                "pid": pid,
                 "adb_serial": f"emulator-{adb_port}",
                 "adb_port": adb_port,
             })
@@ -196,14 +201,18 @@ def create_app(config: ConfigManager) -> FastAPI:
 
     @app.post("/api/start/{instance_index}")
     async def start_one(instance_index: int):
-        """启动单个实例"""
+        """启动单个实例（测试用，不需要预先配置账号）"""
         if service.running:
             return {"ok": False, "error": "请先停止当前运行"}
         config.load()
-        # 只启动指定实例
+        # 先找已有配置
         accounts = [a for a in config.accounts if a.instance_index == instance_index]
         if not accounts:
-            return {"ok": False, "error": f"未找到实例 {instance_index} 的账号配置"}
+            # 没有配置就自动创建一个临时的
+            accounts = [AccountConfig(
+                qq="", nickname=f"实例{instance_index}", game_id="",
+                group="A", role="captain", instance_index=instance_index,
+            )]
         await service.start_all(config.settings, accounts)
         return {"ok": True}
 
