@@ -90,14 +90,35 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_accelerator(self) -> bool:
-        """启动加速器并确认连接"""
+        """启动加速器并确认连接，再用百度验证网络真通"""
         self.phase = Phase.ACCELERATOR
-        logger.info("[阶段0] 启动加速器")
 
+        for retry in range(3):
+            if retry > 0:
+                logger.info(f"[阶段0] 第{retry+1}次重试加速器")
+
+            if not await self._start_accelerator():
+                continue
+
+            # 加速器显示已连接 → 验证网络是否真通
+            if await self._verify_network():
+                return True
+
+            # 网络不通 → 重启加速器
+            logger.warning(f"[阶段0] 网络验证失败，重启加速器 (第{retry+1}次)")
+            await self.adb.stop_app(ACCELERATOR_PACKAGE)
+            await asyncio.sleep(2)
+
+        logger.error("[阶段0] 加速器3次重试均失败")
+        return False
+
+    async def _start_accelerator(self) -> bool:
+        """启动加速器并等待连接成功"""
+        logger.info("[阶段0] 启动加速器")
         await self.adb.start_app(ACCELERATOR_PACKAGE)
         await asyncio.sleep(3)
 
-        play_click_count = 0  # 连续点击play的次数
+        play_click_count = 0
 
         for attempt in range(15):
             shot = await self.adb.screenshot()
@@ -115,7 +136,6 @@ class SingleInstanceRunner:
 
             if status is False:
                 play_click_count += 1
-                # 连续点了3次play还没连上，可能有弹窗挡住了
                 if play_click_count >= 3:
                     logger.info("[阶段0] 连续点击无效，按返回键清除可能的弹窗")
                     await self.adb.key_event("KEYCODE_BACK")
@@ -130,13 +150,45 @@ class SingleInstanceRunner:
                 await asyncio.sleep(3)
                 continue
 
-            # status is None — 按返回键
+            # status is None — 不在主界面
             logger.info("[阶段0] 不在加速器主界面，按返回键")
             await self.adb.key_event("KEYCODE_BACK")
             play_click_count = 0
             await asyncio.sleep(2)
 
         logger.error("[阶段0] 加速器启动超时")
+        return False
+
+    async def _verify_network(self) -> bool:
+        """打开百度验证网络是否真通。8秒内加载出百度页面=成功"""
+        logger.info("[阶段0] 网络验证: 打开百度...")
+        await self.adb.open_url("https://m.baidu.com/")
+        await asyncio.sleep(3)  # 等浏览器启动+页面开始加载
+
+        for check in range(4):  # 3+1+1+1+1+1 ≈ 最多再等5秒，总共8秒
+            shot = await self.adb.screenshot()
+            if shot is None:
+                await asyncio.sleep(1)
+                continue
+
+            hits = self.ocr_dismisser.ocr_screen(shot)
+            all_text = " ".join(h.text for h in hits)
+            logger.info(f"[阶段0] 网络验证R{check+1}: OCR={all_text[:60]}")
+
+            # 百度页面加载成功的标志
+            if any(kw in all_text for kw in ["百度", "搜索", "热搜", "资讯", "新闻"]):
+                logger.info("[阶段0] 网络验证通过 ✓ 百度页面已加载")
+                # 关掉浏览器回桌面
+                await self.adb.key_event("KEYCODE_HOME")
+                await asyncio.sleep(0.5)
+                return True
+
+            await asyncio.sleep(1.5)
+
+        logger.warning("[阶段0] 网络验证失败: 8秒内百度未加载")
+        # 关掉浏览器
+        await self.adb.key_event("KEYCODE_HOME")
+        await asyncio.sleep(0.5)
         return False
 
     # ================================================================
