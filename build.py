@@ -177,7 +177,7 @@ a = Analysis(
     ],
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], name='GameBot', debug=False, console=False)
+exe = EXE(pyz, a.scripts, [], name='GameBot', debug=False, console=True)
 coll = COLLECT(exe, a.binaries, a.datas, name='GameBot')
 """
 

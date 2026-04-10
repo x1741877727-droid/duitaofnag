@@ -211,11 +211,15 @@ def create_app(config: ConfigManager) -> FastAPI:
         if service.running:
             return {"ok": False, "error": "已在运行中"}
         config.load()
-        if config.settings.dev_mock:
-            await service.start_mock(config.accounts)
+        try:
+            if config.settings.dev_mock:
+                await service.start_mock(config.accounts)
+            else:
+                await service.start_all(config.settings, config.accounts)
             return {"ok": True}
-        await service.start_all(config.settings, config.accounts)
-        return {"ok": True}
+        except Exception as e:
+            logger.error(f"启动失败: {e}", exc_info=True)
+            return {"ok": False, "error": str(e)}
 
     @app.post("/api/start/{instance_index}")
     async def start_one(instance_index: int):
@@ -229,11 +233,15 @@ def create_app(config: ConfigManager) -> FastAPI:
                 qq="", nickname=f"实例{instance_index}", game_id="",
                 group="A", role="captain", instance_index=instance_index,
             )]
-        if config.settings.dev_mock:
-            await service.start_mock(accounts)
+        try:
+            if config.settings.dev_mock:
+                await service.start_mock(accounts)
+            else:
+                await service.start_all(config.settings, accounts)
             return {"ok": True}
-        await service.start_all(config.settings, accounts)
-        return {"ok": True}
+        except Exception as e:
+            logger.error(f"启动实例{instance_index}失败: {e}", exc_info=True)
+            return {"ok": False, "error": str(e)}
 
     @app.post("/api/stop")
     async def stop():
