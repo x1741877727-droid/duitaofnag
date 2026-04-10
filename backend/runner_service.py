@@ -254,36 +254,28 @@ class MultiRunnerService:
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
 
-    def _set_instance_state(self, idx: int, new_state: str):
-        """切换实例状态并记录上一阶段耗时"""
-        inst = self._instances[idx]
-        old_state = inst.state
-        if old_state != "init":
-            elapsed = round(time.time() - inst._phase_start, 1)
-            inst.stage_times[old_state] = elapsed
-        inst.state = new_state
-        inst._phase_start = time.time()
-        self._broadcast_state_change(idx, old_state, new_state)
-
     async def _run_instance(self, idx: int, runner: SingleInstanceRunner):
-        """单个实例运行（在独立 task 中）"""
+        """单个实例运行（在独立 task 中）
+
+        状态由 runner 的 phase 回调自动更新（_on_phase_change），
+        这里只处理 runner 不涉及的最终状态记录。
+        """
         try:
             # 阶段 0-3: 加速器 → 游戏 → 弹窗 → 大厅
+            # runner 内部通过 phase setter 触发 _on_phase_change，自动记录每阶段耗时
             ok = await runner.run_to_lobby()
             if not ok:
                 self._instances[idx].state = "error"
                 self._instances[idx].error = "未能到达大厅"
                 return
 
-            self._set_instance_state(idx, "lobby")
-
             # 队长执行: 阶段4(创建队伍) → 阶段6(地图设置)
+            # phase_team_create/phase_map_setup 内部会设置 self.phase → 触发 _on_phase_change
             if runner.role == "captain":
                 code = await runner.phase_team_create()
                 if code:
                     runner._team_code = code
                     logger.info(f"[实例{idx}] 队长已创建队伍，口令码: {code}")
-                    self._set_instance_state(idx, "team_create")
                 else:
                     self._instances[idx].state = "error"
                     self._instances[idx].error = "创建队伍失败"
@@ -292,7 +284,11 @@ class MultiRunnerService:
                 ok = await runner.phase_map_setup()
                 if not ok:
                     logger.warning(f"[实例{idx}] 地图设置失败")
-                self._set_instance_state(idx, "map_setup")
+
+                # 记录最后一个阶段的耗时（因为没有下一阶段触发记录）
+                inst = self._instances[idx]
+                elapsed = round(time.time() - inst._phase_start, 1)
+                inst.stage_times[inst.state] = elapsed
 
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
