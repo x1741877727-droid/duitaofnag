@@ -318,10 +318,9 @@ class OcrDismisser:
                     logger.info(f"[R{rnd+1}] ✓ 大厅确认{lobby_confirm}次，弹窗清理完成！关闭了{popups_closed}个弹窗")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.info(f"[R{rnd+1}] 大厅检测 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                await asyncio.sleep(0.4)  # 等一下看有没有新弹窗冒出来
+                await asyncio.sleep(0.4)
                 continue
-            else:
-                lobby_confirm = 0
+            # 注意: 快速路径未匹配不重置 lobby_confirm，交给慢速路径判断
 
             # ━━ 慢速路径: 需要OCR分析 ━━
             state = self.detect_state(shot, matcher)
@@ -349,6 +348,9 @@ class OcrDismisser:
                 logger.info(f"[R{rnd+1}] 加载中...")
                 await asyncio.sleep(2)
                 continue
+
+            # 非大厅状态 → 重置大厅计数
+            lobby_confirm = 0
 
             # ━━ POPUP/UNKNOWN: OCR找关闭目标 ━━
             target = self._find_close_target(shot, matcher)
