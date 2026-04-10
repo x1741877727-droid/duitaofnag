@@ -302,6 +302,10 @@ class SingleInstanceRunner:
         self.phase = Phase.MAP_SETUP
         logger.info(f"[阶段6] 地图设置: {self.target_mode} - {self.target_map}")
 
+        # 禁用守卫（地图面板的关闭按钮会被守卫误判为弹窗）
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = False
+
         ocr = OcrDismisser()
 
         # 构建地图模糊关键词（OCR 常把"狙击"识别为"姐击"/"阻击"等）
@@ -437,6 +441,10 @@ class SingleInstanceRunner:
         else:
             await self._ocr_tap(ocr, ["确定"], step="确定")
 
+        # 恢复守卫
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = True
+
         logger.info("[阶段6] 地图设置完成 ✓")
         return True
 
@@ -448,6 +456,10 @@ class SingleInstanceRunner:
         """队长创建队伍并获取口令码，返回口令码"""
         self.phase = Phase.TEAM_CREATE
         logger.info("[阶段4] 队长创建队伍")
+
+        # 禁用守卫（组队面板的X按钮会被守卫误当弹窗关闭）
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = False
 
         # 先清空剪贴板，防止残留组队码触发"使用组队码加入"弹窗
         await self.adb.set_clipboard("")
@@ -505,6 +517,10 @@ class SingleInstanceRunner:
                 await self.adb.tap(w * 3 // 4, h // 2)
 
         logger.info("[阶段4] 已关闭组队面板")
+
+        # 恢复守卫
+        if hasattr(self.adb, 'guard_enabled'):
+            self.adb.guard_enabled = True
 
         return "clipboard"
 
