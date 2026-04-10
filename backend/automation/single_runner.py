@@ -161,11 +161,12 @@ class SingleInstanceRunner:
         await self.adb.open_url("https://m.baidu.com/")
 
         SUCCESS_KEYWORDS = ["验证成功", "端口验证", "六花端口"]
-        FAIL_KEYWORDS = ["百度", "搜索", "热搜"]
+        # 注意："搜索"不能用——浏览器地址栏自带"搜索或输入网址"
+        FAIL_KEYWORDS = ["百度一下", "热搜", "百度首页"]
 
-        # 每秒检查一次，最多10秒。快电脑2秒出结果，慢电脑也能等到
-        for check in range(10):
-            await asyncio.sleep(1)
+        # 每1.5秒检查一次，前3秒只看不判（等页面加载），最多12秒
+        for check in range(8):
+            await asyncio.sleep(1.5)
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
@@ -173,6 +174,14 @@ class SingleInstanceRunner:
             hits = self.ocr_dismisser.ocr_screen(shot)
             all_text = " ".join(h.text for h in hits)
             logger.info(f"[阶段0] 网络验证R{check+1}: OCR={all_text[:60]}")
+
+            # 前2轮（前3秒）只观察不判定，等页面内容真正加载
+            if check < 2:
+                if any(kw in all_text for kw in SUCCESS_KEYWORDS):
+                    logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
+                    await self._close_browser()
+                    return True
+                continue  # 前3秒只判成功，不判失败（页面可能还没加载）
 
             if any(kw in all_text for kw in SUCCESS_KEYWORDS):
                 logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
