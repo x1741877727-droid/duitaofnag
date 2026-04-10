@@ -119,31 +119,47 @@ async def step3_select_map(target="狙击团竞"):
 
 
 async def step4_disable_auto_fill():
-    """步骤4: 取消'自动匹配队友'补位"""
+    """步骤4: 取消'愿意补位'
+
+    判断方法：检查"愿意补位"文字左侧区域的像素颜色
+    绿色勾 = 已开启 → 需要点击取消
+    灰色/白色 = 已关闭 → 跳过
+    """
     print("\n=== 步骤4: 检查并取消自动补位 ===")
     await asyncio.sleep(0.5)
     shot = await adb.screenshot()
     if shot is None:
         return False
+
+    import numpy as np
     hits = ocr._ocr_all(shot)
-    # 找"愿意补位"或"自动匹配"文字
     for h in hits:
-        if "补位" in h.text or "自动匹配" in h.text or "匹配队友" in h.text:
-            print(f"  找到补位按钮: '{h.text}' @ ({h.cx},{h.cy})")
-            await adb.tap(h.cx, h.cy)
-            await asyncio.sleep(0.5)
-            # 验证：再次截图看文字是否变化
-            shot2 = await adb.screenshot()
-            if shot2 is not None:
-                hits2 = ocr._ocr_all(shot2)
-                for h2 in hits2:
-                    if "补位" in h2.text:
-                        print(f"  点击后状态: '{h2.text}' @ ({h2.cx},{h2.cy})")
-                        break
-            print("  已处理补位按钮")
-            return True
-    print("  未找到补位按钮（可能已经关闭）")
-    return True  # 没找到也不算失败，可能本来就没开
+        if "补位" in h.text:
+            print(f"  找到: '{h.text}' @ ({h.cx},{h.cy})")
+
+            # 检查文字左侧 30~50 像素处的颜色（勾选图标区域）
+            check_x = max(0, h.cx - 45)
+            check_y = h.cy
+            # 取周围 10x10 区域的平均颜色
+            region = shot[max(0,check_y-5):check_y+5, max(0,check_x-5):check_x+5]
+            if region.size > 0:
+                avg_color = region.mean(axis=(0, 1))  # BGR
+                b, g, r = avg_color
+                print(f"  勾选区域颜色 BGR=({b:.0f},{g:.0f},{r:.0f})")
+
+                # 绿色判断：G通道明显大于R和B
+                is_green = g > 120 and g > r * 1.3 and g > b * 1.3
+                if is_green:
+                    print(f"  状态: 已开启(绿色) → 点击取消")
+                    await adb.tap(h.cx, h.cy)
+                    await asyncio.sleep(0.5)
+                    return True
+                else:
+                    print(f"  状态: 已关闭 → 跳过")
+                    return True
+
+    print("  未找到补位按钮")
+    return True
 
 
 async def step5_confirm():
