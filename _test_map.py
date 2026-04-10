@@ -195,51 +195,49 @@ async def main():
     elif step == "all":
         target = sys.argv[2] if len(sys.argv) > 2 else "狙击团竞"
 
-        # 先检查大厅模式名——如果已经是目标地图，跳过选择
-        print("\n=== 预检: 大厅当前模式 ===")
-        shot = await adb.screenshot()
-        if shot is not None:
-            hits = ocr._ocr_all(shot)
-            lobby_text = " ".join(h.text for h in hits if h.cy < 120 and h.cx < 400)
-            print(f"  大厅模式区域文字: '{lobby_text}'")
-
-            # 构建检测关键词
-            check_keywords = [target]
-            if "狙击" in target:
-                check_keywords.extend(["击团竞", "大桥"])
-            if "经典团竞" in target:
-                check_keywords.extend(["经典团竞", "仓库"])
-
-            already_set = any(kw in lobby_text for kw in check_keywords)
-            if already_set:
-                print(f"  当前已是 '{target}'，仅检查补位设置")
-                if not await step1_open_map_panel():
-                    return
-                # 直接到团队竞技（可能已在）
-                shot2 = await adb.screenshot()
-                if shot2 is not None:
-                    hits2 = ocr._ocr_all(shot2)
-                    if not any("补位" in h.text for h in hits2):
-                        # 没看到补位按钮，可能需要先点团队竞技
-                        await step2_select_team_battle()
-                        await asyncio.sleep(0.5)
-                await step4_disable_auto_fill()
-                await step5_confirm()
-                await asyncio.sleep(0.5)
-                print("=== 快速完成 ===")
-                return
-
-        # 正常完整流程
+        # 步骤1: 打开面板
         if not await step1_open_map_panel():
             return
-        if not await step2_select_team_battle():
-            return
+
+        # 打开面板后 OCR 一次，判断是否需要切换
         await asyncio.sleep(1)
+        shot = await adb.screenshot()
+        need_switch_mode = True
+        need_switch_map = True
+
+        if shot is not None:
+            hits = ocr._ocr_all(shot)
+            all_text = " ".join(h.text for h in hits)
+
+            # 检查是否已在团队竞技（"愿意补位"只在团竞模式出现）
+            if "补位" in all_text:
+                print("  已在团队竞技模式，跳过模式切换")
+                need_switch_mode = False
+
+                # 检查目标地图是否已选中
+                # 构建模糊关键词
+                map_keywords = [target]
+                if "狙击" in target:
+                    map_keywords.extend(["击团竞"])
+                # 如果面板文字里有目标地图，可能已选中
+                # 但无法100%确认是否"选中"——保险起见还是点一下
+
+        if need_switch_mode:
+            # 步骤2: 选择团队竞技
+            if not await step2_select_team_battle():
+                return
+            await asyncio.sleep(1)
+
+        # 步骤3: 选择地图（即使可能已选中，点一下也没坏处，确保选中）
         if not await step3_select_map(target):
-            print("  地图未找到，dump当前面板文字:")
+            print("  地图未找到")
             await ocr_dump("查找地图失败")
             return
+
+        # 步骤4: 检查补位
         await step4_disable_auto_fill()
+
+        # 步骤5: 确定
         await step5_confirm()
         await asyncio.sleep(0.5)
         print("=== 完成 ===")
