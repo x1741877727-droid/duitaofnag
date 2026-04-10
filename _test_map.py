@@ -174,6 +174,134 @@ async def step5_confirm():
     return await ocr_tap(["确定"], step="确定")
 
 
+async def fast_map_setup(target="狙击团竞"):
+    """优化版阶段6: 最少OCR调用，目标 <10s"""
+    import time, numpy as np
+    t0 = time.time()
+
+    # 构建地图模糊关键词
+    map_keywords = [target]
+    if "狙击" in target:
+        map_keywords.extend(["击团竞", "大桥", "军事基地"])
+    elif "经典" in target:
+        map_keywords.extend(["经典团竞", "仓库", "滨海"])
+    elif "军备" in target:
+        map_keywords.extend(["军备团竞", "图书馆"])
+
+    # ── 步骤1: 打开面板（模板优先，不用OCR）──
+    shot = await adb.screenshot()
+    if shot is None:
+        print("截图失败"); return
+    hit = matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+    if hit:
+        await adb.tap(hit.cx, hit.cy + 60)
+        print(f"  [+{time.time()-t0:.1f}s] 模板定位，点击模式名 ({hit.cx},{hit.cy+60})")
+    else:
+        # OCR 兜底
+        hits = ocr._ocr_all(shot)
+        for h in hits:
+            if "开始游戏" in h.text:
+                await adb.tap(h.cx, h.cy + 60)
+                print(f"  [+{time.time()-t0:.1f}s] OCR定位，点击模式名")
+                break
+
+    # ── 轮询等面板打开（检测到大量文字 = 面板已开）──
+    for _ in range(10):
+        await asyncio.sleep(0.4)
+        shot = await adb.screenshot()
+        if shot is None: continue
+        hits = ocr._ocr_all(shot)
+        if len(hits) > 25:  # 面板有很多文字
+            break
+
+    if not hits or len(hits) < 20:
+        print("面板未打开"); return
+
+    print(f"  [+{time.time()-t0:.1f}s] 面板已开 ({len(hits)}个文字)")
+
+    # ── 一次性从 OCR 结果提取所有目标 ──
+    team_battle_hit = None
+    map_hit = None
+    fill_hit = None
+    confirm_hit = None
+
+    for h in hits:
+        if "团队竞技" in h.text and h.cx < 200:
+            team_battle_hit = h
+        if "确定" in h.text and h.cx > 1000:
+            confirm_hit = h
+        if "补位" in h.text:
+            fill_hit = h
+        for kw in map_keywords:
+            if kw in h.text:
+                map_hit = h
+                break
+
+    # ── 判断是否需要切换模式 ──
+    need_switch = fill_hit is None  # 没看到"补位"说明不在团竞模式
+
+    if need_switch and team_battle_hit:
+        print(f"  [+{time.time()-t0:.1f}s] 切换到团队竞技 ({team_battle_hit.cx},{team_battle_hit.cy})")
+        await adb.tap(team_battle_hit.cx, team_battle_hit.cy)
+
+        # 等面板刷新，重新 OCR 一次
+        await asyncio.sleep(1)
+        shot = await adb.screenshot()
+        if shot is not None:
+            hits = ocr._ocr_all(shot)
+            # 重新提取
+            map_hit = None
+            fill_hit = None
+            confirm_hit = None
+            for h in hits:
+                if "确定" in h.text and h.cx > 1000: confirm_hit = h
+                if "补位" in h.text: fill_hit = h
+                for kw in map_keywords:
+                    if kw in h.text: map_hit = h; break
+            print(f"  [+{time.time()-t0:.1f}s] 模式已切换，重新扫描")
+    else:
+        print(f"  [+{time.time()-t0:.1f}s] 已在团队竞技，跳过切换")
+
+    # ── 步骤3: 点击地图 ──
+    if map_hit:
+        print(f"  [+{time.time()-t0:.1f}s] 选择地图 '{map_hit.text}' ({map_hit.cx},{map_hit.cy})")
+        await adb.tap(map_hit.cx, map_hit.cy)
+        await asyncio.sleep(0.3)
+    else:
+        print(f"  [+{time.time()-t0:.1f}s] 未找到目标地图!")
+        return
+
+    # ── 步骤4: 检查补位（用已有的 fill_hit 坐标，只需读像素）──
+    if fill_hit:
+        shot = await adb.screenshot()
+        if shot is not None:
+            check_x = max(0, fill_hit.cx - 60)
+            check_y = fill_hit.cy
+            y1, y2 = max(0, check_y-5), min(shot.shape[0], check_y+5)
+            x1, x2 = max(0, check_x-5), min(shot.shape[1], check_x+5)
+            region = shot[y1:y2, x1:x2]
+            if region.size > 0:
+                b, g, r = region[:,:,0], region[:,:,1], region[:,:,2]
+                orange_count = int(((r > 150) & (g > 80) & (b < 80)).sum())
+                if orange_count > 5:
+                    print(f"  [+{time.time()-t0:.1f}s] 补位已开启 → 点击取消")
+                    await adb.tap(fill_hit.cx, fill_hit.cy)
+                    await asyncio.sleep(0.3)
+                else:
+                    print(f"  [+{time.time()-t0:.1f}s] 补位已关闭 → 跳过")
+
+    # ── 步骤5: 点击确定（用已有坐标，不重新OCR）──
+    if confirm_hit:
+        print(f"  [+{time.time()-t0:.1f}s] 点击确定 ({confirm_hit.cx},{confirm_hit.cy})")
+        await adb.tap(confirm_hit.cx, confirm_hit.cy)
+    else:
+        # 兜底 OCR 找确定
+        await ocr_tap(["确定"], step="确定")
+
+    elapsed = time.time() - t0
+    print(f"\n=== 完成! 耗时 {elapsed:.1f}s ===")
+
+
 async def main():
     step = sys.argv[1] if len(sys.argv) > 1 else "help"
 
@@ -194,53 +322,7 @@ async def main():
         await ocr_dump("当前画面")
     elif step == "all":
         target = sys.argv[2] if len(sys.argv) > 2 else "狙击团竞"
-
-        # 步骤1: 打开面板
-        if not await step1_open_map_panel():
-            return
-
-        # 打开面板后 OCR 一次，判断是否需要切换
-        await asyncio.sleep(1)
-        shot = await adb.screenshot()
-        need_switch_mode = True
-        need_switch_map = True
-
-        if shot is not None:
-            hits = ocr._ocr_all(shot)
-            all_text = " ".join(h.text for h in hits)
-
-            # 检查是否已在团队竞技（"愿意补位"只在团竞模式出现）
-            if "补位" in all_text:
-                print("  已在团队竞技模式，跳过模式切换")
-                need_switch_mode = False
-
-                # 检查目标地图是否已选中
-                # 构建模糊关键词
-                map_keywords = [target]
-                if "狙击" in target:
-                    map_keywords.extend(["击团竞"])
-                # 如果面板文字里有目标地图，可能已选中
-                # 但无法100%确认是否"选中"——保险起见还是点一下
-
-        if need_switch_mode:
-            # 步骤2: 选择团队竞技
-            if not await step2_select_team_battle():
-                return
-            await asyncio.sleep(1)
-
-        # 步骤3: 选择地图（即使可能已选中，点一下也没坏处，确保选中）
-        if not await step3_select_map(target):
-            print("  地图未找到")
-            await ocr_dump("查找地图失败")
-            return
-
-        # 步骤4: 检查补位
-        await step4_disable_auto_fill()
-
-        # 步骤5: 确定
-        await step5_confirm()
-        await asyncio.sleep(0.5)
-        print("=== 完成 ===")
+        await fast_map_setup(target)
     else:
         print("Usage: python _test_map.py [1|2|3|4|5|dump|all]")
         print("  1    - 打开地图面板")
