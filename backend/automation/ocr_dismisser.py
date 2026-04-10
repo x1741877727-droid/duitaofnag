@@ -37,7 +37,9 @@ class ScreenState(str, Enum):
 LOBBY_KEYWORDS = ["开始游戏"]
 LOADING_KEYWORDS = ["正在检查更新", "正在加载", "加载中"]
 LOGIN_KEYWORDS = ["QQ授权登录", "微信登录", "登录中"]
-LEFT_GAME_KEYWORDS = ["六花加速器"]
+# 注意：游戏内底部状态栏也会显示"六花加速器[已连接]"，不能用它判断退出
+# 只有加速器的独有文字才能判定退出了游戏
+LEFT_GAME_KEYWORDS = ["CDN节点第", "六花官方通知"]
 
 # 弹窗关闭文字（OCR识别后点击）
 CLOSE_TEXT = ["关闭", "×"]
