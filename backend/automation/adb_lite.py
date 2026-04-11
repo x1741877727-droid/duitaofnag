@@ -7,6 +7,7 @@ import asyncio
 import logging
 import platform
 import subprocess
+import time
 from typing import Optional
 
 import cv2
@@ -63,11 +64,12 @@ class ADBController:
 
     def _screenshot_sync(self) -> Optional[np.ndarray]:
         """同步截图"""
-        import subprocess
+        t0 = time.perf_counter()
         cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap", "-p"]
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=10,
                                     creationflags=_SUBPROCESS_FLAGS)
+            t1 = time.perf_counter()
             if result.returncode != 0:
                 return None
             png_data = result.stdout
@@ -75,6 +77,11 @@ class ADBController:
                 return None
             arr = np.frombuffer(png_data, dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            t2 = time.perf_counter()
+            adb_ms = (t1 - t0) * 1000
+            decode_ms = (t2 - t1) * 1000
+            if adb_ms > 500:
+                logger.warning(f"[性能] 截图慢: ADB={adb_ms:.0f}ms decode={decode_ms:.0f}ms")
             return img
         except Exception:
             return None

@@ -114,6 +114,25 @@ class MultiRunnerService:
     def running(self) -> bool:
         return self._running
 
+    def _lower_emulator_priority(self):
+        """降低雷电模拟器进程优先级到 Below Normal，减轻宿主机卡顿"""
+        import platform
+        if platform.system() != "Windows":
+            return
+        try:
+            import subprocess as sp
+            # LDPlayer 主进程名
+            for proc_name in ("LdVBoxHeadless.exe", "dnplayer.exe"):
+                sp.run(
+                    ["wmic", "process", "where", f"name='{proc_name}'",
+                     "CALL", "setpriority", "16384"],  # 16384 = Below Normal
+                    capture_output=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                )
+            logger.info("[性能] 已降低模拟器进程优先级")
+        except Exception as e:
+            logger.debug(f"降低进程优先级失败（非致命）: {e}")
+
     async def start_all(self, settings: Settings, accounts: list[AccountConfig]):
         """启动所有配置的实例"""
         if self._running:
@@ -130,6 +149,9 @@ class MultiRunnerService:
         adb_path = settings.adb_path
         if not adb_path:
             adb_path = os.path.join(settings.ldplayer_path, "adb.exe")
+
+        # 降低模拟器进程优先级（减轻系统卡顿）
+        self._lower_emulator_priority()
 
         # 预热 OCR（所有实例共享，只初始化一次）
         from .automation.ocr_dismisser import OcrDismisser
