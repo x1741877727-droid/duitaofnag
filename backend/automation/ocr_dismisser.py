@@ -72,8 +72,12 @@ class OcrDismisser:
         if cls._shared_ocr is None:
             logger.info("预热 RapidOCR ...")
             from rapidocr import RapidOCR
-            cls._shared_ocr = RapidOCR(det_limit_side_len=960, text_score=0.3)
-            logger.info("RapidOCR 预热完成 (det_limit=960, text_score=0.3)")
+            try:
+                cls._shared_ocr = RapidOCR(det_limit_side_len=960, text_score=0.3)
+            except TypeError:
+                # 旧版 RapidOCR 不支持这些参数
+                cls._shared_ocr = RapidOCR()
+            logger.info("RapidOCR 预热完成")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OCR引擎
