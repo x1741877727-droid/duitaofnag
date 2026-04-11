@@ -766,25 +766,34 @@ class SingleInstanceRunner:
                 await asyncio.sleep(0.5)
                 continue
 
-            # 找输入框：通过OCR找"请输入"或"粘贴"等提示文字，输入框在附近
+            # 找输入框：OCR 找"粘贴口令码进入组队"提示文字（就是输入框本身）
             hits = ocr._ocr_all(shot)
             input_tapped = False
             for h in hits:
-                if any(kw in h.text for kw in ["请输入", "输入组队", "输入口令", "粘贴口令", "粘贴"]):
-                    # 点击输入框区域（在提示文字左边或同一行）
-                    tap_x = max(h.cx - 100, 50)
-                    logger.info(f"[阶段5] 点击输入框区域 ({tap_x},{h.cy})")
-                    await self.adb.tap(tap_x, h.cy)
+                if any(kw in h.text for kw in ["进入组队", "口令码进入", "输入组队", "输入口令"]):
+                    # 提示文字本身就是输入框，直接点击
+                    logger.info(f"[阶段5] 点击输入框 '{h.text}' ({h.cx},{h.cy})")
+                    await self.adb.tap(h.cx, h.cy)
                     input_tapped = True
                     break
 
             if not input_tapped:
-                # 模板兜底：btn_paste_code 的左侧就是输入框
+                # 通过"粘贴口令"按钮定位：输入框在按钮的上方一行
+                for h in hits:
+                    if "粘贴口令" in h.text or "粘贴" in h.text:
+                        tap_y = h.cy - 40  # 输入框在按钮上方
+                        logger.info(f"[阶段5] 通过'粘贴口令'定位输入框 ({h.cx},{tap_y})")
+                        await self.adb.tap(h.cx, tap_y)
+                        input_tapped = True
+                        break
+
+            if not input_tapped:
+                # 模板兜底
                 tmpl = self.matcher.match_one(shot, "btn_paste_code", threshold=0.65)
                 if tmpl:
-                    tap_x = max(tmpl.cx - 150, 50)
-                    logger.info(f"[阶段5] 通过粘贴按钮定位输入框 ({tap_x},{tmpl.cy})")
-                    await self.adb.tap(tap_x, tmpl.cy)
+                    tap_y = tmpl.cy - 40
+                    logger.info(f"[阶段5] 模板定位输入框 ({tmpl.cx},{tap_y})")
+                    await self.adb.tap(tmpl.cx, tap_y)
                     input_tapped = True
 
             if not input_tapped:
