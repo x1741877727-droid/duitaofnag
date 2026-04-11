@@ -125,27 +125,47 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 隧道是否真正可用（~100ms）
+        """检查 VPN 隧道是否真正可用（~600ms）
 
-        检测策略：检查 tun0 接口存在 + RX 字节数 > 0。
-        tun0 UP 且有 RX 流量 = VPN 隧道正在工作。
+        检测策略：tun0 存在 + RX 字节数在增长（两次采样间隔 0.5s）。
+        RX 是累积值，断开后不归零，所以必须检查增长量。
         """
+        import re
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 
-        output = await loop.run_in_executor(
+        # 第一次采样
+        output1 = await loop.run_in_executor(
             None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
         )
-        if "UP" not in output:
+        if "UP" not in output1:
             return False
 
-        # 检查 RX bytes > 0（有数据回来 = 隧道通了）
-        import re
-        rx_match = re.search(r'RX bytes:(\d+)', output)
-        if rx_match and int(rx_match.group(1)) > 0:
+        rx1_match = re.search(r'RX bytes:(\d+)', output1)
+        if not rx1_match:
+            return False
+        rx1 = int(rx1_match.group(1))
+
+        # 如果 RX=0，隧道刚建立还没数据
+        if rx1 == 0:
+            logger.warning("[VPN] tun0 UP 但 RX=0 → 隧道未通")
+            return False
+
+        # 等 0.5 秒后第二次采样
+        await asyncio.sleep(0.5)
+        output2 = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+        )
+        rx2_match = re.search(r'RX bytes:(\d+)', output2)
+        if not rx2_match:
+            return False
+        rx2 = int(rx2_match.group(1))
+
+        if rx2 > rx1:
             return True
 
-        logger.warning("[VPN] tun0 UP 但 RX=0 → 隧道未通")
+        # RX 没增长，可能隧道断了但 tun0 接口还在
+        logger.warning(f"[VPN] tun0 RX 未增长 ({rx1} → {rx2}) → 隧道可能断了")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
