@@ -549,15 +549,18 @@ class SingleInstanceRunner:
             self._restore_guard()
             return None
 
-        # ── 步骤2: 等面板出现，处理弹窗，找组队码tab ──
-        for _ in range(10):
-            await asyncio.sleep(0.3)
+        # ── 步骤2+3: 等面板出现 → 处理弹窗 → 直接找"二维码组队"点击 ──
+        # 组队码tab和二维码组队在同一面板的左侧栏，合并查找
+        qr_clicked = False
+        for attempt in range(15):
+            await asyncio.sleep(0.5)
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
             hits = ocr._ocr_all(shot)
             all_text = " ".join(h.text for h in hits)
 
+            # 处理"使用组队码加入"弹窗
             if "加入队伍" in all_text and "取消" in all_text:
                 for h in hits:
                     if "取消" in h.text and h.cy > 400:
@@ -567,40 +570,24 @@ class SingleInstanceRunner:
                         break
                 continue
 
+            # 直接找"二维码组队"（左侧栏，面板出现后就可见）
             for h in hits:
-                if "组队码" in h.text and h.cy > 600:
-                    logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    break
-            else:
-                continue
-            break
-
-        # ── 步骤3: 点击"二维码组队"（左侧栏QR图标） ──
-        await asyncio.sleep(0.5)
-        for attempt in range(5):
-            shot = await self.adb.screenshot()
-            if shot is None:
-                await asyncio.sleep(0.5)
-                continue
-            hits = ocr._ocr_all(shot)
-            qr_clicked = False
-            for h in hits:
-                if "二维码" in h.text and h.cx < 300:
+                if "二维码" in h.text:
                     logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     qr_clicked = True
                     break
-            if not qr_clicked:
-                # 模板兜底
-                tmpl = self.matcher.match_one(shot, "btn_qr_team", threshold=0.65)
-                if tmpl:
-                    logger.info(f"[阶段4] 模板命中二维码组队 ({tmpl.cx},{tmpl.cy})")
-                    await self.adb.tap(tmpl.cx, tmpl.cy)
-                    qr_clicked = True
             if qr_clicked:
                 break
-            await asyncio.sleep(0.5)
+
+            # 如果没找到二维码，可能面板还没完全出现，打个日志
+            if attempt == 5:
+                logger.debug(f"[阶段4] 面板内容: {all_text[:80]}")
+
+        if not qr_clicked:
+            logger.warning("[阶段4] 未找到二维码组队入口")
+            self._restore_guard()
+            return None
 
         # ── 步骤4: 截屏解码 QR 码 ──
         await asyncio.sleep(1)
