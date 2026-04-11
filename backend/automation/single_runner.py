@@ -125,27 +125,46 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """快速检查 VPN 是否已连接（tun0 接口 + wget 连通性）"""
-        loop = asyncio.get_event_loop()
+        """检查 VPN 隧道是否真正可用（~50ms）
 
-        # 1. 检查 tun0 接口是否存在（<50ms）
+        检测策略：读取 /proc/net/tcp 检查 VPN APP（六花加速器, UID 10062）
+        是否有到后端服务器的 ESTABLISHED 连接。
+
+        - 不需要 root、不需要 OCR、不需要打开浏览器
+        - VPN APP 通过 :17500 端口维持隧道连接
+        - 有活跃连接 → 隧道正常；无连接 → 隧道断了
+        - /proc/net/tcp 世界可读，~50ms
+        """
+        loop = asyncio.get_event_loop()
+        raw_adb = getattr(self.adb, '_adb', self.adb)
+
+        # 1. 快速检查 tun0 接口是否存在
         output = await loop.run_in_executor(
-            None, self.adb._cmd, "shell", "ifconfig tun0 2>/dev/null | grep -c UP"
+            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
         )
-        if output.strip() != "1":
+        if "UP" not in output:
             return False
 
-        logger.info("[阶段0] tun0 接口存在，验证连通性...")
-
-        # 2. wget 验证实际连通（<3秒）
+        # 2. 检查 VPN APP 是否有活跃后端连接
+        #    /proc/net/tcp 格式: idx local remote state ... uid
+        #    state=01 = ESTABLISHED, UID 10062 = 六花加速器
         output = await loop.run_in_executor(
-            None, self.adb._cmd, "shell",
-            "wget -q -O /dev/null --timeout=3 http://m.baidu.com && echo OK || echo FAIL"
+            None, raw_adb._cmd, "shell", "cat /proc/net/tcp"
         )
-        return "OK" in output
+        established_count = 0
+        for line in output.split("\n"):
+            parts = line.split()
+            if len(parts) >= 8 and parts[3] == "01" and parts[7] == "10062":
+                established_count += 1
+
+        if established_count == 0:
+            logger.warning("[VPN] VPN APP 无活跃后端连接 → 隧道异常")
+            return False
+
+        return True
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
-        """轮询等待 VPN 连接建立"""
+        """轮询等待 VPN 连接建立并验证通过"""
         for _ in range(timeout * 2):  # 每 0.5 秒检查一次
             await asyncio.sleep(0.5)
             if await self._check_vpn_connected():
@@ -198,6 +217,15 @@ class SingleInstanceRunner:
     async def phase_launch_game(self) -> bool:
         """启动游戏并等待到大厅或弹窗阶段"""
         self.phase = Phase.LAUNCH_GAME
+
+        # ── 启动前二次校验 VPN ──
+        if not await self._check_vpn_connected():
+            logger.warning("[阶段1] VPN 连通性校验失败，等待恢复...")
+            if not await self._wait_vpn_connected(timeout=10):
+                logger.error("[阶段1] VPN 未连接，拒绝启动游戏（防封号）")
+                return False
+            logger.info("[阶段1] VPN 已恢复 ✓")
+
         logger.info("[阶段1] 启动游戏")
 
         await self.adb.start_app(GAME_PACKAGE)
