@@ -549,10 +549,9 @@ class SingleInstanceRunner:
             self._restore_guard()
             return None
 
-        # ── 步骤2+3: 等面板出现 → 处理弹窗 → 直接找"二维码组队"点击 ──
-        # 组队码tab和二维码组队在同一面板的左侧栏，合并查找
-        qr_clicked = False
-        for attempt in range(15):
+        # ── 步骤2: 等面板出现，处理弹窗，点底部"组队码"tab ──
+        tab_clicked = False
+        for attempt in range(10):
             await asyncio.sleep(0.5)
             shot = await self.adb.screenshot()
             if shot is None:
@@ -570,7 +569,25 @@ class SingleInstanceRunner:
                         break
                 continue
 
-            # 直接找"二维码组队"（左侧栏，面板出现后就可见）
+            # 找底部"组队码"tab（cy > 650）
+            for h in hits:
+                if "组队码" in h.text and h.cy > 650:
+                    logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
+                    await self.adb.tap(h.cx, h.cy)
+                    tab_clicked = True
+                    break
+            if tab_clicked:
+                break
+
+        # ── 步骤3: 在组队码面板找"二维码组队"并点击 ──
+        await asyncio.sleep(0.5)
+        qr_clicked = False
+        for attempt in range(8):
+            shot = await self.adb.screenshot()
+            if shot is None:
+                await asyncio.sleep(0.5)
+                continue
+            hits = ocr._ocr_all(shot)
             for h in hits:
                 if "二维码" in h.text:
                     logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
@@ -579,10 +596,7 @@ class SingleInstanceRunner:
                     break
             if qr_clicked:
                 break
-
-            # 如果没找到二维码，可能面板还没完全出现，打个日志
-            if attempt == 5:
-                logger.debug(f"[阶段4] 面板内容: {all_text[:80]}")
+            await asyncio.sleep(0.5)
 
         if not qr_clicked:
             logger.warning("[阶段4] 未找到二维码组队入口")
