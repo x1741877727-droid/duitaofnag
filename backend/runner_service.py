@@ -88,6 +88,19 @@ class WSLogHandler(logging.Handler):
             pass
 
 
+class _PhaseError(Exception):
+    """阶段执行失败（可重试）"""
+    def __init__(self, phase: str, reason: str):
+        self.phase = phase
+        self.reason = reason
+        super().__init__(f"{phase}: {reason}")
+
+
+class _GameCrashError(Exception):
+    """游戏闪退"""
+    pass
+
+
 class MultiRunnerService:
     """多实例并行运行服务"""
 
@@ -508,18 +521,6 @@ class MultiRunnerService:
             inst._phase_start = time.time()
             self._broadcast_state_change(idx, "running", inst.state)
 
-
-class _PhaseError(Exception):
-    """阶段执行失败（可重试）"""
-    def __init__(self, phase: str, reason: str):
-        self.phase = phase
-        self.reason = reason
-        super().__init__(f"{phase}: {reason}")
-
-
-class _GameCrashError(Exception):
-    """游戏闪退"""
-    pass
 
     def _on_phase_change(self, idx: int, phase: Phase):
         """phase 变化回调，同时记录上一阶段耗时"""
