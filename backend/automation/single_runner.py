@@ -141,31 +141,30 @@ class SingleInstanceRunner:
         if "UP" not in output1:
             return False
 
-        rx1_match = re.search(r'RX bytes:(\d+)', output1)
-        if not rx1_match:
-            return False
-        rx1 = int(rx1_match.group(1))
+        def _parse_tun0(output):
+            rx = re.search(r'RX bytes:(\d+)', output)
+            tx = re.search(r'TX bytes:(\d+)', output)
+            return (int(rx.group(1)) if rx else 0, int(tx.group(1)) if tx else 0)
 
-        # 如果 RX=0，隧道刚建立还没数据
-        if rx1 == 0:
-            logger.warning("[VPN] tun0 UP 但 RX=0 → 隧道未通")
+        rx1, tx1 = _parse_tun0(output1)
+
+        # RX+TX 都是 0 → 隧道刚建立还没数据
+        if rx1 == 0 and tx1 == 0:
+            logger.warning("[VPN] tun0 UP 但流量为 0 → 隧道未通")
             return False
 
-        # 两轮采样检查 RX 增长（第一轮 1s，第二轮 2s）
+        # 两轮采样检查 RX 或 TX 增长
         for wait in [1.0, 2.0]:
             await asyncio.sleep(wait)
             output2 = await loop.run_in_executor(
                 None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
             )
-            rx2_match = re.search(r'RX bytes:(\d+)', output2)
-            if not rx2_match:
-                return False
-            rx2 = int(rx2_match.group(1))
-            if rx2 > rx1:
+            rx2, tx2 = _parse_tun0(output2)
+            if rx2 > rx1 or tx2 > tx1:
                 return True
 
-        # 3 秒内 RX 都没增长 → 隧道断了
-        logger.warning(f"[VPN] tun0 RX 3s 未增长 ({rx1} → {rx2}) → 隧道断了")
+        # 3 秒内 RX 和 TX 都没增长 → 隧道断了
+        logger.warning(f"[VPN] tun0 3s 无流量变化 (RX:{rx1}→{rx2} TX:{tx1}→{tx2}) → 隧道断了")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
