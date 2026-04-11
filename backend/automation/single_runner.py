@@ -399,16 +399,11 @@ class SingleInstanceRunner:
                         map_hit = h
                         break
 
-        # 判断是否已在团竞模式：多种特征词任一命中
+        # 判断是否已在团竞模式：多种特征词任一命中（模糊匹配）
+        team_battle_keywords = ["团竞手册", "团竞详情", "军备团竞", "经典团竞",
+                                "击团竞", "迷你战争", "轮换团竞", "突变团竞"]
         is_team_battle = (fill_hit is not None or
-                          "团竞手册" in all_text or
-                          "团竞详情" in all_text or
-                          "军备团竞" in all_text or
-                          "经典团竞" in all_text or
-                          "击团竞" in all_text or
-                          "迷你战争" in all_text or
-                          "轮换团竞" in all_text or
-                          "突变团竞" in all_text or
+                          any(OcrDismisser.fuzzy_match(all_text, kw) for kw in team_battle_keywords) or
                           map_hit is not None)  # 目标地图能找到说明已在对应分类
 
         # ── 判断是否需要切换模式 ──
@@ -523,24 +518,25 @@ class SingleInstanceRunner:
         ocr = OcrDismisser()
 
         # ── 步骤1: 找"组队"入口并点击 ──
+        # 左侧栏竖排小文字，全图 OCR 经常误识别 → 裁剪左侧 10% + 放大 3 倍
         clicked = False
         for attempt in range(3):
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
-            hits = ocr._ocr_all(shot)
-            for h in hits:
-                sh, sw = shot.shape[:2]
-                if "组队" in h.text and h.cx < sw * 0.08:
+            # ROI: 左侧栏 (0~10% 宽度, 40~80% 高度)
+            left_hits = ocr._ocr_roi(shot, 0, 0.4, 0.1, 0.8, scale=3)
+            for h in left_hits:
+                if OcrDismisser.fuzzy_match(h.text, "组队"):
                     logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     clicked = True
                     break
             if clicked:
                 break
-            for h in hits:
-                if "队友" in h.text and h.cx < sw * 0.08:
+            for h in left_hits:
+                if OcrDismisser.fuzzy_match(h.text, "队友"):
                     tap_y = max(h.cy - 100, 50)
                     logger.info(f"[阶段4] 通过'找队友'定位组队 ({h.cx},{tap_y})")
                     await self.adb.tap(h.cx, tap_y)
@@ -566,18 +562,19 @@ class SingleInstanceRunner:
             all_text = " ".join(h.text for h in hits)
 
             # 处理"使用组队码加入"弹窗
-            if "加入队伍" in all_text and "取消" in all_text:
+            if any(OcrDismisser.fuzzy_match(all_text, kw) for kw in ["加入队伍", "使用组队码"]):
                 for h in hits:
-                    if "取消" in h.text and h.cy > shot.shape[0] * 0.55:
+                    if OcrDismisser.fuzzy_match(h.text, "取消") and h.cy > shot.shape[0] * 0.55:
                         logger.info(f"[阶段4] 弹窗出现，点击取消 ({h.cx},{h.cy})")
                         await self.adb.tap(h.cx, h.cy)
                         await asyncio.sleep(0.5)
                         break
                 continue
 
-            # 找底部"组队码"tab（cy > 650）
-            for h in hits:
-                if "组队码" in h.text and h.cy > shot.shape[0] * 0.9:
+            # 找底部"组队码"tab — ROI 底部 10% + 放大
+            bottom_hits = ocr._ocr_roi(shot, 0.2, 0.9, 0.5, 1.0, scale=2)
+            for h in bottom_hits:
+                if OcrDismisser.fuzzy_match(h.text, "组队码"):
                     logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     tab_clicked = True
@@ -586,6 +583,7 @@ class SingleInstanceRunner:
                 break
 
         # ── 步骤3: 在组队码面板找"二维码组队"并点击 ──
+        # ROI: 左侧栏 (0~25% 宽度) + 放大
         await asyncio.sleep(0.5)
         qr_clicked = False
         for attempt in range(8):
@@ -593,9 +591,9 @@ class SingleInstanceRunner:
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
-            hits = ocr._ocr_all(shot)
-            for h in hits:
-                if "二维码" in h.text:
+            left_hits = ocr._ocr_roi(shot, 0, 0.3, 0.25, 0.9, scale=2)
+            for h in left_hits:
+                if OcrDismisser.fuzzy_match(h.text, "二维码"):
                     logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     qr_clicked = True

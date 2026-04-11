@@ -72,8 +72,8 @@ class OcrDismisser:
         if cls._shared_ocr is None:
             logger.info("预热 RapidOCR ...")
             from rapidocr import RapidOCR
-            cls._shared_ocr = RapidOCR()
-            logger.info("RapidOCR 预热完成")
+            cls._shared_ocr = RapidOCR(det_limit_side_len=960, text_score=0.3)
+            logger.info("RapidOCR 预热完成 (det_limit=960, text_score=0.3)")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OCR引擎
@@ -103,6 +103,66 @@ class OcrDismisser:
                 cy = int(sum(ys) / 4)
                 hits.append(self.TextHit(text=text, cx=cx, cy=cy))
         return hits
+
+    def _ocr_roi(self, screenshot: np.ndarray, x1: float, y1: float,
+                 x2: float, y2: float, scale: int = 2) -> list:
+        """裁剪 ROI 区域 + 放大后 OCR，提高小文字准确率
+
+        坐标为比例 (0.0~1.0)，自动转换为像素。
+        放大 scale 倍后识别，坐标映射回原图。
+
+        用法：
+          _ocr_roi(shot, 0, 0, 0.1, 1.0)  # 左侧栏 (0~10% 宽度)
+          _ocr_roi(shot, 0, 0.9, 1.0, 1.0)  # 底部 tab (90~100% 高度)
+        """
+        h, w = screenshot.shape[:2]
+        px1, py1 = int(w * x1), int(h * y1)
+        px2, py2 = int(w * x2), int(h * y2)
+        crop = screenshot[py1:py2, px1:px2]
+
+        if crop.size == 0:
+            return []
+
+        # 放大提高小文字识别率
+        if scale > 1:
+            crop = cv2.resize(crop, (0, 0), fx=scale, fy=scale,
+                              interpolation=cv2.INTER_CUBIC)
+
+        ocr = self._get_ocr()
+        result = ocr(crop)
+        hits = []
+        if result and result.boxes is not None:
+            for box, text, conf in zip(result.boxes, result.txts, result.scores):
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                # 映射回原图坐标
+                cx = int(sum(xs) / 4 / scale) + px1
+                cy = int(sum(ys) / 4 / scale) + py1
+                hits.append(self.TextHit(text=text, cx=cx, cy=cy))
+        return hits
+
+    @staticmethod
+    def fuzzy_match(text: str, keyword: str, max_distance: int = 1) -> bool:
+        """模糊匹配：编辑距离 <= max_distance 视为匹配
+
+        解决 OCR 常见误识别：
+          "组队" → "如WB", "确定" → "确宝", "关闭" → "关内"
+        """
+        # 先精确匹配（快速路径）
+        if keyword in text:
+            return True
+
+        # 滑动窗口模糊匹配
+        klen = len(keyword)
+        for i in range(max(0, len(text) - klen - max_distance),
+                       min(len(text), len(text) - klen + max_distance + 1)):
+            window = text[i:i + klen]
+            if len(window) != klen:
+                continue
+            dist = sum(1 for a, b in zip(window, keyword) if a != b)
+            if dist <= max_distance:
+                return True
+        return False
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 状态检测

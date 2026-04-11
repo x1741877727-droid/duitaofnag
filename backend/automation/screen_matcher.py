@@ -48,8 +48,29 @@ class ScreenMatcher:
         # name -> (gray_image, threshold)
         self._templates: dict[str, tuple[np.ndarray, float]] = {}
 
+    def _normalize_template(self, gray: np.ndarray, source_w: int = 0, source_h: int = 0) -> np.ndarray:
+        """归一化模板到与 NORM_W x NORM_H 匹配的比例
+
+        如果模板是在非标准分辨率下截取的，按比例缩放到标准分辨率。
+        """
+        if source_w <= 0 or source_h <= 0:
+            return gray  # 无源分辨率信息，不缩放
+
+        if source_w != NORM_W or source_h != NORM_H:
+            scale_x = NORM_W / source_w
+            scale_y = NORM_H / source_h
+            scale = (scale_x + scale_y) / 2  # 取平均避免变形
+            new_w = max(1, int(gray.shape[1] * scale))
+            new_h = max(1, int(gray.shape[0] * scale))
+            gray = cv2.resize(gray, (new_w, new_h))
+        return gray
+
     def load_all(self) -> int:
-        """加载所有模板图片，返回加载数量"""
+        """加载所有模板图片，返回加载数量
+
+        模板自动归一化：如果模板旁边有 _meta.txt 记录源分辨率，
+        会按比例缩放到 1280x720。没有 meta 文件则假设已是标准分辨率。
+        """
         count = 0
         for f in self.template_dir.glob("*.png"):
             name = f.stem
@@ -58,6 +79,16 @@ class ScreenMatcher:
                 logger.warning(f"无法读取模板: {f}")
                 continue
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+            # 检查是否有 meta 文件记录源分辨率
+            meta_path = self.template_dir / f"{name}_meta.txt"
+            if meta_path.exists():
+                try:
+                    meta = meta_path.read_text().strip().split("x")
+                    gray = self._normalize_template(gray, int(meta[0]), int(meta[1]))
+                except Exception:
+                    pass
+
             self._templates[name] = (gray, self.default_threshold)
             count += 1
         logger.info(f"已加载 {count} 个模板")
