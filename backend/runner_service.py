@@ -324,9 +324,9 @@ class MultiRunnerService:
     # 阶段失败只重试当前阶段
     _RECOVERY_POINT = {
         "accelerator": "accelerator",     # 加速器失败 → 重试加速器
-        "launch_game": "launch_game",     # 启动失败 → 重试启动
-        "dismiss_popups": "launch_game",  # 弹窗卡死 → 重启游戏
-        "lobby": "launch_game",           # 大厅丢失 → 重启游戏
+        "launch_game": "accelerator",     # 启动失败 → 检查加速器（可能掉了）
+        "dismiss_popups": "accelerator",  # 弹窗卡死 → 从加速器开始（游戏状态不可信）
+        "lobby": "accelerator",           # 大厅丢失 → 从加速器开始
         "team_create": "team_create",     # 组队失败 → 重试组队（还在大厅）
         "team_join": "team_join",         # 加入失败 → 重试加入
         "map_setup": "map_setup",         # 地图失败 → 重试地图
@@ -479,8 +479,8 @@ class MultiRunnerService:
                             await asyncio.sleep(2)
                         except Exception:
                             pass
-                        # 从 launch_game 恢复（跳过加速器）
-                        current_phase = "launch_game"
+                        # 从 accelerator 恢复（游戏闪退会连带关闭加速器）
+                        current_phase = "accelerator"
                         # 如果是队长，重启后需要重新创建队伍
                         if runner.role == "captain" and failed_phase in ("team_create", "map_setup"):
                             self._team_schemes.pop(group, None)
@@ -494,20 +494,20 @@ class MultiRunnerService:
                         await asyncio.sleep(2)  # 给系统一点喘息时间
 
                 except _GameCrashError:
-                    # 游戏闪退 → 从 launch_game 恢复
+                    # 游戏闪退 → 从 accelerator 恢复（闪退会连带关闭加速器）
                     game_restarts += 1
                     phase_retries = 0
                     if game_restarts > self._MAX_GAME_RESTARTS:
                         inst.state = "error"
                         inst.error = "游戏反复闪退，放弃"
                         break
-                    logger.warning(f"[实例{idx}] 游戏闪退，重启 ({game_restarts}/{self._MAX_GAME_RESTARTS})")
+                    logger.warning(f"[实例{idx}] 游戏闪退，从加速器开始恢复 ({game_restarts}/{self._MAX_GAME_RESTARTS})")
                     self._broadcast({"type": "log", "data": {
                         "timestamp": time.time(), "instance": idx,
-                        "level": "warn", "message": f"游戏闪退，重启中 ({game_restarts})",
-                        "state": "launch_game",
+                        "level": "warn", "message": f"游戏闪退，从加速器开始恢复 ({game_restarts})",
+                        "state": "accelerator",
                     }})
-                    current_phase = "launch_game"
+                    current_phase = "accelerator"
                     await asyncio.sleep(2)
 
         except asyncio.CancelledError:
