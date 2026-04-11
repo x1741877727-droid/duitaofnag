@@ -131,14 +131,24 @@ class ScreenMatcher:
         template_name: str,
         threshold: float | None = None,
         multi_scale: bool = True,
+        use_edge: bool = False,
     ) -> Optional[MatchHit]:
-        """匹配单个模板，返回命中或None"""
+        """匹配单个模板，返回命中或None
+
+        Args:
+            use_edge: 使用 Canny 边缘检测匹配，对光照/对比度变化更鲁棒
+        """
         if template_name not in self._templates:
             return None
 
         tmpl_gray, default_th = self._templates[template_name]
         th = threshold if threshold is not None else default_th
         screen_gray = self._normalize(screenshot)
+
+        # 边缘检测模式：Canny 提取轮廓后匹配
+        if use_edge:
+            screen_gray = cv2.Canny(screen_gray, 50, 150)
+            tmpl_gray = cv2.Canny(tmpl_gray, 50, 150)
 
         scales = SCALES if multi_scale else [1.0]
         best_val = 0.0

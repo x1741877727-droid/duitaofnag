@@ -20,6 +20,7 @@ from .adb_lite import ADBController
 from .screen_matcher import MatchHit, ScreenMatcher
 from .popup_dismisser import PopupDismisser
 from .ocr_dismisser import OcrDismisser
+from .debug_logger import DebugLogger
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class SingleInstanceRunner:
         target_mode: str = "团队竞技",
         target_map: str = "狙击团竞",
         on_phase_change=None,  # 回调: (Phase) -> None
+        debug: bool = False,   # 启用详细调试日志
     ):
         self.adb = adb
         self.matcher = matcher
@@ -73,6 +75,7 @@ class SingleInstanceRunner:
         self.popup_dismisser = PopupDismisser(matcher)
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
+        self.dbg = DebugLogger(enabled=debug)
 
     @property
     def phase(self) -> Phase:
@@ -143,6 +146,7 @@ class SingleInstanceRunner:
             f"dumpsys activity services {ACCELERATOR_PACKAGE}"
         )
         if "VpnService" not in output:
+            self.dbg.log_vpn(False, "VpnService 未运行")
             return False
 
         # 2. tun0 是否有收到数据（RX > 0）
@@ -150,10 +154,13 @@ class SingleInstanceRunner:
             None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
         )
         if "UP" not in tun_output:
+            self.dbg.log_vpn(False, "tun0 不存在")
             return False
 
         rx_match = re.search(r'RX bytes:(\d+)', tun_output)
-        if rx_match and int(rx_match.group(1)) > 0:
+        rx_val = int(rx_match.group(1)) if rx_match else 0
+        if rx_val > 0:
+            self.dbg.log_vpn(True, f"tun0 RX={rx_val}")
             return True
 
         # RX=0：可能是刚连上还没流量，等 2 秒重试
@@ -519,18 +526,23 @@ class SingleInstanceRunner:
 
         # ── 步骤1: 找"组队"入口并点击 ──
         # 左侧栏竖排小文字，全图 OCR 经常误识别 → 裁剪左侧 10% + 放大 3 倍
+        self.dbg.log_step("阶段4", "步骤1", "找组队按钮")
         clicked = False
         for attempt in range(3):
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
+            self.dbg.log_screenshot(shot, f"attempt{attempt}")
             # ROI: 左侧栏 (0~10% 宽度, 40~80% 高度)
             left_hits = ocr._ocr_roi(shot, 0, 0.4, 0.1, 0.8, scale=3)
+            self.dbg.log_ocr(left_hits, "左侧栏 ROI(0,0.4,0.1,0.8) scale=3")
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队"):
+                    self.dbg.log_match("组队", h, fuzzy=True)
                     logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
+                    self.dbg.log_action("tap", h.cx, h.cy)
                     clicked = True
                     break
             if clicked:
@@ -538,8 +550,10 @@ class SingleInstanceRunner:
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "队友"):
                     tap_y = max(h.cy - 100, 50)
+                    self.dbg.log_match("队友", h, fuzzy=True)
                     logger.info(f"[阶段4] 通过'找队友'定位组队 ({h.cx},{tap_y})")
                     await self.adb.tap(h.cx, tap_y)
+                    self.dbg.log_action("tap", h.cx, tap_y, "通过队友定位")
                     clicked = True
                     break
             if clicked:
@@ -547,6 +561,7 @@ class SingleInstanceRunner:
             await asyncio.sleep(0.5)
 
         if not clicked:
+            self.dbg.log_fail("未找到组队按钮", left_hits if 'left_hits' in dir() else [])
             logger.warning("[阶段4] 未找到组队按钮")
             self._restore_guard()
             return None

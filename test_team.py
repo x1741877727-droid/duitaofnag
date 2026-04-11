@@ -58,10 +58,10 @@ async def main():
 
     # 创建 runner
     captain_runner = SingleInstanceRunner(
-        adb=captain_adb, matcher=matcher, role="captain"
+        adb=captain_adb, matcher=matcher, role="captain", debug=True
     )
     member_runner = SingleInstanceRunner(
-        adb=member_adb, matcher=matcher, role="member"
+        adb=member_adb, matcher=matcher, role="member", debug=True
     )
 
     # ── 步骤1: 队长创建队伍（QR码方式） ──
