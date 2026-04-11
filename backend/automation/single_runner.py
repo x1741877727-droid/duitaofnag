@@ -586,7 +586,7 @@ class SingleInstanceRunner:
             hits = ocr._ocr_all(shot)
             qr_clicked = False
             for h in hits:
-                if "二维码" in h.text and h.cx < 120:
+                if "二维码" in h.text and h.cx < 300:
                     logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     qr_clicked = True
