@@ -820,6 +820,8 @@ class SingleInstanceRunner:
             return False
 
         # ── 步骤4: 点击"加入队伍"按钮 ──
+        # 注意：面板上有两个"加入队伍"文字——区域标题和按钮
+        # 按钮在下方（y 值更大），取 y 最大的匹配
         for attempt in range(5):
             shot = await self.adb.screenshot()
             if shot is None:
@@ -827,14 +829,14 @@ class SingleInstanceRunner:
                 continue
             hits = ocr._ocr_all(shot)
             found = False
-            for h in hits:
-                if "加入" in h.text and ("队伍" in h.text or "队" in h.text):
-                    logger.info(f"[阶段5] 点击加入队伍 ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    found = True
-                    break
+            # 收集所有"加入"匹配，取 y 最大的（按钮在下方）
+            join_hits = [h for h in hits if "加入" in h.text and "队" in h.text]
+            if join_hits:
+                btn = max(join_hits, key=lambda h: h.cy)
+                logger.info(f"[阶段5] 点击加入队伍按钮 ({btn.cx},{btn.cy})")
+                await self.adb.tap(btn.cx, btn.cy)
+                found = True
             if not found:
-                # 模板兜底
                 tmpl = self.matcher.match_one(shot, "btn_join_team", threshold=0.65)
                 if tmpl:
                     logger.info(f"[阶段5] 模板命中加入队伍 ({tmpl.cx},{tmpl.cy})")
