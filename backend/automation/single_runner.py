@@ -90,53 +90,90 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_accelerator(self) -> bool:
-        """启动加速器并确认连接，再用百度验证网络真通"""
+        """启动加速器并确认连接
+
+        优化策略：
+        1. 先检查 tun0 接口 + wget 连通性（<1秒），已连接直接跳过
+        2. 没连接才启动加速器 app + 点击连接
+        3. 验证用 tun0 + wget，不打开浏览器
+        """
         self.phase = Phase.ACCELERATOR
 
+        # ── 快速检查：VPN 是否已连接 ──
+        if await self._check_vpn_connected():
+            logger.info("[阶段0] 加速器已连接 ✓ 跳过启动")
+            return True
+
+        # ── 需要启动加速器 ──
         for retry in range(3):
             if retry > 0:
-                logger.info(f"[阶段0] 第{retry+1}次重试加速器")
+                logger.info(f"[阶段0] 第{retry+1}次重试")
+                await self.adb.stop_app(ACCELERATOR_PACKAGE)
+                await asyncio.sleep(1)
 
             if not await self._start_accelerator():
                 continue
 
-            # 加速器显示已连接 → 验证网络是否真通
-            if await self._verify_network():
+            # 等待 VPN 连接建立
+            if await self._wait_vpn_connected(timeout=15):
+                logger.info("[阶段0] 加速器连接成功 ✓")
+                await self.adb.key_event("KEYCODE_HOME")
+                await asyncio.sleep(0.3)
                 return True
-
-            # 网络不通 → 重启加速器
-            logger.warning(f"[阶段0] 网络验证失败，重启加速器 (第{retry+1}次)")
-            await self.adb.stop_app(ACCELERATOR_PACKAGE)
-            await asyncio.sleep(2)
 
         logger.error("[阶段0] 加速器3次重试均失败")
         return False
 
+    async def _check_vpn_connected(self) -> bool:
+        """快速检查 VPN 是否已连接（tun0 接口 + wget 连通性）"""
+        loop = asyncio.get_event_loop()
+
+        # 1. 检查 tun0 接口是否存在（<50ms）
+        output = await loop.run_in_executor(
+            None, self.adb._cmd, "shell", "ifconfig tun0 2>/dev/null | grep -c UP"
+        )
+        if output.strip() != "1":
+            return False
+
+        logger.info("[阶段0] tun0 接口存在，验证连通性...")
+
+        # 2. wget 验证实际连通（<3秒）
+        output = await loop.run_in_executor(
+            None, self.adb._cmd, "shell",
+            "wget -q -O /dev/null --timeout=3 http://m.baidu.com && echo OK || echo FAIL"
+        )
+        return "OK" in output
+
+    async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
+        """轮询等待 VPN 连接建立"""
+        for _ in range(timeout * 2):  # 每 0.5 秒检查一次
+            await asyncio.sleep(0.5)
+            if await self._check_vpn_connected():
+                return True
+        return False
+
     async def _start_accelerator(self) -> bool:
-        """启动加速器并等待连接成功（轮询驱动，不靠固定等待）"""
+        """启动加速器并等待连接成功"""
         logger.info("[阶段0] 启动加速器")
         await self.adb.start_app(ACCELERATOR_PACKAGE)
 
         play_click_count = 0
-        # 轮询：每次截图检查，快电脑秒过，慢电脑也能等到
-        for attempt in range(30):  # 最多30次 × ~1.5s ≈ 45秒
+        for attempt in range(20):  # 最多 20 × 1.5s = 30 秒
             await asyncio.sleep(1.5)
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
 
+            # 检查是否已连接（可能加速器自动连接了）
             status = self.matcher.is_accelerator_connected(shot)
 
             if status is True:
-                logger.info(f"[阶段0] 加速器已连接 ✓ ({attempt+1}轮)")
-                await self.adb.key_event("KEYCODE_HOME")
-                await asyncio.sleep(0.5)
+                logger.info(f"[阶段0] 加速器界面显示已连接 ({attempt+1}轮)")
                 return True
 
             if status is False:
                 play_click_count += 1
                 if play_click_count >= 3:
-                    logger.info("[阶段0] 连续点击无效，按返回键清除可能的弹窗")
                     await self.adb.key_event("KEYCODE_BACK")
                     play_click_count = 0
                     continue
@@ -147,62 +184,12 @@ class SingleInstanceRunner:
                     await self.adb.tap(play_hit.cx, play_hit.cy)
                 continue
 
-            # status is None — 不在主界面
-            logger.info("[阶段0] 不在加速器主界面，按返回键")
+            # 不在主界面
             await self.adb.key_event("KEYCODE_BACK")
             play_click_count = 0
 
         logger.error("[阶段0] 加速器启动超时")
         return False
-
-    async def _verify_network(self) -> bool:
-        """打开百度验证网络（轮询驱动，检测到结果立即返回）"""
-        logger.info("[阶段0] 网络验证: 打开百度...")
-        await self.adb.open_url("https://m.baidu.com/")
-
-        SUCCESS_KEYWORDS = ["验证成功", "端口验证", "六花端口"]
-        # 注意："搜索"不能用——浏览器地址栏自带"搜索或输入网址"
-        FAIL_KEYWORDS = ["百度一下", "热搜", "百度首页"]
-
-        # 每1.5秒检查一次，前3秒只看不判（等页面加载），最多12秒
-        for check in range(8):
-            await asyncio.sleep(1.5)
-            shot = await self.adb.screenshot()
-            if shot is None:
-                continue
-
-            hits = self.ocr_dismisser.ocr_screen(shot)
-            all_text = " ".join(h.text for h in hits)
-            logger.info(f"[阶段0] 网络验证R{check+1}: OCR={all_text[:60]}")
-
-            # 前2轮（前3秒）只观察不判定，等页面内容真正加载
-            if check < 2:
-                if any(kw in all_text for kw in SUCCESS_KEYWORDS):
-                    logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
-                    await self._close_browser()
-                    return True
-                continue  # 前3秒只判成功，不判失败（页面可能还没加载）
-
-            if any(kw in all_text for kw in SUCCESS_KEYWORDS):
-                logger.info("[阶段0] 网络验证通过 ✓ 加速器劫持确认")
-                await self._close_browser()
-                return True
-
-            if any(kw in all_text for kw in FAIL_KEYWORDS):
-                logger.warning("[阶段0] 网络验证失败: 百度真实页面，加速器未工作")
-                await self._close_browser()
-                return False
-
-        logger.warning("[阶段0] 网络验证失败: 超时")
-        await self._close_browser()
-        return False
-
-    async def _close_browser(self):
-        """关掉浏览器回桌面"""
-        await self.adb.stop_app("com.android.browser")
-        await asyncio.sleep(0.3)
-        await self.adb.key_event("KEYCODE_HOME")
-        await asyncio.sleep(0.3)
 
     # ================================================================
     # 阶段 1: 启动游戏
