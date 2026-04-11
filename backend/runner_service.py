@@ -101,6 +101,7 @@ class MultiRunnerService:
         self._snapshot_task: Optional[asyncio.Task] = None
         self._ws_broadcast: Optional[Callable] = None
         self._team_schemes: dict[str, str] = {}  # group → game scheme URL
+        self._team_events: dict[str, asyncio.Event] = {}  # group → Event (队员等待队长)
 
     def set_broadcast(self, fn: Callable):
         """设置 WebSocket 广播函数（由 api.py 注入）"""
@@ -178,6 +179,7 @@ class MultiRunnerService:
             pass
 
         self._team_schemes.clear()
+        self._team_events.clear()
 
         # 为每个账号创建实例
         for account in accounts:
@@ -304,77 +306,220 @@ class MultiRunnerService:
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
 
+    # ── 恢复点定义 ──
+    # 游戏闪退后从 launch_game 恢复（加速器已连不需要重做）
+    # 阶段失败只重试当前阶段
+    _RECOVERY_POINT = {
+        "accelerator": "accelerator",     # 加速器失败 → 重试加速器
+        "launch_game": "launch_game",     # 启动失败 → 重试启动
+        "dismiss_popups": "launch_game",  # 弹窗卡死 → 重启游戏
+        "lobby": "launch_game",           # 大厅丢失 → 重启游戏
+        "team_create": "team_create",     # 组队失败 → 重试组队（还在大厅）
+        "team_join": "team_join",         # 加入失败 → 重试加入
+        "map_setup": "map_setup",         # 地图失败 → 重试地图
+    }
+    _MAX_PHASE_RETRIES = 3       # 同阶段最多重试次数
+    _MAX_GAME_RESTARTS = 5       # 最多重启游戏次数
+    _GAME_PACKAGE = "com.tencent.tmgp.pubgmhd"
+
     async def _run_instance(self, idx: int, runner: SingleInstanceRunner):
-        """单个实例运行（在独立 task 中）
+        """单个实例运行 — 带自动恢复的状态机
 
-        状态由 runner 的 phase 回调自动更新（_on_phase_change），
-        这里只处理 runner 不涉及的最终状态记录。
-
-        组队流程：
-        - 队长: 到大厅 → 创建队伍(QR码解码获取game scheme) → 地图设置
-        - 队员: 到大厅 → 等队长game scheme → 一条命令加入
+        容错规则：
+        - 阶段失败 → 重试当前阶段（最多 3 次）
+        - 连续失败 → 升级到重启游戏（跳过加速器）
+        - 游戏闪退 → 检测到后从 launch_game 恢复
+        - 队员等队长 → 事件驱动无限等（不再固定 60 秒）
+        - 单实例崩溃不影响其他实例
         """
+        inst = self._instances[idx]
+        group = inst.group
+        phase_retries = 0       # 当前阶段重试计数
+        game_restarts = 0       # 游戏重启计数
+        current_phase = "accelerator"  # 当前要执行的阶段
+
         try:
-            # 阶段 0-3: 加速器 → 游戏 → 弹窗 → 大厅
-            ok = await runner.run_to_lobby()
-            if not ok:
-                self._instances[idx].state = "error"
-                self._instances[idx].error = "未能到达大厅"
-                return
+            while True:
+                try:
+                    if current_phase == "accelerator":
+                        ok = await runner.phase_accelerator()
+                        if ok:
+                            current_phase = "launch_game"
+                            phase_retries = 0
+                        else:
+                            raise _PhaseError("accelerator", "加速器连接失败")
 
-            if runner.role == "captain":
-                # 队长: 创建队伍 → 存 game scheme → 地图设置
-                scheme = await runner.phase_team_create()
-                if scheme:
-                    runner._team_code = scheme
-                    # 存到共享字典，队员可以读取
-                    self._team_schemes[self._instances[idx].group] = scheme
-                    logger.info(f"[实例{idx}] 队长已创建队伍 (scheme: {scheme[:50]}...)")
-                else:
-                    self._instances[idx].state = "error"
-                    self._instances[idx].error = "创建队伍失败"
-                    return
+                    if current_phase == "launch_game":
+                        ok = await runner.phase_launch_game()
+                        if ok:
+                            current_phase = "dismiss_popups"
+                            phase_retries = 0
+                        else:
+                            raise _PhaseError("launch_game", "启动游戏失败")
 
-                ok = await runner.phase_map_setup()
-                if not ok:
-                    logger.warning(f"[实例{idx}] 地图设置失败")
+                    if current_phase == "dismiss_popups":
+                        ok = await runner.phase_dismiss_popups()
+                        if ok:
+                            current_phase = "team" if runner.role else "done"
+                            phase_retries = 0
+                            runner.phase = Phase.LOBBY
+                        else:
+                            raise _PhaseError("dismiss_popups", "弹窗清理超时")
 
-            else:
-                # 队员: 等队长的 game scheme，然后一条命令加入
-                group = self._instances[idx].group
-                scheme = ""
-                for wait in range(60):  # 最多等 60 秒
-                    scheme = self._team_schemes.get(group, "")
-                    if scheme:
+                    if current_phase == "team":
+                        if runner.role == "captain":
+                            current_phase = "team_create"
+                        else:
+                            current_phase = "team_join"
+
+                    if current_phase == "team_create":
+                        scheme = await runner.phase_team_create()
+                        if scheme:
+                            runner._team_code = scheme
+                            self._team_schemes[group] = scheme
+                            # 通知等待的队员
+                            evt = self._team_events.get(group)
+                            if evt:
+                                evt.set()
+                            logger.info(f"[实例{idx}] 队长已创建队伍")
+                            current_phase = "map_setup"
+                            phase_retries = 0
+                        else:
+                            raise _PhaseError("team_create", "创建队伍失败")
+
+                    if current_phase == "team_join":
+                        # 事件驱动等待队长（不再固定超时）
+                        scheme = self._team_schemes.get(group, "")
+                        if not scheme:
+                            inst.state = "team_join"
+                            inst.error = "等待队长创建队伍..."
+                            self._broadcast({"type": "log", "data": {
+                                "timestamp": time.time(), "instance": idx,
+                                "level": "info", "message": "等待队长创建队伍...",
+                                "state": "team_join",
+                            }})
+                            evt = self._team_events.get(group)
+                            if evt is None:
+                                evt = asyncio.Event()
+                                self._team_events[group] = evt
+                            # 无限等，但每 10 秒检查一次（队长可能重建了队伍）
+                            while not self._team_schemes.get(group, ""):
+                                try:
+                                    await asyncio.wait_for(evt.wait(), timeout=10)
+                                except asyncio.TimeoutError:
+                                    pass  # 继续等
+                            scheme = self._team_schemes[group]
+                            inst.error = ""
+
+                        ok = await runner.phase_team_join(scheme)
+                        if ok:
+                            current_phase = "done"
+                            phase_retries = 0
+                        else:
+                            # 加入失败 → 清空 scheme 让队长知道需要重建
+                            raise _PhaseError("team_join", "加入队伍失败")
+
+                    if current_phase == "map_setup":
+                        ok = await runner.phase_map_setup()
+                        if ok:
+                            current_phase = "done"
+                            phase_retries = 0
+                        else:
+                            # 地图设置失败不致命，继续
+                            logger.warning(f"[实例{idx}] 地图设置失败，跳过")
+                            current_phase = "done"
+
+                    if current_phase == "done":
+                        inst.state = "done"
+                        elapsed = round(time.time() - inst._phase_start, 1)
+                        inst.stage_times[inst.state] = elapsed
+                        logger.info(f"[实例{idx}] 全部阶段完成 ✓")
+                        break  # 正常退出循环
+
+                except _PhaseError as e:
+                    phase_retries += 1
+                    failed_phase = e.phase
+                    logger.warning(f"[实例{idx}] {e.reason} (重试 {phase_retries}/{self._MAX_PHASE_RETRIES})")
+                    inst.error = f"{e.reason} (重试 {phase_retries})"
+
+                    if phase_retries >= self._MAX_PHASE_RETRIES:
+                        # 升级：重启游戏
+                        game_restarts += 1
+                        phase_retries = 0
+                        if game_restarts > self._MAX_GAME_RESTARTS:
+                            inst.state = "error"
+                            inst.error = f"重启游戏 {self._MAX_GAME_RESTARTS} 次仍失败，放弃"
+                            logger.error(f"[实例{idx}] 超过最大重启次数，放弃")
+                            break
+
+                        logger.warning(f"[实例{idx}] 升级恢复: 重启游戏 ({game_restarts}/{self._MAX_GAME_RESTARTS})")
+                        self._broadcast({"type": "log", "data": {
+                            "timestamp": time.time(), "instance": idx,
+                            "level": "warn",
+                            "message": f"阶段 {failed_phase} 连续失败，重启游戏 ({game_restarts})",
+                            "state": failed_phase,
+                        }})
+                        # 强制停止游戏
+                        try:
+                            raw_adb = getattr(runner.adb, '_adb', runner.adb)
+                            await raw_adb.stop_app(self._GAME_PACKAGE)
+                            await asyncio.sleep(2)
+                        except Exception:
+                            pass
+                        # 从 launch_game 恢复（跳过加速器）
+                        current_phase = "launch_game"
+                        # 如果是队长，重启后需要重新创建队伍
+                        if runner.role == "captain" and failed_phase in ("team_create", "map_setup"):
+                            self._team_schemes.pop(group, None)
+                            evt = self._team_events.get(group)
+                            if evt:
+                                evt.clear()  # 重置事件，队员会继续等
+                    else:
+                        # 普通重试：回到恢复点
+                        recovery = self._RECOVERY_POINT.get(failed_phase, failed_phase)
+                        current_phase = recovery
+                        await asyncio.sleep(2)  # 给系统一点喘息时间
+
+                except _GameCrashError:
+                    # 游戏闪退 → 从 launch_game 恢复
+                    game_restarts += 1
+                    phase_retries = 0
+                    if game_restarts > self._MAX_GAME_RESTARTS:
+                        inst.state = "error"
+                        inst.error = "游戏反复闪退，放弃"
                         break
-                    await asyncio.sleep(1)
-
-                if not scheme:
-                    self._instances[idx].state = "error"
-                    self._instances[idx].error = "等待队长口令超时"
-                    return
-
-                ok = await runner.phase_team_join(scheme)
-                if not ok:
-                    self._instances[idx].state = "error"
-                    self._instances[idx].error = "加入队伍失败"
-                    return
-
-            # 记录最后一个阶段的耗时
-            inst = self._instances[idx]
-            elapsed = round(time.time() - inst._phase_start, 1)
-            inst.stage_times[inst.state] = elapsed
+                    logger.warning(f"[实例{idx}] 游戏闪退，重启 ({game_restarts}/{self._MAX_GAME_RESTARTS})")
+                    self._broadcast({"type": "log", "data": {
+                        "timestamp": time.time(), "instance": idx,
+                        "level": "warn", "message": f"游戏闪退，重启中 ({game_restarts})",
+                        "state": "launch_game",
+                    }})
+                    current_phase = "launch_game"
+                    await asyncio.sleep(2)
 
         except asyncio.CancelledError:
-            self._instances[idx].state = "init"
+            inst.state = "init"
             logger.info(f"[实例{idx}] 已取消")
         except Exception as e:
-            self._instances[idx].state = "error"
-            self._instances[idx].error = str(e)
-            logger.error(f"[实例{idx}] 运行异常: {e}")
+            inst.state = "error"
+            inst.error = str(e)
+            logger.error(f"[实例{idx}] 运行异常: {e}", exc_info=True)
         finally:
-            self._instances[idx]._phase_start = time.time()
-            self._broadcast_state_change(idx, "running", self._instances[idx].state)
+            inst._phase_start = time.time()
+            self._broadcast_state_change(idx, "running", inst.state)
+
+
+class _PhaseError(Exception):
+    """阶段执行失败（可重试）"""
+    def __init__(self, phase: str, reason: str):
+        self.phase = phase
+        self.reason = reason
+        super().__init__(f"{phase}: {reason}")
+
+
+class _GameCrashError(Exception):
+    """游戏闪退"""
+    pass
 
     def _on_phase_change(self, idx: int, phase: Phase):
         """phase 变化回调，同时记录上一阶段耗时"""
