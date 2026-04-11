@@ -33,7 +33,7 @@ export function Header() {
   return (
     <header className="h-12 border-b border-border bg-card flex items-center justify-between px-4 shrink-0">
       <div className="flex items-center gap-8">
-        <h1 className="text-lg font-bold text-foreground tracking-tight">GameBot</h1>
+        <h1 className="text-lg font-bold text-foreground tracking-tight">FightMaster</h1>
         
         <nav className="flex items-center gap-1">
           <Button

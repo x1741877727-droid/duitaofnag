@@ -509,19 +509,37 @@ class SingleInstanceRunner:
 
         ocr = OcrDismisser()
 
-        # ── 步骤1: OCR找"组队"并点击 ──
-        shot = await self.adb.screenshot()
-        if shot is None:
-            self._restore_guard()
-            return None
-        hits = ocr._ocr_all(shot)
+        # ── 步骤1: 找"组队"入口并点击 ──
+        # "组队"竖排文字经常被 OCR 误识别（如"如WB"），
+        # 优先找 "找队友"（更稳定），然后往上偏移到"组队"位置
         clicked = False
-        for h in hits:
-            if "组队" in h.text and h.cx < 80:
-                logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
-                await self.adb.tap(h.cx, h.cy)
-                clicked = True
+        for attempt in range(3):
+            shot = await self.adb.screenshot()
+            if shot is None:
+                await asyncio.sleep(0.5)
+                continue
+            hits = ocr._ocr_all(shot)
+            # 策略1: 直接找"组队"
+            for h in hits:
+                if "组队" in h.text and h.cx < 100:
+                    logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
+                    await self.adb.tap(h.cx, h.cy)
+                    clicked = True
+                    break
+            if clicked:
                 break
+            # 策略2: 找"找队友"（在组队下方），点击其上方区域
+            for h in hits:
+                if "队友" in h.text and h.cx < 100:
+                    tap_y = max(h.cy - 100, 50)
+                    logger.info(f"[阶段4] 通过'找队友'定位组队 ({h.cx},{tap_y})")
+                    await self.adb.tap(h.cx, tap_y)
+                    clicked = True
+                    break
+            if clicked:
+                break
+            await asyncio.sleep(0.5)
+
         if not clicked:
             logger.warning("[阶段4] 未找到组队按钮")
             self._restore_guard()
