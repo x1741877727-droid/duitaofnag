@@ -110,7 +110,7 @@ def detect_ldplayer_instances(ldplayer_path: str) -> list[dict]:
             return []
 
         # 获取 ADB 实际在线设备列表
-        adb_path = settings.adb_path if hasattr(settings, 'adb_path') and settings.adb_path else os.path.join(settings.ldplayer_path if hasattr(settings, 'ldplayer_path') else "", "adb.exe")
+        adb_path = os.path.join(ldplayer_path, "adb.exe")
         adb_online = set()
         try:
             adb_result = subprocess.run(
