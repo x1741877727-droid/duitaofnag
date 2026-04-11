@@ -109,6 +109,22 @@ def detect_ldplayer_instances(ldplayer_path: str) -> list[dict]:
         if not output:
             return []
 
+        # 获取 ADB 实际在线设备列表
+        adb_path = settings.adb_path if hasattr(settings, 'adb_path') and settings.adb_path else os.path.join(settings.ldplayer_path if hasattr(settings, 'ldplayer_path') else "", "adb.exe")
+        adb_online = set()
+        try:
+            adb_result = subprocess.run(
+                [adb_path, "devices"], capture_output=True, timeout=5,
+                creationflags=_SF,
+            )
+            for line in adb_result.stdout.decode("utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if line.startswith("emulator-") and "device" in line:
+                    serial = line.split()[0]
+                    adb_online.add(serial)
+        except Exception:
+            pass
+
         instances = []
         for line in output.splitlines():
             parts = line.split(",")
@@ -122,13 +138,26 @@ def detect_ldplayer_instances(ldplayer_path: str) -> list[dict]:
             name = parts[1]
             is_running = parts[4] == "1"
             pid = int(parts[5]) if len(parts) > 5 else -1
+
+            # 从 ADB 在线列表匹配真实端口（LDPlayer 重启后端口可能变化）
             adb_port = 5554 + idx * 2
+            serial = f"emulator-{adb_port}"
+            # 如果默认端口不在线，扫描 ADB 在线设备匹配
+            if serial not in adb_online and is_running:
+                for online_serial in adb_online:
+                    port = int(online_serial.split("-")[1])
+                    # 匹配运行中但未被其他实例占用的端口
+                    if online_serial not in [i.get("adb_serial") for i in instances]:
+                        serial = online_serial
+                        adb_port = port
+                        break
+
             instances.append({
                 "index": idx,
                 "name": name,
                 "running": is_running,
                 "pid": pid,
-                "adb_serial": f"emulator-{adb_port}",
+                "adb_serial": serial,
                 "adb_port": adb_port,
             })
         return instances

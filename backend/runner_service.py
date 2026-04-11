@@ -100,6 +100,7 @@ class MultiRunnerService:
         self._start_time: float = 0
         self._snapshot_task: Optional[asyncio.Task] = None
         self._ws_broadcast: Optional[Callable] = None
+        self._team_schemes: dict[str, str] = {}  # group → game scheme URL
 
     def set_broadcast(self, fn: Callable):
         """设置 WebSocket 广播函数（由 api.py 注入）"""
@@ -140,10 +141,37 @@ class MultiRunnerService:
         n = matcher.load_all()
         logger.info(f"已加载 {n} 个模板: {matcher.template_names}")
 
+        # 获取 ADB 在线设备真实端口
+        import subprocess
+        adb_devices = {}
+        try:
+            result = subprocess.run(
+                [adb_path, "devices"], capture_output=True, timeout=5
+            )
+            for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+                if line.strip().startswith("emulator-") and "device" in line:
+                    serial = line.split()[0]
+                    adb_devices[serial] = True
+        except Exception:
+            pass
+
+        self._team_schemes.clear()
+
         # 为每个账号创建实例
         for account in accounts:
             idx = account.instance_index
+            # 优先用默认端口，如果不在线则扫描可用端口
             serial = f"emulator-{5554 + idx * 2}"
+            if serial not in adb_devices:
+                # 扫描可能的端口（LDPlayer 重启后端口可能变化）
+                for port in range(5554, 5574, 2):
+                    candidate = f"emulator-{port}"
+                    if candidate in adb_devices and candidate not in [
+                        f"emulator-{5554 + a.instance_index * 2}" for a in accounts if a.instance_index != idx
+                    ]:
+                        serial = candidate
+                        logger.info(f"[实例{idx}] ADB 端口映射: {5554+idx*2} → {port}")
+                        break
 
             raw_adb = ADBController(serial, adb_path)
 
@@ -259,23 +287,27 @@ class MultiRunnerService:
 
         状态由 runner 的 phase 回调自动更新（_on_phase_change），
         这里只处理 runner 不涉及的最终状态记录。
+
+        组队流程：
+        - 队长: 到大厅 → 创建队伍(QR码解码获取game scheme) → 地图设置
+        - 队员: 到大厅 → 等队长game scheme → 一条命令加入
         """
         try:
             # 阶段 0-3: 加速器 → 游戏 → 弹窗 → 大厅
-            # runner 内部通过 phase setter 触发 _on_phase_change，自动记录每阶段耗时
             ok = await runner.run_to_lobby()
             if not ok:
                 self._instances[idx].state = "error"
                 self._instances[idx].error = "未能到达大厅"
                 return
 
-            # 队长执行: 阶段4(创建队伍) → 阶段6(地图设置)
-            # phase_team_create/phase_map_setup 内部会设置 self.phase → 触发 _on_phase_change
             if runner.role == "captain":
-                code = await runner.phase_team_create()
-                if code:
-                    runner._team_code = code
-                    logger.info(f"[实例{idx}] 队长已创建队伍，口令码: {code}")
+                # 队长: 创建队伍 → 存 game scheme → 地图设置
+                scheme = await runner.phase_team_create()
+                if scheme:
+                    runner._team_code = scheme
+                    # 存到共享字典，队员可以读取
+                    self._team_schemes[self._instances[idx].group] = scheme
+                    logger.info(f"[实例{idx}] 队长已创建队伍 (scheme: {scheme[:50]}...)")
                 else:
                     self._instances[idx].state = "error"
                     self._instances[idx].error = "创建队伍失败"
@@ -285,10 +317,31 @@ class MultiRunnerService:
                 if not ok:
                     logger.warning(f"[实例{idx}] 地图设置失败")
 
-                # 记录最后一个阶段的耗时（因为没有下一阶段触发记录）
-                inst = self._instances[idx]
-                elapsed = round(time.time() - inst._phase_start, 1)
-                inst.stage_times[inst.state] = elapsed
+            else:
+                # 队员: 等队长的 game scheme，然后一条命令加入
+                group = self._instances[idx].group
+                scheme = ""
+                for wait in range(60):  # 最多等 60 秒
+                    scheme = self._team_schemes.get(group, "")
+                    if scheme:
+                        break
+                    await asyncio.sleep(1)
+
+                if not scheme:
+                    self._instances[idx].state = "error"
+                    self._instances[idx].error = "等待队长口令超时"
+                    return
+
+                ok = await runner.phase_team_join(scheme)
+                if not ok:
+                    self._instances[idx].state = "error"
+                    self._instances[idx].error = "加入队伍失败"
+                    return
+
+            # 记录最后一个阶段的耗时
+            inst = self._instances[idx]
+            elapsed = round(time.time() - inst._phase_start, 1)
+            inst.stage_times[inst.state] = elapsed
 
         except asyncio.CancelledError:
             self._instances[idx].state = "init"
