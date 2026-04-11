@@ -59,13 +59,16 @@ async def read_team_code_from_windows(adb_path: str) -> str:
 
 
 async def clear_windows_clipboard():
-    """清空 Windows 剪贴板"""
+    """清空 Windows 剪贴板（允许失败）"""
     import subprocess
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, subprocess.check_output,
-        ["powershell", "-command", "Set-Clipboard -Value ' '"],
-    )
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, subprocess.run,
+            ["powershell", "-command", "Set-Clipboard -Value 'CLEAR'"],
+        )
+    except Exception:
+        pass  # LDPlayer 可能锁住剪贴板，忽略
 
 
 async def main():
