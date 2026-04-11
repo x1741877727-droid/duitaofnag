@@ -153,11 +153,21 @@ class SingleInstanceRunner:
             return False
 
         rx_match = re.search(r'RX bytes:(\d+)', tun_output)
-        if not rx_match or int(rx_match.group(1)) == 0:
-            logger.warning("[VPN] VpnService 运行但 tun0 RX=0 → 隧道未通（假连接）")
-            return False
+        if rx_match and int(rx_match.group(1)) > 0:
+            return True
 
-        return True
+        # RX=0：可能是刚连上还没流量，等 2 秒重试
+        logger.debug("[VPN] tun0 RX=0，等待 2s 重试...")
+        await asyncio.sleep(2)
+        tun_output2 = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+        )
+        rx_match2 = re.search(r'RX bytes:(\d+)', tun_output2)
+        if rx_match2 and int(rx_match2.group(1)) > 0:
+            return True
+
+        logger.warning("[VPN] VpnService 运行但 tun0 RX 持续为 0 → 隧道未通（假连接）")
+        return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
         """轮询等待 VPN 连接建立并验证通过"""
