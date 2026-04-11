@@ -276,8 +276,12 @@ def create_app(config: ConfigManager) -> FastAPI:
     async def stop():
         if not service.running:
             return {"ok": False, "error": "未在运行"}
-        await service.stop_all()
-        return {"ok": True}
+        try:
+            await service.stop_all()
+            return {"ok": True}
+        except Exception as e:
+            logger.error(f"停止失败: {e}", exc_info=True)
+            return {"ok": False, "error": str(e)}
 
     @app.get("/api/status")
     async def status():

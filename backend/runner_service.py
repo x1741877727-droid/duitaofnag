@@ -550,6 +550,13 @@ class _GameCrashError(Exception):
 
         logger.info("停止所有实例...")
 
+        # 先标记停止，防止 stop 失败后卡在 running 状态
+        self._running = False
+
+        # 唤醒所有等待中的队员（让 Event.wait 能响应 cancel）
+        for evt in self._team_events.values():
+            evt.set()
+
         # 取消快照循环
         if self._snapshot_task:
             self._snapshot_task.cancel()
@@ -570,9 +577,9 @@ class _GameCrashError(Exception):
             auto_logger.removeHandler(handler)
         self._log_handlers.clear()
 
-        self._running = False
         self._tasks.clear()
         self._runners.clear()
+        self._team_events.clear()
 
         self._broadcast({"type": "log", "data": {
             "timestamp": time.time(), "instance": -1,
