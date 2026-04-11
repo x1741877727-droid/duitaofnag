@@ -151,21 +151,21 @@ class SingleInstanceRunner:
             logger.warning("[VPN] tun0 UP 但 RX=0 → 隧道未通")
             return False
 
-        # 等 0.5 秒后第二次采样
-        await asyncio.sleep(0.5)
-        output2 = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
-        )
-        rx2_match = re.search(r'RX bytes:(\d+)', output2)
-        if not rx2_match:
-            return False
-        rx2 = int(rx2_match.group(1))
+        # 两轮采样检查 RX 增长（第一轮 1s，第二轮 2s）
+        for wait in [1.0, 2.0]:
+            await asyncio.sleep(wait)
+            output2 = await loop.run_in_executor(
+                None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+            )
+            rx2_match = re.search(r'RX bytes:(\d+)', output2)
+            if not rx2_match:
+                return False
+            rx2 = int(rx2_match.group(1))
+            if rx2 > rx1:
+                return True
 
-        if rx2 > rx1:
-            return True
-
-        # RX 没增长，可能隧道断了但 tun0 接口还在
-        logger.warning(f"[VPN] tun0 RX 未增长 ({rx1} → {rx2}) → 隧道可能断了")
+        # 3 秒内 RX 都没增长 → 隧道断了
+        logger.warning(f"[VPN] tun0 RX 3s 未增长 ({rx1} → {rx2}) → 隧道断了")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
