@@ -3,7 +3,7 @@
 通过 ADB 在模拟器上执行，不注入游戏进程
 
 用法:
-  python tools/memscan.py --adb D:\leidian\LDPlayer9\adb.exe --serial emulator-5556 --keyword 冰雾阴阳
+  python tools/memscan.py --adb D:\\leidian\\LDPlayer9\\adb.exe --serial emulator-5556 --keyword 冰雾阴阳
 """
 
 import argparse
@@ -94,6 +94,8 @@ def scan_region(adb_path, serial, pid, start, size, keyword_bytes):
 
 
 def main():
+    import io, os
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description="游戏进程内存扫描")
     parser.add_argument("--adb", default=r"D:\leidian\LDPlayer9\adb.exe")
     parser.add_argument("--serial", default="emulator-5556")
@@ -133,7 +135,10 @@ def main():
             print(f"\n  *** 在 {addr_range} ({name}) 找到 {len(findings)} 处 ***")
             for f in findings:
                 print(f"    地址: {f['hex_addr']}")
-                print(f"    上下文: {f['context'][:120]}")
+                try:
+                    print(f"    上下文: {f['context'][:120]}")
+                except UnicodeEncodeError:
+                    print(f"    上下文: {f['context'][:120].encode('utf-8', errors='replace')}")
             all_findings.extend(findings)
 
     elapsed = time.time() - t0
