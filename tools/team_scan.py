@@ -56,13 +56,24 @@ def get_malloc_regions(pid):
     return regions
 
 
+MAX_DD_SIZE = 2 * 1024 * 1024  # 每次 dd 最多读 2MB（跟原始成功方案一致）
+
 def scan_region(pid, start, size):
-    """用 dd 读取单个区域，返回原始字节"""
-    skip = start // 4096
-    count = size // 4096
-    if count == 0:
-        return b""
-    return adb("exec-out", f"su 0 dd if=/proc/{pid}/mem bs=4096 skip={skip} count={count} 2>/dev/null")
+    """用 dd 读取单个区域，大区域拆成 2MB 小块"""
+    result = b""
+    offset = start
+    remaining = size
+    while remaining > 0:
+        chunk = min(remaining, MAX_DD_SIZE)
+        skip = offset // 4096
+        count = chunk // 4096
+        if count == 0:
+            break
+        data = adb("exec-out", f"su 0 dd if=/proc/{pid}/mem bs=4096 skip={skip} count={count} 2>/dev/null")
+        result += data
+        offset += chunk
+        remaining -= chunk
+    return result
 
 
 def extract_context(data, idx, kw_len, extra=120):
