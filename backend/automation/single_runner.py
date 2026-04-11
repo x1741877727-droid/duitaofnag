@@ -125,46 +125,23 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 隧道是否真正可用（~600ms）
+        """检查 VPN 是否已连接（~50ms）
 
-        检测策略：tun0 存在 + RX 字节数在增长（两次采样间隔 0.5s）。
-        RX 是累积值，断开后不归零，所以必须检查增长量。
+        检测策略：检查加速器的 VpnService 是否在运行。
+        连接时 SimpleVpnService 必定在前台运行，断开时服务停止。
+        不依赖流量采样，空闲状态也能准确检测。
         """
-        import re
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 
-        # 第一次采样
-        output1 = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+        output = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            f"dumpsys activity services {ACCELERATOR_PACKAGE}"
         )
-        if "UP" not in output1:
-            return False
+        if "VpnService" in output:
+            return True
 
-        def _parse_tun0(output):
-            rx = re.search(r'RX bytes:(\d+)', output)
-            tx = re.search(r'TX bytes:(\d+)', output)
-            return (int(rx.group(1)) if rx else 0, int(tx.group(1)) if tx else 0)
-
-        rx1, tx1 = _parse_tun0(output1)
-
-        # RX+TX 都是 0 → 隧道刚建立还没数据
-        if rx1 == 0 and tx1 == 0:
-            logger.warning("[VPN] tun0 UP 但流量为 0 → 隧道未通")
-            return False
-
-        # 两轮采样检查 RX 或 TX 增长
-        for wait in [1.0, 2.0]:
-            await asyncio.sleep(wait)
-            output2 = await loop.run_in_executor(
-                None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
-            )
-            rx2, tx2 = _parse_tun0(output2)
-            if rx2 > rx1 or tx2 > tx1:
-                return True
-
-        # 3 秒内 RX 和 TX 都没增长 → 隧道断了
-        logger.warning(f"[VPN] tun0 3s 无流量变化 (RX:{rx1}→{rx2} TX:{tx1}→{tx2}) → 隧道断了")
+        logger.debug("[VPN] VpnService 未运行 → VPN 未连接")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
