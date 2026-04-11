@@ -1,7 +1,7 @@
 """
-测试脚本：队长创建队伍 + 队员加入
+测试脚本：队长创建队伍(QR码) + 队员直接加入(game scheme)
 雷电模拟器-1 (emulator-5556) = 队长
-雷电模拟器-2 (emulator-5558) = 队员
+雷电模拟器-2 (emulator-5560) = 队员
 
 用法: python test_team.py --adb D:\leidian\LDPlayer9\adb.exe
 """
@@ -12,7 +12,6 @@ import os
 import sys
 import argparse
 
-# 把 backend 加入路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from backend.automation.adb_lite import ADBController
@@ -27,55 +26,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def read_team_code_from_windows(adb_path: str) -> str:
-    """从 Windows 剪贴板读取口令码
-
-    LDPlayer 会把模拟器剪贴板同步到 Windows 剪贴板。
-    "分享口令码" 复制的格式：
-    【微信和QQ】...（整段复制后...）BU2L4080https://... CA9120 ?7324
-    口令码是 https:// 前面的大写字母+数字组合（8位）
-    """
-    import re
-    import subprocess
-    loop = asyncio.get_event_loop()
-    output = await loop.run_in_executor(
-        None, subprocess.check_output,
-        ["powershell", "-command", "Get-Clipboard"],
-    )
-    text = output.decode("utf-8", errors="ignore").strip()
-    logger.info(f"Windows 剪贴板原文: {text[:80]}...")
-
-    # 提取口令码：https:// 前面的 8 位大写字母+数字
-    match = re.search(r'[A-Z0-9]{6,10}(?=https?://)', text)
-    if match:
-        return match.group(0)
-
-    # 兜底：找所有大写字母+数字的 8 位组合
-    matches = re.findall(r'[A-Z][A-Z0-9]{6,9}', text)
-    if matches:
-        return matches[0]
-
-    return ""
-
-
-async def clear_windows_clipboard():
-    """清空 Windows 剪贴板（允许失败）"""
-    import subprocess
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, subprocess.run,
-            ["powershell", "-command", "Set-Clipboard -Value 'CLEAR'"],
-        )
-    except Exception:
-        pass  # LDPlayer 可能锁住剪贴板，忽略
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", default=r"D:\leidian\LDPlayer9\adb.exe")
     parser.add_argument("--captain", default="emulator-5556", help="队长 ADB serial")
-    parser.add_argument("--member", default="emulator-5558", help="队员 ADB serial")
+    parser.add_argument("--member", default="emulator-5560", help="队员 ADB serial")
     parser.add_argument("--templates", default="", help="模板目录")
     args = parser.parse_args()
 
@@ -109,61 +64,24 @@ async def main():
         adb=member_adb, matcher=matcher, role="member"
     )
 
-    # ── 步骤0: 清除 Windows 剪贴板 ──
+    # ── 步骤1: 队长创建队伍（QR码方式） ──
     logger.info("=" * 50)
-    logger.info("步骤0: 清除 Windows 剪贴板")
-    await clear_windows_clipboard()
-    logger.info("剪贴板已清除 ✓")
-
-    # ── 步骤1: 队长创建队伍 ──
-    logger.info("=" * 50)
-    logger.info("步骤1: 队长创建队伍 (emulator-5556)")
-    result = await captain_runner.phase_team_create()
-    if not result:
-        logger.error("❌ 队长创建队伍失败！")
+    logger.info(f"步骤1: 队长创建队伍 ({args.captain})")
+    game_scheme = await captain_runner.phase_team_create()
+    if not game_scheme:
+        logger.error("队长创建队伍失败！")
         return
 
-    logger.info("队长创建队伍完成 ✓")
+    logger.info(f"队长创建完成，game scheme: {game_scheme}")
 
-    # ── 步骤2: 从 Windows 剪贴板读取完整邀请信息 ──
+    # ── 步骤2: 队员直接加入（一条ADB命令） ──
     logger.info("=" * 50)
-    logger.info("步骤2: 从 Windows 剪贴板读取邀请信息")
-    await asyncio.sleep(0.5)
-
-    import subprocess
-    loop = asyncio.get_event_loop()
-    raw_clip = await loop.run_in_executor(
-        None, subprocess.check_output,
-        ["powershell", "-command", "Get-Clipboard"],
-    )
-    full_invite = raw_clip.decode("utf-8", errors="ignore").strip()
-    logger.info(f"完整邀请信息: {full_invite[:60]}...")
-
-    # 提取口令码用于日志
-    import re
-    code_match = re.search(r'[A-Z0-9]{6,10}(?=https?://)', full_invite)
-    team_code = code_match.group(0) if code_match else "unknown"
-    logger.info(f"口令码: {team_code}")
-
-    if not full_invite or len(full_invite) < 10:
-        logger.error("❌ 未能读取邀请信息！")
-        return
-
-    # ── 步骤3: 邀请信息存入 Python 内存（不串码） ──
-    logger.info("=" * 50)
-    logger.info(f"步骤3: 邀请信息已缓存到内存 (口令码: {team_code})")
-    # 多队并行时：每队的 full_invite 存在各自的内存变量里
-    # 队员加入时通过 PowerShell 写入 Windows 剪贴板 → LDPlayer 同步到 Android
-    # 串行操作：A队写→A队员粘贴→B队写→B队员粘贴
-
-    # ── 步骤4: 队员加入队伍 ──
-    logger.info("=" * 50)
-    logger.info("步骤4: 队员加入队伍 (emulator-5558)")
-    ok = await member_runner.phase_team_join(team_code, full_invite=full_invite)
+    logger.info(f"步骤2: 队员加入队伍 ({args.member})")
+    ok = await member_runner.phase_team_join(game_scheme)
     if ok:
-        logger.info("✅ 队员加入队伍成功！")
+        logger.info("队员加入队伍成功！")
     else:
-        logger.error("❌ 队员加入队伍失败！")
+        logger.error("队员加入队伍失败！")
 
     logger.info("=" * 50)
     logger.info("测试完成")

@@ -499,7 +499,15 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_team_create(self) -> Optional[str]:
-        """队长创建队伍并获取口令码（优化版：最少OCR调用）"""
+        """队长创建队伍并获取 game scheme URL（通过二维码）
+
+        流程：点组队 → 组队码tab → 二维码组队 → 截屏解码QR →
+              curl获取game scheme → 关闭面板
+
+        Returns:
+            game scheme URL (如 "pubgmhd1106467070://?tmid:xxx,rlid:xxx,...")
+            队员用 am start -d <url> 一条命令直接加入，不需要任何UI操作
+        """
         self.phase = Phase.TEAM_CREATE
         logger.info("[阶段4] 队长创建队伍")
 
@@ -510,8 +518,6 @@ class SingleInstanceRunner:
         ocr = OcrDismisser()
 
         # ── 步骤1: 找"组队"入口并点击 ──
-        # "组队"竖排文字经常被 OCR 误识别（如"如WB"），
-        # 优先找 "找队友"（更稳定），然后往上偏移到"组队"位置
         clicked = False
         for attempt in range(3):
             shot = await self.adb.screenshot()
@@ -519,7 +525,6 @@ class SingleInstanceRunner:
                 await asyncio.sleep(0.5)
                 continue
             hits = ocr._ocr_all(shot)
-            # 策略1: 直接找"组队"
             for h in hits:
                 if "组队" in h.text and h.cx < 100:
                     logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
@@ -528,7 +533,6 @@ class SingleInstanceRunner:
                     break
             if clicked:
                 break
-            # 策略2: 找"找队友"（在组队下方），点击其上方区域
             for h in hits:
                 if "队友" in h.text and h.cx < 100:
                     tap_y = max(h.cy - 100, 50)
@@ -545,7 +549,7 @@ class SingleInstanceRunner:
             self._restore_guard()
             return None
 
-        # ── 步骤2: 轮询等面板+找"组队码"，同时处理可能弹出的组队码加入弹窗 ──
+        # ── 步骤2: 等面板出现，处理弹窗，找组队码tab ──
         for _ in range(10):
             await asyncio.sleep(0.3)
             shot = await self.adb.screenshot()
@@ -554,17 +558,15 @@ class SingleInstanceRunner:
             hits = ocr._ocr_all(shot)
             all_text = " ".join(h.text for h in hits)
 
-            # 检测"使用组队码加入队伍吗？"弹窗（弹窗特有文字，不会和tab混淆）
             if "加入队伍" in all_text and "取消" in all_text:
                 for h in hits:
                     if "取消" in h.text and h.cy > 400:
-                        logger.info(f"[阶段4] 组队码弹窗出现，点击取消 ({h.cx},{h.cy})")
+                        logger.info(f"[阶段4] 弹窗出现，点击取消 ({h.cx},{h.cy})")
                         await self.adb.tap(h.cx, h.cy)
                         await asyncio.sleep(0.5)
                         break
-                continue  # 弹窗关闭后重新检测
+                continue
 
-            # 正常流程：找"组队码" tab
             for h in hits:
                 if "组队码" in h.text and h.cy > 600:
                     logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
@@ -574,55 +576,111 @@ class SingleInstanceRunner:
                 continue
             break
 
-        # ── 步骤3: 轮询等组队码面板+找"分享"一起做 ──
-        for _ in range(10):
-            await asyncio.sleep(0.3)
+        # ── 步骤3: 点击"二维码组队"（左侧栏QR图标） ──
+        await asyncio.sleep(0.5)
+        for attempt in range(5):
             shot = await self.adb.screenshot()
             if shot is None:
+                await asyncio.sleep(0.5)
                 continue
-            # 模板优先
-            tmpl = self.matcher.match_one(shot, "btn_share_team_code", threshold=0.65)
-            if tmpl:
-                logger.info(f"[阶段4] 模板命中分享按钮 ({tmpl.cx},{tmpl.cy})")
-                await self.adb.tap(tmpl.cx, tmpl.cy)
-                break
-            # OCR 兜底
             hits = ocr._ocr_all(shot)
+            qr_clicked = False
             for h in hits:
-                if "分享" in h.text and "口令" in h.text:
-                    logger.info(f"[阶段4] OCR命中 '{h.text}' ({h.cx},{h.cy})")
+                if "二维码" in h.text and h.cx < 120:
+                    logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
+                    qr_clicked = True
                     break
-            else:
+            if not qr_clicked:
+                # 模板兜底
+                tmpl = self.matcher.match_one(shot, "btn_qr_team", threshold=0.65)
+                if tmpl:
+                    logger.info(f"[阶段4] 模板命中二维码组队 ({tmpl.cx},{tmpl.cy})")
+                    await self.adb.tap(tmpl.cx, tmpl.cy)
+                    qr_clicked = True
+            if qr_clicked:
+                break
+            await asyncio.sleep(0.5)
+
+        # ── 步骤4: 截屏解码 QR 码 ──
+        await asyncio.sleep(1)
+        qr_url = ""
+        for attempt in range(5):
+            shot = await self.adb.screenshot()
+            if shot is None:
+                await asyncio.sleep(0.5)
                 continue
-            break
 
-        logger.info("[阶段4] 口令码已复制到剪贴板")
-        await asyncio.sleep(0.3)
+            # OpenCV QR 解码（放大3倍+二值化提高识别率）
+            h, w = shot.shape[:2]
+            crop = shot[int(h * 0.15):int(h * 0.85), int(w * 0.15):int(w * 0.8)]
+            big = cv2.resize(crop, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
 
-        # ── 关闭面板：模板找X → 空白区域，轮询直到回大厅 ──
+            detector = cv2.QRCodeDetector()
+            data, _, _ = detector.detectAndDecode(thresh)
+            if data:
+                qr_url = data
+                logger.info(f"[阶段4] QR码解码成功: {data[:60]}...")
+                break
+            logger.debug(f"[阶段4] QR码解码失败，重试 {attempt+1}/5")
+            await asyncio.sleep(0.5)
+
+        if not qr_url:
+            logger.error("[阶段4] 无法解码QR码")
+            self._restore_guard()
+            return None
+
+        # ── 步骤5: 请求URL获取 game scheme ──
+        game_scheme = ""
+        try:
+            import urllib.request
+            loop = asyncio.get_event_loop()
+
+            def _fetch_scheme(url: str) -> str:
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 7.1.2)"
+                })
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    html = resp.read().decode("utf-8", errors="ignore")
+                # 提取 game scheme: pubgmhd1106467070://...
+                import re
+                match = re.search(r'(pubgmhd\d+://[^"\']+)', html)
+                return match.group(1) if match else ""
+
+            # QR URL 可能是 http，需要跟随重定向到 https
+            game_scheme = await loop.run_in_executor(None, _fetch_scheme, qr_url)
+        except Exception as e:
+            logger.error(f"[阶段4] 获取 game scheme 失败: {e}")
+
+        if not game_scheme:
+            logger.error("[阶段4] 未能提取 game scheme URL")
+            self._restore_guard()
+            return None
+
+        logger.info(f"[阶段4] game scheme: {game_scheme}")
+
+        # ── 步骤6: 关闭面板 ──
         for _ in range(4):
             shot = await self.adb.screenshot()
             if shot is None:
                 break
-            # 模板检测是否回到大厅
             if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7):
                 break
-            # 模板找 X 关闭
             close = self.matcher.find_dialog_close(shot)
             if close:
                 logger.info(f"[阶段4] 关闭按钮 ({close.cx},{close.cy})")
                 await self.adb.tap(close.cx, close.cy)
                 await asyncio.sleep(0.3)
                 continue
-            # 点空白区域
             h, w = shot.shape[:2]
             await self.adb.tap(w * 3 // 4, h // 2)
             await asyncio.sleep(0.3)
 
         logger.info("[阶段4] 已关闭组队面板")
         self._restore_guard()
-        return "clipboard"
+        return game_scheme
 
     def _restore_guard(self):
         if hasattr(self.adb, 'guard_enabled'):
@@ -666,182 +724,32 @@ class SingleInstanceRunner:
     # 阶段 5: 组队 — 队员加入
     # ================================================================
 
-    async def phase_team_join(self, team_code: str, full_invite: str = "") -> bool:
-        """队员通过口令码加入队伍
+    async def phase_team_join(self, game_scheme_url: str) -> bool:
+        """队员通过 game scheme URL 直接加入队伍
 
-        流程：设置 Windows 剪贴板(完整邀请信息) → 打开组队面板 → 组队码tab
-             → 点"粘贴口令"按钮 → 点"加入队伍"
-
-        多队防串码：每队的 full_invite 存在 Python 内存变量里，
-        写入 Windows 剪贴板 → LDPlayer 同步到 Android → 粘贴，串行操作。
+        一条 ADB 命令直接加入，不需要任何 UI 操作。
+        多队完全并行，每台模拟器各自收到独立的 ADB 命令，零冲突。
 
         Args:
-            team_code: 口令码（用于日志）
-            full_invite: 完整邀请信息（用于设置剪贴板）
+            game_scheme_url: 游戏内部 scheme URL
+                如 "pubgmhd1106467070://?tmid:xxx,rlid:xxx,t:xxx,p:2"
         """
         self.phase = Phase.TEAM_JOIN
-        logger.info(f"[阶段5] 队员加入队伍 (口令码: {team_code})")
+        logger.info(f"[阶段5] 队员加入队伍 (scheme: {game_scheme_url[:50]}...)")
 
-        # 禁用守卫（面板内X按钮会被误识别）
-        if hasattr(self.adb, 'guard_enabled'):
-            self.adb.guard_enabled = False
-
-        ocr = OcrDismisser()
         raw_adb = getattr(self.adb, '_adb', self.adb)
+        loop = asyncio.get_event_loop()
 
-        # ── 步骤1: 找组队入口并点击 ──
-        clicked = False
-        for attempt in range(3):
-            shot = await self.adb.screenshot()
-            if shot is None:
-                await asyncio.sleep(0.5)
-                continue
-            hits = ocr._ocr_all(shot)
-            # 策略1: 直接找"组队"
-            for h in hits:
-                if "组队" in h.text and h.cx < 100:
-                    logger.info(f"[阶段5] 点击组队 ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    clicked = True
-                    break
-            if clicked:
-                break
-            # 策略2: 找"找队友"往上偏移
-            for h in hits:
-                if "队友" in h.text and h.cx < 100:
-                    tap_y = max(h.cy - 100, 50)
-                    logger.info(f"[阶段5] 通过'找队友'定位组队 ({h.cx},{tap_y})")
-                    await self.adb.tap(h.cx, tap_y)
-                    clicked = True
-                    break
-            if clicked:
-                break
-            # 策略3: 模板
-            tmpl = self.matcher.match_one(shot, "tab_team", threshold=0.65)
-            if tmpl:
-                logger.info(f"[阶段5] 模板命中组队 ({tmpl.cx},{tmpl.cy})")
-                await self.adb.tap(tmpl.cx, tmpl.cy)
-                clicked = True
-                break
-            await asyncio.sleep(0.5)
+        # 一条命令直接加入
+        output = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            f"am start -a android.intent.action.VIEW -d '{game_scheme_url}'"
+        )
+        logger.info(f"[阶段5] am start 结果: {output.strip()}")
 
-        if not clicked:
-            logger.warning("[阶段5] 未找到组队入口")
-            self._restore_guard()
-            return False
-
-        # ── 步骤2: 等面板出现，处理弹窗，找组队码tab ──
-        for _ in range(10):
-            await asyncio.sleep(0.3)
-            shot = await self.adb.screenshot()
-            if shot is None:
-                continue
-            hits = ocr._ocr_all(shot)
-            all_text = " ".join(h.text for h in hits)
-
-            # 处理"使用组队码加入队伍吗？"弹窗
-            if "加入队伍" in all_text and "取消" in all_text:
-                for h in hits:
-                    if "取消" in h.text and h.cy > 400:
-                        logger.info(f"[阶段5] 弹窗出现，点击取消 ({h.cx},{h.cy})")
-                        await self.adb.tap(h.cx, h.cy)
-                        await asyncio.sleep(0.5)
-                        break
-                continue
-
-            # 找组队码tab
-            for h in hits:
-                if "组队码" in h.text and h.cy > 600:
-                    logger.info(f"[阶段5] 点击组队码tab ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    break
-            else:
-                # 模板兜底
-                tmpl = self.matcher.match_one(shot, "btn_team_code_tab", threshold=0.65)
-                if tmpl:
-                    logger.info(f"[阶段5] 模板命中组队码tab ({tmpl.cx},{tmpl.cy})")
-                    await self.adb.tap(tmpl.cx, tmpl.cy)
-                else:
-                    continue
-            break
-
-        # ── 步骤3: 设置剪贴板 + 点击"粘贴口令"按钮 ──
-        # 游戏需要完整邀请信息（不是单独口令码），通过剪贴板粘贴
-        if full_invite:
-            import subprocess
-            # 写入 Windows 剪贴板 → LDPlayer 自动同步到 Android 剪贴板
-            try:
-                subprocess.run(
-                    ["powershell", "-command", f"Set-Clipboard -Value '{full_invite}'"],
-                    timeout=5, check=False,
-                )
-                logger.info(f"[阶段5] 已设置 Windows 剪贴板 (口令码: {team_code})")
-            except Exception as e:
-                logger.warning(f"[阶段5] 设置剪贴板失败: {e}")
-        await asyncio.sleep(0.5)
-
-        # 点击"粘贴口令"按钮
-        paste_clicked = False
-        for attempt in range(5):
-            shot = await self.adb.screenshot()
-            if shot is None:
-                await asyncio.sleep(0.5)
-                continue
-            hits = ocr._ocr_all(shot)
-            for h in hits:
-                if "粘贴口令" in h.text or ("粘贴" in h.text and h.cy > 400):
-                    logger.info(f"[阶段5] 点击粘贴口令 ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    paste_clicked = True
-                    break
-            if not paste_clicked:
-                tmpl = self.matcher.match_one(shot, "btn_paste_code", threshold=0.65)
-                if tmpl:
-                    logger.info(f"[阶段5] 模板命中粘贴口令 ({tmpl.cx},{tmpl.cy})")
-                    await self.adb.tap(tmpl.cx, tmpl.cy)
-                    paste_clicked = True
-            if paste_clicked:
-                break
-            await asyncio.sleep(0.5)
-
-        if not paste_clicked:
-            logger.warning("[阶段5] 未找到粘贴口令按钮")
-            self._restore_guard()
-            return False
-
-        await asyncio.sleep(1)
-
-        # ── 步骤4: 点击"加入队伍"按钮 ──
-        # 注意：面板上有两个"加入队伍"文字——区域标题和按钮
-        # 按钮在下方（y 值更大），取 y 最大的匹配
-        for attempt in range(5):
-            shot = await self.adb.screenshot()
-            if shot is None:
-                await asyncio.sleep(0.5)
-                continue
-            hits = ocr._ocr_all(shot)
-            found = False
-            # 收集所有"加入"匹配，取 y 最大的（按钮在下方）
-            join_hits = [h for h in hits if "加入" in h.text and "队" in h.text]
-            if join_hits:
-                btn = max(join_hits, key=lambda h: h.cy)
-                logger.info(f"[阶段5] 点击加入队伍按钮 ({btn.cx},{btn.cy})")
-                await self.adb.tap(btn.cx, btn.cy)
-                found = True
-            if not found:
-                tmpl = self.matcher.match_one(shot, "btn_join_team", threshold=0.65)
-                if tmpl:
-                    logger.info(f"[阶段5] 模板命中加入队伍 ({tmpl.cx},{tmpl.cy})")
-                    await self.adb.tap(tmpl.cx, tmpl.cy)
-                    found = True
-            if found:
-                break
-            await asyncio.sleep(0.5)
-
-        # ── 等待加入结果 ──
-        await asyncio.sleep(2)
-        logger.info("[阶段5] 队员加入流程完成")
-        self._restore_guard()
+        # 等待游戏处理加入
+        await asyncio.sleep(3)
+        logger.info("[阶段5] 队员加入完成 ✓")
         return True
 
     # ================================================================
@@ -880,31 +788,31 @@ class SingleInstanceRunner:
         self.phase = Phase.LOBBY
         return True
 
-    async def run_full(self, team_code: str = "") -> bool:
+    async def run_full(self, game_scheme_url: str = "") -> bool:
         """
-        完整流程: 启动到大厅 → 地图设置 → 组队
+        完整流程: 启动到大厅 → 组队 → 地图设置
 
         Args:
-            team_code: 队员需要传入队长的口令码
+            game_scheme_url: 队员需要传入队长的 game scheme URL
         """
         # 先到大厅
         if not await self.run_to_lobby():
             return False
 
         if self.role == "captain":
-            # 队长: 地图设置 → 创建队伍
+            # 队长: 创建队伍(QR码) → 地图设置
+            scheme = await self.phase_team_create()
+            if scheme:
+                self._team_code = scheme
             await self.phase_map_setup()
-            code = await self.phase_team_create()
-            if code:
-                self._team_code = code
             self.phase = Phase.DONE
             return True
         else:
-            # 队员: 等队长口令码 → 加入
-            if not team_code:
-                logger.error("队员需要口令码")
+            # 队员: game scheme 一条命令直接加入
+            if not game_scheme_url:
+                logger.error("队员需要 game scheme URL")
                 return False
-            result = await self.phase_team_join(team_code)
+            result = await self.phase_team_join(game_scheme_url)
             self.phase = Phase.DONE
             return result
 
