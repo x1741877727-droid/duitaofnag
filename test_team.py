@@ -27,39 +27,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def read_clipboard(adb: ADBController) -> str:
-    """读取模拟器剪贴板内容"""
-    loop = asyncio.get_event_loop()
-    # 方式1: clipper app
-    output = await loop.run_in_executor(
-        None, adb._cmd, "shell", "am broadcast -a clipper.get 2>&1"
-    )
-    # 解析 clipper 输出：data="xxx"
-    if "data=" in output:
-        start = output.index("data=") + 6
-        end = output.index('"', start)
-        return output[start:end]
+async def read_team_code_from_windows(adb_path: str) -> str:
+    """从 Windows 剪贴板读取口令码
 
-    # 方式2: service call (Android 通用)
+    LDPlayer 会把模拟器剪贴板同步到 Windows 剪贴板。
+    "分享口令码" 复制的格式：
+    【微信和QQ】...（整段复制后...）BU2L4080https://... CA9120 ?7324
+    口令码是 https:// 前面的大写字母+数字组合（8位）
+    """
+    import re
+    import subprocess
+    loop = asyncio.get_event_loop()
     output = await loop.run_in_executor(
-        None, adb._cmd, "shell",
-        "service call clipboard 2 i32 1 i32 0 2>&1"
+        None, subprocess.check_output,
+        ["powershell", "-command", "Get-Clipboard"],
     )
-    # 解析 service call 输出
-    if "String16" in output:
-        start = output.index('"') + 1
-        end = output.index('"', start)
-        return end > start and output[start:end] or ""
+    text = output.decode("utf-8", errors="ignore").strip()
+    logger.info(f"Windows 剪贴板原文: {text[:80]}...")
+
+    # 提取口令码：https:// 前面的 8 位大写字母+数字
+    match = re.search(r'[A-Z0-9]{6,10}(?=https?://)', text)
+    if match:
+        return match.group(0)
+
+    # 兜底：找所有大写字母+数字的 8 位组合
+    matches = re.findall(r'[A-Z][A-Z0-9]{6,9}', text)
+    if matches:
+        return matches[0]
 
     return ""
 
 
-async def clear_clipboard(adb: ADBController):
-    """清空剪贴板"""
+async def clear_windows_clipboard():
+    """清空 Windows 剪贴板"""
+    import subprocess
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
-        None, adb._cmd, "shell",
-        "am broadcast -a clipper.set -e text '' 2>&1"
+        None, subprocess.check_output,
+        ["powershell", "-command", "Set-Clipboard -Value ''"],
     )
 
 
@@ -101,11 +106,10 @@ async def main():
         adb=member_adb, matcher=matcher, role="member"
     )
 
-    # ── 步骤0: 清除剪贴板 ──
+    # ── 步骤0: 清除 Windows 剪贴板 ──
     logger.info("=" * 50)
-    logger.info("步骤0: 清除两台模拟器剪贴板")
-    await clear_clipboard(captain_adb)
-    await clear_clipboard(member_adb)
+    logger.info("步骤0: 清除 Windows 剪贴板")
+    await clear_windows_clipboard()
     logger.info("剪贴板已清除 ✓")
 
     # ── 步骤1: 队长创建队伍 ──
@@ -118,26 +122,27 @@ async def main():
 
     logger.info("队长创建队伍完成 ✓")
 
-    # ── 步骤2: 读取队长剪贴板获取口令码 ──
+    # ── 步骤2: 从 Windows 剪贴板读取口令码 ──
     logger.info("=" * 50)
-    logger.info("步骤2: 读取队长剪贴板口令码")
+    logger.info("步骤2: 从 Windows 剪贴板读取口令码")
     await asyncio.sleep(0.5)
-    team_code = await read_clipboard(captain_adb)
+    team_code = await read_team_code_from_windows(args.adb)
     logger.info(f"口令码: '{team_code}'")
 
     if not team_code:
         logger.error("❌ 未能读取口令码！")
         return
 
-    # ── 步骤3: 写入队员剪贴板 ──
+    # ── 步骤3: 通过 ADB 写入队员剪贴板 ──
     logger.info("=" * 50)
-    logger.info(f"步骤3: 写入队员剪贴板 (口令码: {team_code})")
-    await member_adb.set_clipboard(team_code)
+    logger.info(f"步骤3: 通过 ADB 写入队员剪贴板 (口令码: {team_code})")
+    # 用 input text 模拟输入的方式设置剪贴板（兼容性最好）
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None, member_adb._cmd, "shell",
+        f"am broadcast -a clipper.set -e text '{team_code}'"
+    )
     await asyncio.sleep(0.3)
-
-    # 验证写入
-    verify = await read_clipboard(member_adb)
-    logger.info(f"队员剪贴板验证: '{verify}'")
 
     # ── 步骤4: 队员加入队伍 ──
     logger.info("=" * 50)
