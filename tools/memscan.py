@@ -101,6 +101,9 @@ def main():
     parser.add_argument("--serial", default="emulator-5556")
     parser.add_argument("--package", default="com.tencent.tmgp.pubgmhd")
     parser.add_argument("--keyword", required=True, help="要搜索的字符串")
+    parser.add_argument("--max-regions", type=int, default=200, help="最多扫描几个区域")
+    parser.add_argument("--max-region-size", type=int, default=2, help="单区域最大 MB")
+    parser.add_argument("--stop-after", type=int, default=0, help="找到N处后停止(0=不停)")
     args = parser.parse_args()
 
     keyword_bytes = args.keyword.encode("utf-8")
@@ -113,36 +116,41 @@ def main():
         return
     print(f"游戏 PID: {pid}")
 
-    # 获取内存区域
+    # 获取内存区域（限制单区域大小）
     regions = get_rw_regions(args.adb, args.serial, pid)
-    print(f"可扫描区域: {len(regions)} 个")
+    max_bytes = args.max_region_size * 1024 * 1024
+    regions = [(s, e, sz, r, n) for s, e, sz, r, n in regions if sz <= max_bytes]
+    # 限制数量
+    if len(regions) > args.max_regions:
+        regions = regions[:args.max_regions]
 
     total_size = sum(r[2] for r in regions)
-    print(f"总扫描大小: {total_size / 1024 / 1024:.1f} MB")
+    print(f"扫描区域: {len(regions)} 个, 总大小: {total_size / 1024 / 1024:.1f} MB")
 
     # 开始扫描
     t0 = time.time()
     all_findings = []
-    scanned = 0
     for i, (start, end, size, addr_range, name) in enumerate(regions):
-        scanned += size
         if (i + 1) % 50 == 0:
-            pct = scanned * 100 // total_size
-            print(f"  进度: {pct}% ({i+1}/{len(regions)})")
+            print(f"  进度: {i+1}/{len(regions)}")
 
         findings = scan_region(args.adb, args.serial, pid, start, size, keyword_bytes)
         if findings:
             print(f"\n  *** 在 {addr_range} ({name}) 找到 {len(findings)} 处 ***")
             for f in findings:
                 print(f"    地址: {f['hex_addr']}")
+                ctx = f['context'].replace('\x00', ' ').replace('\r', '').replace('\n', ' ')
                 try:
-                    print(f"    上下文: {f['context'][:120]}")
+                    print(f"    上下文: {ctx[:150]}")
                 except UnicodeEncodeError:
-                    print(f"    上下文: {f['context'][:120].encode('utf-8', errors='replace')}")
+                    print(f"    上下文(hex): {f['context'][:80].encode('utf-8', errors='replace').hex()}")
             all_findings.extend(findings)
+            if args.stop_after and len(all_findings) >= args.stop_after:
+                print(f"  已找到 {len(all_findings)} 处，停止扫描")
+                break
 
     elapsed = time.time() - t0
-    print(f"\n扫描完成: {elapsed:.1f}秒, 找到 {len(all_findings)} 处")
+    print(f"\n扫描完成: {elapsed:.1f}秒, 扫描 {i+1} 个区域, 找到 {len(all_findings)} 处")
 
     # 检查游戏是否还活着
     pid2 = get_pid(args.adb, args.serial, args.package)
