@@ -35,6 +35,7 @@ import {
   Undo2,
   ChevronDown,
   ChevronRight,
+  X,
 } from 'lucide-react'
 
 // 队伍颜色映射
@@ -68,12 +69,21 @@ export function SquadBuilder() {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   )
 
+  // 用 emulators 的实时 running 状态更新 localAccounts
+  const liveAccounts = useMemo(() => {
+    const emuMap = new Map(emulators.map(e => [e.index, e]))
+    return localAccounts.map(a => {
+      const emu = emuMap.get(a.index)
+      return emu ? { ...a, running: emu.running, adbSerial: emu.adbSerial } : a
+    })
+  }, [localAccounts, emulators])
+
   // 已分配到各队的实例
   const assigned = useMemo(() => {
     const map: Record<string, AccountAssignment[]> = {}
     for (const [, teams] of Object.entries(squadTeams)) {
       for (const team of teams) {
-        map[team] = localAccounts
+        map[team] = liveAccounts
           .filter(a => a.group === team)
           .sort((a, b) => {
             if (a.role === 'captain') return -1
@@ -83,7 +93,7 @@ export function SquadBuilder() {
       }
     }
     return map
-  }, [localAccounts])
+  }, [liveAccounts])
 
   // 未分配的模拟器
   const unassigned = useMemo(() => {
@@ -223,6 +233,11 @@ export function SquadBuilder() {
     setSaving(false)
   }
 
+  function handleRemove(index: number) {
+    setLocalAccounts(localAccounts.filter(a => a.index !== index))
+    setDirty(true)
+  }
+
   function handleReset() {
     setLocalAccounts(accounts)
     setDirty(false)
@@ -314,6 +329,7 @@ export function SquadBuilder() {
                           team={team}
                           assigned={assigned[team] || []}
                           activeId={activeId}
+                          onRemove={handleRemove}
                         />
                       ))}
                     </div>
@@ -367,10 +383,12 @@ function TeamDropZone({
   team,
   assigned,
   activeId,
+  onRemove,
 }: {
   team: TeamGroup
   assigned: AccountAssignment[]
   activeId: string | null
+  onRemove: (index: number) => void
 }) {
   const colors = getTeamColor(team)
 
@@ -405,6 +423,7 @@ function TeamDropZone({
             account={slot.account}
             team={team}
             isActive={!!activeId}
+            onRemove={onRemove}
           />
         ))}
       </SortableContext>
@@ -422,6 +441,7 @@ function SlotDropZone({
   account,
   team,
   isActive,
+  onRemove,
 }: {
   id: string
   label: string
@@ -429,6 +449,7 @@ function SlotDropZone({
   account: AccountAssignment | null
   team: TeamGroup
   isActive: boolean
+  onRemove: (index: number) => void
 }) {
   const { setNodeRef, isOver } = useSortable({ id })
 
@@ -445,7 +466,7 @@ function SlotDropZone({
       )}
     >
       {account ? (
-        <DraggableEmulator account={account} isCaptain={isCaptain} />
+        <DraggableEmulator account={account} isCaptain={isCaptain} onRemove={onRemove} />
       ) : (
         <div className="flex items-center gap-2 px-3 py-2">
           {isCaptain && <Star className="w-3.5 h-3.5 text-warning/40" />}
@@ -463,9 +484,11 @@ function SlotDropZone({
 function DraggableEmulator({
   account,
   isCaptain,
+  onRemove,
 }: {
   account: AccountAssignment
   isCaptain: boolean
+  onRemove?: (index: number) => void
 }) {
   const {
     attributes,
@@ -486,21 +509,30 @@ function DraggableEmulator({
       ref={setNodeRef}
       style={style}
       className={cn(
-        'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-grab active:cursor-grabbing',
+        'flex items-center gap-2 px-2 py-1.5 rounded-md group',
         isDragging && 'opacity-30',
       )}
-      {...attributes}
-      {...listeners}
     >
-      <GripVertical className="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
-      {isCaptain && <Star className="w-3.5 h-3.5 text-warning shrink-0" />}
-      <MonitorSmartphone className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-      <span className="font-mono text-xs text-muted-foreground">#{account.index}</span>
-      <span className="text-xs truncate flex-1">{account.nickname}</span>
-      <div className={cn(
-        'w-1.5 h-1.5 rounded-full shrink-0',
-        account.running ? 'bg-success' : 'bg-muted-foreground/40',
-      )} />
+      <div className="cursor-grab active:cursor-grabbing flex items-center gap-2 flex-1 min-w-0" {...attributes} {...listeners}>
+        <GripVertical className="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+        {isCaptain && <Star className="w-3.5 h-3.5 text-warning shrink-0" />}
+        <MonitorSmartphone className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+        <span className="font-mono text-xs text-muted-foreground">#{account.index}</span>
+        <span className="text-xs truncate flex-1">{account.nickname}</span>
+        <div className={cn(
+          'w-1.5 h-1.5 rounded-full shrink-0',
+          account.running ? 'bg-success' : 'bg-muted-foreground/40',
+        )} />
+      </div>
+      {onRemove && (
+        <button
+          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 transition-opacity shrink-0"
+          onClick={() => onRemove(account.index)}
+          title="移出队伍"
+        >
+          <X className="w-3.5 h-3.5 text-destructive/60" />
+        </button>
+      )}
     </div>
   )
 }
