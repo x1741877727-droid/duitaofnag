@@ -157,14 +157,12 @@ int main(int argc, char *argv[])
 
     char mem_path[64];
     snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
-    int mem_fd = open(mem_path, O_RDONLY);
 
     char maps_path[64];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     FILE *maps = fopen(maps_path, "r");
     if (!maps) {
         fprintf(stderr, "Cannot open %s\n", maps_path);
-        if (mem_fd >= 0) close(mem_fd);
         return 1;
     }
 
@@ -194,7 +192,7 @@ int main(int argc, char *argv[])
                         pid, n_keywords, n_regions, SOFT_TIMEOUT);
     write(STDOUT_FILENO, start_line, slen);
 
-    /* 扫描（时间到了就停） */
+    /* 扫描 — 每个区域独立开关 fd，模拟 dd 行为 */
     int ri;
     int timed_out = 0;
     for (ri = 0; ri < n_regions; ri++) {
@@ -203,6 +201,10 @@ int main(int argc, char *argv[])
             break;
         }
 
+        /* 每个区域独立打开/关闭 fd（避免单 fd 多偏移触发检测） */
+        int rfd = open(mem_path, O_RDONLY);
+        if (rfd < 0) continue;
+
         unsigned long rstart = regions[ri].start;
         unsigned long rend   = regions[ri].end;
         unsigned long offset = rstart;
@@ -210,7 +212,7 @@ int main(int argc, char *argv[])
         while (offset < rend) {
             size_t to_read = rend - offset;
             if (to_read > READ_CHUNK) to_read = READ_CHUNK;
-            ssize_t got = safe_read(mem_fd, pid, read_buf, to_read, offset);
+            ssize_t got = pread(rfd, read_buf, to_read, (off_t)offset);
             if (got <= 0) break;
             for (ki = 0; ki < n_keywords; ki++) {
                 search_buffer(read_buf, (size_t)got,
@@ -219,6 +221,8 @@ int main(int argc, char *argv[])
             }
             offset += (unsigned long)got;
         }
+
+        close(rfd);
 
         if (THROTTLE_US > 0) usleep(THROTTLE_US);
         if (n_findings >= MAX_FINDINGS) break;
@@ -244,7 +248,6 @@ int main(int argc, char *argv[])
                         timed_out ? ",timeout" : "");
     write(STDOUT_FILENO, done_line, dlen);
 
-    if (mem_fd >= 0) close(mem_fd);
     alarm(0);
     return 0;
 }
