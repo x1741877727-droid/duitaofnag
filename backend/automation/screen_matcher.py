@@ -136,6 +136,10 @@ class ScreenMatcher:
                 best_scale = scale
                 best_tw, best_th_px = t.shape[1], t.shape[0]
 
+            # 早退：1.0x 已达标就不试其他尺度
+            if scale == 1.0 and best_val >= th:
+                break
+
         if best_val >= th and best_loc is not None:
             cx = best_loc[0] + best_tw // 2
             cy = best_loc[1] + best_th_px // 2
@@ -219,8 +223,8 @@ class ScreenMatcher:
     def is_accelerator_connected(self, screenshot: np.ndarray) -> Optional[bool]:
         """检测加速器状态: True=已连接, False=未连接, None=不在加速器界面"""
         # 两个按钮形状相似（都是圆形），需要同时匹配取更高置信度的
-        pause = self.match_one(screenshot, "accelerator_pause", threshold=0.96)
-        play = self.match_one(screenshot, "accelerator_play", threshold=0.96)
+        pause = self.match_one(screenshot, "accelerator_pause", threshold=0.90)
+        play = self.match_one(screenshot, "accelerator_play", threshold=0.90)
         if pause and play:
             # 两个都匹配了，取置信度高的
             return pause.confidence > play.confidence

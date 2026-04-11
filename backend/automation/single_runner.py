@@ -145,16 +145,28 @@ class SingleInstanceRunner:
         if "UP" not in output:
             return False
 
-        # 2. 检查 VPN APP 是否有活跃后端连接
+        # 2. 动态获取 VPN APP UID（首次查询后缓存）
+        if not hasattr(self, '_vpn_uid'):
+            uid_output = await loop.run_in_executor(
+                None, raw_adb._cmd, "shell",
+                f"dumpsys package {ACCELERATOR_PACKAGE} | grep userId"
+            )
+            # 解析 "userId=10062"
+            import re
+            uid_match = re.search(r'userId=(\d+)', uid_output)
+            self._vpn_uid = uid_match.group(1) if uid_match else "10062"
+            logger.info(f"[VPN] VPN APP UID: {self._vpn_uid}")
+
+        # 3. 检查 VPN APP 是否有活跃后端连接
         #    /proc/net/tcp 格式: idx local remote state ... uid
-        #    state=01 = ESTABLISHED, UID 10062 = 六花加速器
+        #    state=01 = ESTABLISHED
         output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell", "cat /proc/net/tcp"
         )
         established_count = 0
         for line in output.split("\n"):
             parts = line.split()
-            if len(parts) >= 8 and parts[3] == "01" and parts[7] == "10062":
+            if len(parts) >= 8 and parts[3] == "01" and parts[7] == self._vpn_uid:
                 established_count += 1
 
         if established_count == 0:
@@ -238,12 +250,10 @@ class SingleInstanceRunner:
             if shot is None:
                 continue
 
-            # 前5轮用模板快速检查（OCR 慢，游戏刚启动不需要OCR）
-            if attempt < 5 and self.matcher:
-                if self.matcher.is_at_lobby(shot):
-                    logger.info("[阶段1] 游戏已在大厅（模板检测）")
-                    return True
-                continue  # 前几秒大概率还在启动画面，跳过 OCR
+            # 模板快速检查大厅（~20ms，每轮都做）
+            if self.matcher and self.matcher.is_at_lobby(shot):
+                logger.info("[阶段1] 游戏已在大厅（模板检测）")
+                return True
 
             # 用OCR检测当前画面
             hits = self.ocr_dismisser.ocr_screen(shot)
@@ -372,6 +382,7 @@ class SingleInstanceRunner:
             return False
 
         logger.info(f"[阶段6] 面板已打开 ({len(hits)}个文字)")
+        h_img, w = shot.shape[:2]
 
         # ── 一次性提取所有目标 ──
         team_battle_hit = None
@@ -382,9 +393,9 @@ class SingleInstanceRunner:
 
         all_text = " ".join(h.text for h in hits)
         for h in hits:
-            if "团队竞技" in h.text and h.cx < 200:
+            if "团队竞技" in h.text and h.cx < w * 0.16:
                 team_battle_hit = h
-            if "确定" in h.text and h.cx > 1000:
+            if "确定" in h.text and h.cx > w * 0.78:
                 confirm_hit = h
             if "补位" in h.text:
                 fill_hit = h
@@ -420,7 +431,7 @@ class SingleInstanceRunner:
                     fill_hit = None
                     confirm_hit = None
                     for h in hits:
-                        if "确定" in h.text and h.cx > 1000:
+                        if "确定" in h.text and h.cx > w * 0.78:
                             confirm_hit = h
                         if "补位" in h.text:
                             fill_hit = h
@@ -526,7 +537,8 @@ class SingleInstanceRunner:
                 continue
             hits = ocr._ocr_all(shot)
             for h in hits:
-                if "组队" in h.text and h.cx < 100:
+                sh, sw = shot.shape[:2]
+                if "组队" in h.text and h.cx < sw * 0.08:
                     logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     clicked = True
@@ -534,7 +546,7 @@ class SingleInstanceRunner:
             if clicked:
                 break
             for h in hits:
-                if "队友" in h.text and h.cx < 100:
+                if "队友" in h.text and h.cx < sw * 0.08:
                     tap_y = max(h.cy - 100, 50)
                     logger.info(f"[阶段4] 通过'找队友'定位组队 ({h.cx},{tap_y})")
                     await self.adb.tap(h.cx, tap_y)
@@ -562,7 +574,7 @@ class SingleInstanceRunner:
             # 处理"使用组队码加入"弹窗
             if "加入队伍" in all_text and "取消" in all_text:
                 for h in hits:
-                    if "取消" in h.text and h.cy > 400:
+                    if "取消" in h.text and h.cy > shot.shape[0] * 0.55:
                         logger.info(f"[阶段4] 弹窗出现，点击取消 ({h.cx},{h.cy})")
                         await self.adb.tap(h.cx, h.cy)
                         await asyncio.sleep(0.5)
@@ -571,7 +583,7 @@ class SingleInstanceRunner:
 
             # 找底部"组队码"tab（cy > 650）
             for h in hits:
-                if "组队码" in h.text and h.cy > 650:
+                if "组队码" in h.text and h.cy > shot.shape[0] * 0.9:
                     logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     tab_clicked = True
@@ -604,7 +616,7 @@ class SingleInstanceRunner:
             return None
 
         # ── 步骤4: 截屏解码 QR 码 ──
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
         qr_url = ""
         for attempt in range(5):
             shot = await self.adb.screenshot()
@@ -748,10 +760,26 @@ class SingleInstanceRunner:
         )
         logger.info(f"[阶段5] am start 结果: {output.strip()}")
 
-        # 等待游戏处理加入
-        await asyncio.sleep(3)
-        logger.info("[阶段5] 队员加入完成 ✓")
-        return True
+        # 验证是否成功加入：轮询检查左上角是否出现"取消准备"
+        for attempt in range(10):
+            await asyncio.sleep(1)
+            shot = await raw_adb.screenshot()
+            if shot is None:
+                continue
+            # "取消准备" 按钮出现 = 成功加入队伍
+            ocr = OcrDismisser()
+            hits = ocr._ocr_all(shot)
+            for h in hits:
+                if "取消" in h.text and "准备" in h.text:
+                    logger.info("[阶段5] 队员加入完成 ✓（检测到取消准备）")
+                    return True
+            # 模板兜底
+            if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7):
+                # 还在大厅，没加入
+                continue
+
+        logger.warning("[阶段5] 队员加入超时，未检测到取消准备")
+        return False
 
     # ================================================================
     # 主运行循环
@@ -803,8 +831,11 @@ class SingleInstanceRunner:
         if self.role == "captain":
             # 队长: 创建队伍(QR码) → 地图设置
             scheme = await self.phase_team_create()
-            if scheme:
-                self._team_code = scheme
+            if not scheme:
+                logger.error("队长创建队伍失败")
+                self.phase = Phase.ERROR
+                return False
+            self._team_code = scheme
             await self.phase_map_setup()
             self.phase = Phase.DONE
             return True

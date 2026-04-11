@@ -206,7 +206,8 @@ class OcrDismisser:
                 if kw in h.text:
                     # "点击屏幕"类 → 点击屏幕中央而不是文字位置
                     if "屏幕" in kw or "继续" in kw:
-                        return (640, 400, f"点击屏幕:{h.text}")
+                        sh, sw = screenshot.shape[:2]
+                        return (sw // 2, sh // 2, f"点击屏幕:{h.text}")
                     return (h.cx, h.cy, f"确认:{h.text}")
 
         # 级别3: 形状检测 — 仅在确认有遮罩层时才用（防止大厅页面误触）
@@ -377,7 +378,8 @@ class OcrDismisser:
             stuck_count += 1
             logger.info(f"[R{rnd+1}] 未找到目标 (stuck={stuck_count})")
             if stuck_count >= 2:
-                await device.tap(640, 400)  # 点屏幕中央
+                sh, sw = shot.shape[:2]
+                await device.tap(sw // 2, sh // 2)  # 点屏幕中央
             if stuck_count >= 4 and matcher and matcher.is_at_lobby(shot):
                 return DismissResult(True, popups_closed, "lobby_forced", rnd + 1)
 
