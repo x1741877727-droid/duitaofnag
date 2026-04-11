@@ -125,55 +125,28 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 隧道是否真正可用（~50ms）
+        """检查 VPN 隧道是否真正可用（~100ms）
 
-        检测策略：读取 /proc/net/tcp 检查 VPN APP（六花加速器, UID 10062）
-        是否有到后端服务器的 ESTABLISHED 连接。
-
-        - 不需要 root、不需要 OCR、不需要打开浏览器
-        - VPN APP 通过 :17500 端口维持隧道连接
-        - 有活跃连接 → 隧道正常；无连接 → 隧道断了
-        - /proc/net/tcp 世界可读，~50ms
+        检测策略：检查 tun0 接口存在 + RX 字节数 > 0。
+        tun0 UP 且有 RX 流量 = VPN 隧道正在工作。
         """
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 
-        # 1. 快速检查 tun0 接口是否存在
         output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
         )
         if "UP" not in output:
             return False
 
-        # 2. 动态获取 VPN APP UID（首次查询后缓存）
-        if not hasattr(self, '_vpn_uid'):
-            uid_output = await loop.run_in_executor(
-                None, raw_adb._cmd, "shell",
-                f"dumpsys package {ACCELERATOR_PACKAGE} | grep userId"
-            )
-            # 解析 "userId=10062"
-            import re
-            uid_match = re.search(r'userId=(\d+)', uid_output)
-            self._vpn_uid = uid_match.group(1) if uid_match else "10062"
-            logger.info(f"[VPN] VPN APP UID: {self._vpn_uid}")
+        # 检查 RX bytes > 0（有数据回来 = 隧道通了）
+        import re
+        rx_match = re.search(r'RX bytes:(\d+)', output)
+        if rx_match and int(rx_match.group(1)) > 0:
+            return True
 
-        # 3. 检查 VPN APP 是否有活跃后端连接
-        #    /proc/net/tcp 格式: idx local remote state ... uid
-        #    state=01 = ESTABLISHED
-        output = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "cat /proc/net/tcp"
-        )
-        established_count = 0
-        for line in output.split("\n"):
-            parts = line.split()
-            if len(parts) >= 8 and parts[3] == "01" and parts[7] == self._vpn_uid:
-                established_count += 1
-
-        if established_count == 0:
-            logger.warning("[VPN] VPN APP 无活跃后端连接 → 隧道异常")
-            return False
-
-        return True
+        logger.warning("[VPN] tun0 UP 但 RX=0 → 隧道未通")
+        return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
         """轮询等待 VPN 连接建立并验证通过"""
