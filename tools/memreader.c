@@ -31,8 +31,8 @@
 #define MAX_KEYWORDS     8
 #define MAX_REGION_SIZE  (4 * 1024 * 1024)
 #define MIN_REGION_SIZE  4096
-#define READ_CHUNK       (512 * 1024)
-#define THROTTLE_US      5000                /* 5ms */
+#define READ_CHUNK       4096                /* 4KB 单页读取 — 跟 GameGuardian 一样 */
+#define THROTTLE_US      0                   /* 4KB 读不需要节流 */
 #define HARD_TIMEOUT     15                  /* 硬杀 */
 #define SOFT_TIMEOUT     12                  /* 软超时 */
 #define CONTEXT_BYTES    80
@@ -49,7 +49,7 @@ struct finding {
     char context[256];
 };
 
-static unsigned char read_buf[READ_CHUNK];
+static unsigned char read_buf[4096];
 static struct finding findings[MAX_FINDINGS];
 static int n_findings = 0;
 static struct timespec ts_start;
@@ -192,41 +192,49 @@ int main(int argc, char *argv[])
                         pid, n_keywords, n_regions, SOFT_TIMEOUT);
     write(STDOUT_FILENO, start_line, slen);
 
-    /* 扫描 — 每个区域独立开关 fd，模拟 dd 行为 */
+    /* 打开单个 fd（跟 GameGuardian 一样，始终保持打开） */
+    int mem_fd = open(mem_path, O_RDONLY);
+    if (mem_fd < 0) {
+        fprintf(stderr, "Cannot open %s\n", mem_path);
+        return 1;
+    }
+
+    /* 扫描 — 4KB 单页读取，不可读的页跳过 */
     int ri;
     int timed_out = 0;
+    int pages_read = 0;
+    int pages_skipped = 0;
     for (ri = 0; ri < n_regions; ri++) {
         if (elapsed_sec() > SOFT_TIMEOUT) {
             timed_out = 1;
             break;
         }
 
-        /* 每个区域独立打开/关闭 fd（避免单 fd 多偏移触发检测） */
-        int rfd = open(mem_path, O_RDONLY);
-        if (rfd < 0) continue;
-
         unsigned long rstart = regions[ri].start;
         unsigned long rend   = regions[ri].end;
         unsigned long offset = rstart;
 
         while (offset < rend) {
-            size_t to_read = rend - offset;
-            if (to_read > READ_CHUNK) to_read = READ_CHUNK;
-            ssize_t got = pread(rfd, read_buf, to_read, (off_t)offset);
-            if (got <= 0) break;
+            ssize_t got = pread(mem_fd, read_buf, 4096, (off_t)offset);
+            if (got <= 0) {
+                /* 页不可读（EFAULT），跳过这一页 */
+                pages_skipped++;
+                offset += 4096;
+                continue;
+            }
+            pages_read++;
             for (ki = 0; ki < n_keywords; ki++) {
                 search_buffer(read_buf, (size_t)got,
                               (const unsigned char *)keywords[ki],
                               kw_lens[ki], ki, offset);
             }
-            offset += (unsigned long)got;
+            offset += 4096;
         }
 
-        close(rfd);
-
-        if (THROTTLE_US > 0) usleep(THROTTLE_US);
         if (n_findings >= MAX_FINDINGS) break;
     }
+
+    close(mem_fd);
 
     double total = elapsed_sec();
 
@@ -241,10 +249,10 @@ int main(int argc, char *argv[])
         write(STDOUT_FILENO, "\n", 1);
     }
 
-    char done_line[128];
+    char done_line[256];
     int dlen = snprintf(done_line, sizeof(done_line),
-                        "DONE:found=%d,scanned=%d/%d,time=%.1f%s\n",
-                        n_findings, ri, n_regions, total,
+                        "DONE:found=%d,regions=%d/%d,pages=%d,skipped=%d,time=%.1f%s\n",
+                        n_findings, ri, n_regions, pages_read, pages_skipped, total,
                         timed_out ? ",timeout" : "");
     write(STDOUT_FILENO, done_line, dlen);
 
