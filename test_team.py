@@ -125,32 +125,41 @@ async def main():
 
     logger.info("队长创建队伍完成 ✓")
 
-    # ── 步骤2: 从 Windows 剪贴板读取口令码 ──
+    # ── 步骤2: 从 Windows 剪贴板读取完整邀请信息 ──
     logger.info("=" * 50)
-    logger.info("步骤2: 从 Windows 剪贴板读取口令码")
+    logger.info("步骤2: 从 Windows 剪贴板读取邀请信息")
     await asyncio.sleep(0.5)
-    team_code = await read_team_code_from_windows(args.adb)
-    logger.info(f"口令码: '{team_code}'")
 
-    if not team_code:
-        logger.error("❌ 未能读取口令码！")
+    import subprocess
+    loop = asyncio.get_event_loop()
+    raw_clip = await loop.run_in_executor(
+        None, subprocess.check_output,
+        ["powershell", "-command", "Get-Clipboard"],
+    )
+    full_invite = raw_clip.decode("utf-8", errors="ignore").strip()
+    logger.info(f"完整邀请信息: {full_invite[:60]}...")
+
+    # 提取口令码用于日志
+    import re
+    code_match = re.search(r'[A-Z0-9]{6,10}(?=https?://)', full_invite)
+    team_code = code_match.group(0) if code_match else "unknown"
+    logger.info(f"口令码: {team_code}")
+
+    if not full_invite or len(full_invite) < 10:
+        logger.error("❌ 未能读取邀请信息！")
         return
 
-    # ── 步骤3: 通过 ADB 写入队员剪贴板 ──
+    # ── 步骤3: 邀请信息存入 Python 内存（不串码） ──
     logger.info("=" * 50)
-    logger.info(f"步骤3: 通过 ADB 写入队员剪贴板 (口令码: {team_code})")
-    # 用 input text 模拟输入的方式设置剪贴板（兼容性最好）
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, member_adb._cmd, "shell",
-        f"am broadcast -a clipper.set -e text '{team_code}'"
-    )
-    await asyncio.sleep(0.3)
+    logger.info(f"步骤3: 邀请信息已缓存到内存 (口令码: {team_code})")
+    # 多队并行时：每队的 full_invite 存在各自的内存变量里
+    # 队员加入时通过 PowerShell 写入 Windows 剪贴板 → LDPlayer 同步到 Android
+    # 串行操作：A队写→A队员粘贴→B队写→B队员粘贴
 
     # ── 步骤4: 队员加入队伍 ──
     logger.info("=" * 50)
     logger.info("步骤4: 队员加入队伍 (emulator-5558)")
-    ok = await member_runner.phase_team_join(team_code)
+    ok = await member_runner.phase_team_join(team_code, full_invite=full_invite)
     if ok:
         logger.info("✅ 队员加入队伍成功！")
     else:

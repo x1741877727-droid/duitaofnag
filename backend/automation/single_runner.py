@@ -666,11 +666,18 @@ class SingleInstanceRunner:
     # 阶段 5: 组队 — 队员加入
     # ================================================================
 
-    async def phase_team_join(self, team_code: str) -> bool:
+    async def phase_team_join(self, team_code: str, full_invite: str = "") -> bool:
         """队员通过口令码加入队伍
 
-        流程：打开组队面板 → 组队码tab → 点输入框 → ADB直接输入口令码 → 加入
-        不使用剪贴板，防止多队并行时串码。
+        流程：设置 Windows 剪贴板(完整邀请信息) → 打开组队面板 → 组队码tab
+             → 点"粘贴口令"按钮 → 点"加入队伍"
+
+        多队防串码：每队的 full_invite 存在 Python 内存变量里，
+        写入 Windows 剪贴板 → LDPlayer 同步到 Android → 粘贴，串行操作。
+
+        Args:
+            team_code: 口令码（用于日志）
+            full_invite: 完整邀请信息（用于设置剪贴板）
         """
         self.phase = Phase.TEAM_JOIN
         logger.info(f"[阶段5] 队员加入队伍 (口令码: {team_code})")
@@ -758,66 +765,51 @@ class SingleInstanceRunner:
                     continue
             break
 
-        # ── 步骤3: 点击输入框区域 + ADB直接输入口令码 ──
+        # ── 步骤3: 设置剪贴板 + 点击"粘贴口令"按钮 ──
+        # 游戏需要完整邀请信息（不是单独口令码），通过剪贴板粘贴
+        if full_invite:
+            import subprocess
+            # 写入 Windows 剪贴板 → LDPlayer 自动同步到 Android 剪贴板
+            try:
+                subprocess.run(
+                    ["powershell", "-command", f"Set-Clipboard -Value '{full_invite}'"],
+                    timeout=5, check=False,
+                )
+                logger.info(f"[阶段5] 已设置 Windows 剪贴板 (口令码: {team_code})")
+            except Exception as e:
+                logger.warning(f"[阶段5] 设置剪贴板失败: {e}")
         await asyncio.sleep(0.5)
-        for attempt in range(3):
+
+        # 点击"粘贴口令"按钮
+        paste_clicked = False
+        for attempt in range(5):
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
-
-            # 找输入框：OCR 找"粘贴口令码进入组队"提示文字（就是输入框本身）
             hits = ocr._ocr_all(shot)
-            input_tapped = False
             for h in hits:
-                if any(kw in h.text for kw in ["进入组队", "口令码进入", "输入组队", "输入口令"]):
-                    # 提示文字本身就是输入框，直接点击
-                    logger.info(f"[阶段5] 点击输入框 '{h.text}' ({h.cx},{h.cy})")
+                if "粘贴口令" in h.text or ("粘贴" in h.text and h.cy > 400):
+                    logger.info(f"[阶段5] 点击粘贴口令 ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
-                    input_tapped = True
+                    paste_clicked = True
                     break
-
-            if not input_tapped:
-                # 通过"粘贴口令"按钮定位：输入框在按钮的上方一行
-                for h in hits:
-                    if "粘贴口令" in h.text or "粘贴" in h.text:
-                        tap_y = h.cy - 40  # 输入框在按钮上方
-                        logger.info(f"[阶段5] 通过'粘贴口令'定位输入框 ({h.cx},{tap_y})")
-                        await self.adb.tap(h.cx, tap_y)
-                        input_tapped = True
-                        break
-
-            if not input_tapped:
-                # 模板兜底
+            if not paste_clicked:
                 tmpl = self.matcher.match_one(shot, "btn_paste_code", threshold=0.65)
                 if tmpl:
-                    tap_y = tmpl.cy - 40
-                    logger.info(f"[阶段5] 模板定位输入框 ({tmpl.cx},{tap_y})")
-                    await self.adb.tap(tmpl.cx, tap_y)
-                    input_tapped = True
-
-            if not input_tapped:
-                await asyncio.sleep(0.5)
-                continue
-
-            # 等输入框激活
-            await asyncio.sleep(0.3)
-
-            # 清空输入框（全选+删除）
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, raw_adb._cmd, "shell", "input keyevent KEYCODE_MOVE_END")
-            await loop.run_in_executor(None, raw_adb._cmd, "shell",
-                                        "input keyevent --longpress KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL")
-
-            # ADB 直接输入口令码（不经过剪贴板）
-            logger.info(f"[阶段5] ADB 输入口令码: {team_code}")
-            await loop.run_in_executor(None, raw_adb._cmd, "shell", f"input text {team_code}")
+                    logger.info(f"[阶段5] 模板命中粘贴口令 ({tmpl.cx},{tmpl.cy})")
+                    await self.adb.tap(tmpl.cx, tmpl.cy)
+                    paste_clicked = True
+            if paste_clicked:
+                break
             await asyncio.sleep(0.5)
-            break
-        else:
-            logger.warning("[阶段5] 未找到输入框")
+
+        if not paste_clicked:
+            logger.warning("[阶段5] 未找到粘贴口令按钮")
             self._restore_guard()
             return False
+
+        await asyncio.sleep(1)
 
         # ── 步骤4: 点击"加入队伍"按钮 ──
         # 注意：面板上有两个"加入队伍"文字——区域标题和按钮
