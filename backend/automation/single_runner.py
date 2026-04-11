@@ -125,24 +125,39 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 是否已连接（~50ms）
+        """检查 VPN 是否已连接且隧道通畅（~100ms）
 
-        检测策略：检查加速器的 VpnService 是否在运行。
-        连接时 SimpleVpnService 必定在前台运行，断开时服务停止。
-        不依赖流量采样，空闲状态也能准确检测。
+        两层检测：
+        1. VpnService 是否在运行（APP 层面连接）
+        2. tun0 RX > 0（隧道层面有数据回来）
+
+        假连接状态：VpnService 在跑但 tun0 RX=0（发了数据收不到回复）
         """
+        import re
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 
+        # 1. VpnService 是否在运行
         output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell",
             f"dumpsys activity services {ACCELERATOR_PACKAGE}"
         )
-        if "VpnService" in output:
-            return True
+        if "VpnService" not in output:
+            return False
 
-        logger.debug("[VPN] VpnService 未运行 → VPN 未连接")
-        return False
+        # 2. tun0 是否有收到数据（RX > 0）
+        tun_output = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+        )
+        if "UP" not in tun_output:
+            return False
+
+        rx_match = re.search(r'RX bytes:(\d+)', tun_output)
+        if not rx_match or int(rx_match.group(1)) == 0:
+            logger.warning("[VPN] VpnService 运行但 tun0 RX=0 → 隧道未通（假连接）")
+            return False
+
+        return True
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
         """轮询等待 VPN 连接建立并验证通过"""
