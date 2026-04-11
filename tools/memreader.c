@@ -114,12 +114,9 @@ static void search_buffer(const unsigned char *buf, size_t buf_len,
 static ssize_t safe_read(int mem_fd, pid_t pid,
                          void *buf, size_t len, unsigned long addr)
 {
-    struct iovec local  = { buf, len };
-    struct iovec remote = { (void *)addr, len };
-    ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
-    if (n > 0) return n;
+    (void)pid;  /* 不用 process_vm_readv，避免竞态导致游戏崩溃 */
     if (mem_fd >= 0) {
-        n = pread(mem_fd, buf, len, (off_t)addr);
+        ssize_t n = pread(mem_fd, buf, len, (off_t)addr);
         if (n > 0) return n;
     }
     return -1;
