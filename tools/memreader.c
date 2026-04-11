@@ -1,21 +1,17 @@
 /*
- * memreader — 游戏进程内存扫描器（模拟器本地执行）
+ * memreader v6 — 游戏进程内存扫描器
  *
- * 设计原则：
- *   1. 单进程，一次 su 执行完毕
- *   2. process_vm_readv() 优先（无文件系统痕迹），失败回退 pread
- *   3. 只扫匿名 rw-p 区域（跳过 .so/.dex 等文件映射）
- *   4. 每次读取间隔 20ms，避免频率检测
+ * 策略：不限区域数量，限制总时间（12秒软超时 + 15秒硬杀）
+ * 优先扫小区域（<1MB），游戏数据结构通常在小区域里
  *
- * 编译: docker run --rm -v $(pwd)/tools:/src alpine sh -c \
- *         "apk add gcc musl-dev && cd /src && gcc -static -O2 -o memreader memreader.c"
+ * 安全保护：
+ *   1. alarm(15) — 15秒内核强杀，绝对不会卡
+ *   2. 12秒软超时 — 主动退出并输出已找到的结果
+ *   3. 单区域最大 4MB
+ *   4. 5ms 节流
+ *   5. 找到 MAX_FINDINGS 个后提前停止
  *
  * 用法: su 0 /data/local/tmp/memreader <PID> <关键词1> [关键词2] ...
- *
- * 输出:
- *   SCAN_START:pid=<N>,keywords=<N>,regions=<N>
- *   FOUND:<keyword_index>:0x<addr>:<utf8_context>
- *   DONE:found=<N>,regions=<N>,time=<seconds>
  */
 
 #define _GNU_SOURCE
@@ -26,23 +22,25 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <signal.h>
 #include <sys/uio.h>
 
-/* ── 常量 ── */
+/* ── 限制 ── */
+#define MAX_REGIONS      4096                /* 收集上限（排序用） */
+#define MAX_FINDINGS     10
 #define MAX_KEYWORDS     8
-#define MAX_KEYWORD_LEN  128
-#define MAX_REGIONS      4096
-#define MAX_FINDINGS     128
-#define MAX_REGION_SIZE  (8 * 1024 * 1024)   /* 8 MB */
+#define MAX_REGION_SIZE  (4 * 1024 * 1024)
 #define MIN_REGION_SIZE  4096
-#define READ_CHUNK       (2 * 1024 * 1024)   /* 2 MB per read */
-#define THROTTLE_US      20000               /* 20 ms between region reads */
-#define CONTEXT_BYTES    80                  /* 上下文前后各取 N 字节 */
+#define READ_CHUNK       (512 * 1024)
+#define THROTTLE_US      5000                /* 5ms */
+#define HARD_TIMEOUT     15                  /* 硬杀 */
+#define SOFT_TIMEOUT     12                  /* 软超时 */
+#define CONTEXT_BYTES    80
 
-/* ── 数据结构 ── */
 struct region {
     unsigned long start;
     unsigned long end;
+    unsigned long size;
 };
 
 struct finding {
@@ -51,53 +49,48 @@ struct finding {
     char context[256];
 };
 
-/* ── 全局 ── */
 static unsigned char read_buf[READ_CHUNK];
 static struct finding findings[MAX_FINDINGS];
 static int n_findings = 0;
+static struct timespec ts_start;
 
-/* ── 辅助函数 ── */
-
-/* 判断一行 maps 是否应该扫描 */
-static int should_scan(const char *line) {
-    /* 必须是 rw-p */
-    if (!strstr(line, "rw-p"))
-        return 0;
-
-    /* 跳过有文件路径的映射（.so, .dex, .oat, .apk, .jar, .art） */
-    if (strstr(line, ".so") || strstr(line, ".dex") ||
-        strstr(line, ".oat") || strstr(line, ".apk") ||
-        strstr(line, ".jar") || strstr(line, ".art") ||
-        strstr(line, ".vdex") || strstr(line, ".odex"))
-        return 0;
-
-    /* 跳过特殊区域 */
-    if (strstr(line, "[stack") || strstr(line, "[vdso") ||
-        strstr(line, "[vectors") || strstr(line, "[vsyscall"))
-        return 0;
-
-    return 1;
+static void timeout_handler(int sig) {
+    (void)sig;
+    const char msg[] = "TIMEOUT:killed\n";
+    write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    _exit(1);
 }
 
-/* 在 buf 中搜索 keyword，记录结果 */
+static double elapsed_sec(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - ts_start.tv_sec)
+         + (now.tv_nsec - ts_start.tv_nsec) / 1e9;
+}
+
+static int should_scan(const char *line) {
+    if (!strstr(line, "rw-p")) return 0;
+    /* 只扫 libc_malloc 堆区域 — 游戏数据结构在这里 */
+    /* 之前分析：只有 ~35 个区域，总共 ~142MB，几秒扫完 */
+    if (strstr(line, "[anon:libc_malloc]")) return 1;
+    return 0;
+}
+
 static void search_buffer(const unsigned char *buf, size_t buf_len,
                           const unsigned char *keyword, size_t kw_len,
                           int kw_idx, unsigned long base_addr)
 {
     if (buf_len < kw_len) return;
-
     size_t i;
     for (i = 0; i <= buf_len - kw_len; i++) {
-        if (buf[i] != keyword[0]) continue;          /* 首字节快速跳过 */
+        if (buf[i] != keyword[0]) continue;
         if (memcmp(buf + i, keyword, kw_len) != 0) continue;
-
         if (n_findings >= MAX_FINDINGS) return;
 
         struct finding *f = &findings[n_findings];
         f->kw_idx = kw_idx;
         f->addr = base_addr + i;
 
-        /* 提取上下文 */
         size_t ctx_s = (i > CONTEXT_BYTES) ? i - CONTEXT_BYTES : 0;
         size_t ctx_e = i + kw_len + CONTEXT_BYTES;
         if (ctx_e > buf_len) ctx_e = buf_len;
@@ -118,26 +111,29 @@ static void search_buffer(const unsigned char *buf, size_t buf_len,
     }
 }
 
-/* 用 process_vm_readv 读取，失败则用 pread */
 static ssize_t safe_read(int mem_fd, pid_t pid,
                          void *buf, size_t len, unsigned long addr)
 {
-    /* 优先 process_vm_readv（无文件系统痕迹） */
     struct iovec local  = { buf, len };
     struct iovec remote = { (void *)addr, len };
     ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
     if (n > 0) return n;
-
-    /* 回退到 pread */
     if (mem_fd >= 0) {
         n = pread(mem_fd, buf, len, (off_t)addr);
         if (n > 0) return n;
     }
-
     return -1;
 }
 
-/* ── main ── */
+/* 按区域大小排序（小的优先） */
+static int cmp_region(const void *a, const void *b) {
+    const struct region *ra = (const struct region *)a;
+    const struct region *rb = (const struct region *)b;
+    if (ra->size < rb->size) return -1;
+    if (ra->size > rb->size) return 1;
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
@@ -145,16 +141,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    pid_t pid = (pid_t)atoi(argv[1]);
-    if (pid <= 0) {
-        fprintf(stderr, "Invalid PID: %s\n", argv[1]);
-        return 1;
-    }
+    signal(SIGALRM, timeout_handler);
+    alarm(HARD_TIMEOUT);
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
-    /* 收集关键词 */
+    pid_t pid = (pid_t)atoi(argv[1]);
+    if (pid <= 0) { fprintf(stderr, "Invalid PID\n"); return 1; }
+
     int n_keywords = argc - 2;
     if (n_keywords > MAX_KEYWORDS) n_keywords = MAX_KEYWORDS;
-
     const char *keywords[MAX_KEYWORDS];
     size_t kw_lens[MAX_KEYWORDS];
     int ki;
@@ -163,86 +158,80 @@ int main(int argc, char *argv[])
         kw_lens[ki] = strlen(keywords[ki]);
     }
 
-    /* 打开 /proc/pid/mem 作为回退 */
     char mem_path[64];
     snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
     int mem_fd = open(mem_path, O_RDONLY);
-    /* mem_fd < 0 也没关系，还有 process_vm_readv */
 
-    /* 解析 /proc/pid/maps */
     char maps_path[64];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     FILE *maps = fopen(maps_path, "r");
     if (!maps) {
-        fprintf(stderr, "Cannot open %s: %s\n", maps_path, strerror(errno));
+        fprintf(stderr, "Cannot open %s\n", maps_path);
         if (mem_fd >= 0) close(mem_fd);
         return 1;
     }
 
+    /* 收集所有匿名 rw-p 区域 */
     struct region regions[MAX_REGIONS];
     int n_regions = 0;
     char line[512];
     while (fgets(line, sizeof(line), maps) && n_regions < MAX_REGIONS) {
         if (!should_scan(line)) continue;
-
         unsigned long s, e;
         if (sscanf(line, "%lx-%lx", &s, &e) != 2) continue;
-
         unsigned long sz = e - s;
         if (sz < MIN_REGION_SIZE || sz > MAX_REGION_SIZE) continue;
-
         regions[n_regions].start = s;
         regions[n_regions].end = e;
+        regions[n_regions].size = sz;
         n_regions++;
     }
     fclose(maps);
 
-    /* 开始扫描 */
-    struct timespec ts_start, ts_end;
-    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+    /* 按大小排序：小区域优先（游戏数据结构通常在小区域） */
+    qsort(regions, n_regions, sizeof(struct region), cmp_region);
 
-    fprintf(stdout, "SCAN_START:pid=%d,keywords=%d,regions=%d\n",
-            pid, n_keywords, n_regions);
-    fflush(stdout);
+    char start_line[128];
+    int slen = snprintf(start_line, sizeof(start_line),
+                        "SCAN:pid=%d,kw=%d,regions=%d,timeout=%ds\n",
+                        pid, n_keywords, n_regions, SOFT_TIMEOUT);
+    write(STDOUT_FILENO, start_line, slen);
 
+    /* 扫描（时间到了就停） */
     int ri;
+    int timed_out = 0;
     for (ri = 0; ri < n_regions; ri++) {
+        if (elapsed_sec() > SOFT_TIMEOUT) {
+            timed_out = 1;
+            break;
+        }
+
         unsigned long rstart = regions[ri].start;
         unsigned long rend   = regions[ri].end;
-
-        /* 分块读取 */
         unsigned long offset = rstart;
+
         while (offset < rend) {
             size_t to_read = rend - offset;
             if (to_read > READ_CHUNK) to_read = READ_CHUNK;
-
             ssize_t got = safe_read(mem_fd, pid, read_buf, to_read, offset);
             if (got <= 0) break;
-
-            /* 搜索每个关键词 */
             for (ki = 0; ki < n_keywords; ki++) {
                 search_buffer(read_buf, (size_t)got,
                               (const unsigned char *)keywords[ki],
                               kw_lens[ki], ki, offset);
             }
-
             offset += (unsigned long)got;
         }
 
-        /* 节流：每个区域读完后等待 */
-        usleep(THROTTLE_US);
-
+        if (THROTTLE_US > 0) usleep(THROTTLE_US);
         if (n_findings >= MAX_FINDINGS) break;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &ts_end);
-    double elapsed = (ts_end.tv_sec - ts_start.tv_sec)
-                   + (ts_end.tv_nsec - ts_start.tv_nsec) / 1e9;
+    double total = elapsed_sec();
 
     /* 输出结果 */
     int i;
     for (i = 0; i < n_findings; i++) {
-        /* 用 write 避免 printf 的编码问题 */
         char header[128];
         int hlen = snprintf(header, sizeof(header), "FOUND:%d:0x%lx:",
                             findings[i].kw_idx, findings[i].addr);
@@ -253,10 +242,12 @@ int main(int argc, char *argv[])
 
     char done_line[128];
     int dlen = snprintf(done_line, sizeof(done_line),
-                        "DONE:found=%d,regions=%d,time=%.1f\n",
-                        n_findings, n_regions, elapsed);
+                        "DONE:found=%d,scanned=%d/%d,time=%.1f%s\n",
+                        n_findings, ri, n_regions, total,
+                        timed_out ? ",timeout" : "");
     write(STDOUT_FILENO, done_line, dlen);
 
     if (mem_fd >= 0) close(mem_fd);
+    alarm(0);
     return 0;
 }
