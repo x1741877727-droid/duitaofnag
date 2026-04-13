@@ -179,6 +179,17 @@ SOCKS5_ATYP_DOMAIN = 0x03
 SOCKS5_ATYP_IPV6 = 0x04
 
 
+import ipaddress
+
+def _is_ip_address(addr: str) -> bool:
+    """判断地址是 IP 还是域名"""
+    try:
+        ipaddress.ip_address(addr)
+        return True
+    except ValueError:
+        return False
+
+
 # MITM 绕过域名列表 — 这些域名不做 MITM，直接透传
 # QQ 登录、微信登录、CDN 等不能用自签证书的域名
 MITM_BYPASS_SUFFIXES = (
@@ -193,6 +204,8 @@ MITM_BYPASS_SUFFIXES = (
     ".googleapis.com",
     ".gstatic.com",
     ".google.com",
+    ".cdn-go.cn",
+    ".gcloudsdk.com",
 )
 
 
@@ -344,12 +357,21 @@ class Socks5Server:
             await writer.drain()
 
             # ── 7. TLS MITM 或纯转发 ──
-            # 检查是否需要绕过 MITM（QQ 登录等域名）
-            bypass_mitm = any(dst_addr.endswith(s) for s in MITM_BYPASS_SUFFIXES)
-            if bypass_mitm and self._ca and dst_port in (443, 8443, 10012):
-                logger.info(f"MITM 绕过: {dst_addr}:{dst_port} (auth/web domain)")
+            # 判断目标是 IP 还是域名
+            is_ip = _is_ip_address(dst_addr)
+            bypass_domain = (not is_ip) and any(dst_addr.endswith(s) for s in MITM_BYPASS_SUFFIXES)
 
-            if self._ca and dst_port in (443, 8443, 10012) and not bypass_mitm:
+            if is_ip:
+                # IP 地址 → 游戏服务器私有协议，不做 MITM，直接 TCP 转发 + 规则
+                logger.info(f"直连+规则: {dst_addr}:{dst_port} (IP, 私有协议)")
+                await self._relay(reader, writer, remote_reader, remote_writer,
+                                  dst_addr, dst_port)
+            elif bypass_domain:
+                # QQ/微信/Google 等域名 → 不做 MITM，直接透传（不改包）
+                logger.info(f"直连透传: {dst_addr}:{dst_port} (bypass domain)")
+                await self._relay_passthrough(reader, writer, remote_reader, remote_writer)
+            elif self._ca and dst_port in (443, 8443, 10012):
+                # 其他域名 443 → MITM 解密 + 规则
                 await self._relay_mitm(reader, writer, dst_addr, dst_port, remote_reader, remote_writer)
             else:
                 await self._relay(reader, writer, remote_reader, remote_writer,
@@ -368,6 +390,44 @@ class Socks5Server:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    async def _relay_passthrough(self, client_reader, client_writer,
+                                remote_reader, remote_writer):
+        """纯透传，不过规则引擎（用于 QQ 登录等不能改包的域名）"""
+
+        async def c2r():
+            try:
+                while True:
+                    data = await client_reader.read(65536)
+                    if not data:
+                        break
+                    remote_writer.write(data)
+                    await remote_writer.drain()
+            except Exception:
+                pass
+            finally:
+                try:
+                    remote_writer.close()
+                except Exception:
+                    pass
+
+        async def r2c():
+            try:
+                while True:
+                    data = await remote_reader.read(65536)
+                    if not data:
+                        break
+                    client_writer.write(data)
+                    await client_writer.drain()
+            except Exception:
+                pass
+            finally:
+                try:
+                    client_writer.close()
+                except Exception:
+                    pass
+
+        await asyncio.gather(c2r(), r2c())
 
     async def _relay(self, client_reader, client_writer,
                      remote_reader, remote_writer,
