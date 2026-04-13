@@ -21,6 +21,7 @@ import sys
 import time
 import argparse
 import os
+import threading
 from dataclasses import dataclass, field
 
 # 确保脚本所在目录在 sys.path（方便 import tls_mitm）
@@ -85,6 +86,34 @@ class PacketRule:
 
         return True
 
+    def match_debug(self, data: bytes) -> tuple[bool, str]:
+        """检查封包是否匹配，返回 (matched, reason_string) 用于诊断"""
+        if not self.enabled:
+            return False, "disabled"
+        if self.length_min > 0 and len(data) < self.length_min:
+            return False, f"too_short({len(data)}<{self.length_min})"
+        if self.length_max > 0 and len(data) > self.length_max:
+            return False, f"too_long({len(data)}>{self.length_max})"
+
+        offset = 0
+        if self.header_match is not None:
+            if len(data) < len(self.header_match):
+                return False, f"header_short({len(data)}<{len(self.header_match)})"
+            if data[:len(self.header_match)] != self.header_match:
+                actual = data[:len(self.header_match)].hex()
+                expected = self.header_match.hex()
+                return False, f"header_mismatch(got={actual},want={expected})"
+            offset = len(self.header_match)
+
+        for pos, val in self.search:
+            actual_pos = pos + offset
+            if actual_pos >= len(data):
+                return False, f"pos{pos}_oob(need>{actual_pos},have={len(data)})"
+            if data[actual_pos] != val:
+                return False, f"pos{pos}_mismatch(got=0x{data[actual_pos]:02x},want=0x{val:02x},abs={actual_pos})"
+
+        return True, "matched"
+
     def apply(self, data: bytes) -> bytes:
         """应用修改"""
         # WPE 中 modify 位置也是从 header 之后开始算的
@@ -112,9 +141,10 @@ class PacketRule:
 class RuleEngine:
     """封包改写规则引擎"""
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(self, dry_run: bool = False, rule_debug: bool = False):
         self.rules: list[PacketRule] = []
         self.dry_run = dry_run  # True = 只记录匹配，不实际修改
+        self.rule_debug = rule_debug  # True = 记录每条规则不匹配的原因
         self._stats = {"total_packets": 0, "modified_packets": 0, "matched_rules": {}}
 
     def load_from_json(self, path: str):
@@ -140,35 +170,116 @@ class RuleEngine:
         """处理一个封包，返回修改后的数据"""
         self._stats["total_packets"] += 1
 
-        # ��录前几个字节用于调试（前 500 个包每个都记录）
+        # 记录前 64 字节 hex（扩展自 16 字节）
         if len(data) >= 4 and self._stats["total_packets"] <= 500:
-            header_hex = data[:min(16, len(data))].hex()
+            header_hex = data[:min(64, len(data))].hex()
             logger.debug(f"封包 ({direction}) #{self._stats['total_packets']} "
                         f"len={len(data)}: {header_hex}")
             if self._stats["total_packets"] % 20 == 1:
                 logger.info(f"封包样本 ({direction}) len={len(data)}: {header_hex}")
 
         for rule in self.rules:
-            if rule.matches(data):
-                self._stats["matched_rules"][rule.name] = \
-                    self._stats["matched_rules"].get(rule.name, 0) + 1
+            if self.rule_debug:
+                matched, reason = rule.match_debug(data)
+                if matched:
+                    logger.info(f"[RULE-DEBUG] [{rule.name}] MATCHED ({direction}) "
+                                f"len={len(data)} head={data[:16].hex()}")
+                elif self._stats["total_packets"] <= 200:
+                    logger.debug(f"[RULE-DEBUG] [{rule.name}] skip: {reason} "
+                                f"({direction}) len={len(data)}")
+                if not matched:
+                    continue
+            else:
+                if not rule.matches(data):
+                    continue
 
-                if self.dry_run:
-                    logger.info(f"[DRY-RUN] 规则 [{rule.name}] 命中 ({direction}), "
-                                f"len={len(data)}, head={data[:8].hex()}")
-                    return data  # 不修改
+            self._stats["matched_rules"][rule.name] = \
+                self._stats["matched_rules"].get(rule.name, 0) + 1
 
-                modified = rule.apply(data)
-                if modified != data:
-                    self._stats["modified_packets"] += 1
-                    logger.info(f"规则 [{rule.name}] 命中并修改 ({direction}), "
-                                f"len={len(data)}→{len(modified)}, head={data[:8].hex()}")
-                    return modified
+            if self.dry_run:
+                logger.info(f"[DRY-RUN] 规则 [{rule.name}] 命中 ({direction}), "
+                            f"len={len(data)}, head={data[:16].hex()}")
+                return data  # 不修改
+
+            modified = rule.apply(data)
+            if modified != data:
+                self._stats["modified_packets"] += 1
+                logger.info(f"规则 [{rule.name}] 命中并修改 ({direction}), "
+                            f"len={len(data)}→{len(modified)}, head={data[:16].hex()}")
+                return modified
         return data
 
     @property
     def stats(self) -> dict:
         return dict(self._stats)
+
+
+# ═══════════════════════════════════════
+# 完整封包抓取
+# ═══════════════════════════════════════
+
+class PacketCapture:
+    """完整封包抓取 — 每个封包存 .bin + .json 元数据"""
+
+    def __init__(self, capture_dir: str, capture_ports: set[int] | None = None):
+        self.capture_dir = capture_dir
+        self.capture_ports = capture_ports  # None = 抓所有端口
+        self._conn_counter = 0
+        self._pkt_counter = 0
+        self._lock = threading.Lock()
+        os.makedirs(capture_dir, exist_ok=True)
+        logger.info(f"[CAPTURE] 启用 → {capture_dir}, 端口={capture_ports or 'all'}")
+
+    def new_connection(self, dst_addr: str, dst_port: int) -> str:
+        """注册新连接，返回 conn_id"""
+        with self._lock:
+            self._conn_counter += 1
+            conn_id = f"conn_{self._conn_counter:06d}"
+        conn_dir = os.path.join(self.capture_dir, conn_id)
+        os.makedirs(conn_dir, exist_ok=True)
+        meta = {
+            "conn_id": conn_id,
+            "dst_addr": dst_addr,
+            "dst_port": dst_port,
+            "start_time": time.time(),
+            "start_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with open(os.path.join(conn_dir, "meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+        return conn_id
+
+    def should_capture(self, dst_port: int) -> bool:
+        if self.capture_ports is None:
+            return True
+        return dst_port in self.capture_ports
+
+    def save_packet(self, conn_id: str, data: bytes, direction: str, sequence: int):
+        """保存一个封包为 .bin + .json"""
+        with self._lock:
+            self._pkt_counter += 1
+            pkt_num = self._pkt_counter
+
+        prefix = "c2s" if direction == "send" else "s2c"
+        if direction.endswith("_mod"):
+            prefix = "c2s_mod"
+        base = f"{prefix}_{sequence:06d}"
+        conn_dir = os.path.join(self.capture_dir, conn_id)
+
+        # 二进制完整数据
+        with open(os.path.join(conn_dir, f"{base}.bin"), "wb") as f:
+            f.write(data)
+
+        # 元数据
+        pkt_meta = {
+            "pkt_num": pkt_num,
+            "direction": direction,
+            "sequence": sequence,
+            "length": len(data),
+            "timestamp": time.time(),
+            "hex_head_64": data[:64].hex() if len(data) >= 64 else data.hex(),
+        }
+        with open(os.path.join(conn_dir, f"{base}.json"), "w") as f:
+            json.dump(pkt_meta, f, indent=2)
 
 
 # ═══════════════════════════════════════
@@ -226,11 +337,13 @@ class Socks5Server:
                  tokens: set[str] | None = None,
                  rule_engine: RuleEngine | None = None,
                  ca_cert: str | None = None,
-                 ca_key: str | None = None):
+                 ca_key: str | None = None,
+                 capture: PacketCapture | None = None):
         self.host = host
         self.port = port
         self.tokens = tokens  # None = 不鉴权
         self.rule_engine = rule_engine or RuleEngine()
+        self._capture = capture
         self._active_connections = 0
         self._total_connections = 0
         self._mitm_connections = 0      # MITM 成功次数
@@ -371,11 +484,19 @@ class Socks5Server:
             is_ip = _is_ip_address(dst_addr)
             bypass_domain = (not is_ip) and any(dst_addr.endswith(s) for s in MITM_BYPASS_SUFFIXES)
 
+            # 设置抓包
+            capture = self._capture
+            conn_id = None
+            if capture and capture.should_capture(dst_port):
+                conn_id = capture.new_connection(dst_addr, dst_port)
+                logger.info(f"[CAPTURE] {conn_id}: {dst_addr}:{dst_port}")
+
             if is_ip:
                 # IP 地址 → 游戏服务器私有协议，不做 MITM，直接 TCP 转发 + 规则
                 logger.info(f"直连+规则: {dst_addr}:{dst_port} (IP, 私有协议)")
                 await self._relay(reader, writer, remote_reader, remote_writer,
-                                  dst_addr, dst_port)
+                                  dst_addr, dst_port,
+                                  capture=capture, conn_id=conn_id)
             elif bypass_domain:
                 # QQ/微信/Google 等域名 → 不做 MITM，直接透传（不改包）
                 logger.info(f"直连透传: {dst_addr}:{dst_port} (bypass domain)")
@@ -385,7 +506,8 @@ class Socks5Server:
                 await self._relay_mitm(reader, writer, dst_addr, dst_port, remote_reader, remote_writer)
             else:
                 await self._relay(reader, writer, remote_reader, remote_writer,
-                                  dst_addr, dst_port)
+                                  dst_addr, dst_port,
+                                  capture=capture, conn_id=conn_id)
 
         except asyncio.TimeoutError:
             pass
@@ -441,12 +563,15 @@ class Socks5Server:
 
     async def _relay(self, client_reader, client_writer,
                      remote_reader, remote_writer,
-                     dst_addr: str, dst_port: int):
-        """双向转发数据，对发送方向应用封包改写规则"""
+                     dst_addr: str, dst_port: int,
+                     capture: 'PacketCapture | None' = None,
+                     conn_id: str | None = None):
+        """双向转发数据，对发送方向应用封包改写规则，可选完整抓包"""
 
         async def client_to_remote():
             """客户端 → 远程服务器（游戏发出的包，应用改写规则）"""
             apply_rules = True
+            seq = 0
             try:
                 first_packet = True
                 while True:
@@ -459,12 +584,21 @@ class Socks5Server:
                         if len(data) >= 3 and data[0] == 0x16 and data[1] == 0x03:
                             apply_rules = False
                             logger.info(f"TLS 检测: {dst_addr}:{dst_port} 是 TLS 连接，跳过规则")
+
+                    # 抓包：保存原始封包
+                    if capture and conn_id:
+                        capture.save_packet(conn_id, data, "send", seq)
+
                     if apply_rules:
                         modified = self.rule_engine.process(data, direction="send")
+                        # 抓包：如果修改了，也保存修改后的版本
+                        if capture and conn_id and modified != data:
+                            capture.save_packet(conn_id, modified, "send_mod", seq)
                         remote_writer.write(modified)
                     else:
                         remote_writer.write(data)
                     await remote_writer.drain()
+                    seq += 1
             except Exception:
                 pass
             finally:
@@ -474,15 +608,25 @@ class Socks5Server:
                     pass
 
         async def remote_to_client():
-            """远程服务器 → 客户端（游戏收到的包，透传）"""
+            """远程服务器 → 客户端（游戏收到的包，抓包 + 规则观察）"""
+            seq = 0
             try:
                 while True:
                     data = await remote_reader.read(65536)
                     if not data:
                         break
-                    # 服务器返回的包暂不修改（如需要可以加 direction="recv" 规则）
+
+                    # 抓包：保存服务端返回
+                    if capture and conn_id:
+                        capture.save_packet(conn_id, data, "recv", seq)
+
+                    # 对 recv 方向也过规则引擎（用于观察/统计，不实际修改）
+                    if self.rule_engine.dry_run or self.rule_engine.rule_debug:
+                        self.rule_engine.process(data, direction="recv")
+
                     client_writer.write(data)
                     await client_writer.drain()
+                    seq += 1
             except Exception:
                 pass
             finally:
@@ -920,6 +1064,11 @@ def main():
     parser.add_argument("--log-file", help="日志输出到文件")
     parser.add_argument("--ca-cert", help="CA 证书路径（启用 TLS MITM）")
     parser.add_argument("--ca-key", help="CA 私钥路径（启用 TLS MITM）")
+    parser.add_argument("--capture-dir", help="封包抓取输出目录（启用完整抓包）")
+    parser.add_argument("--capture-ports", default="8085,8080,50000,20000",
+                        help="只抓这些端口（逗号分隔，默认游戏端口）")
+    parser.add_argument("--rule-debug", action="store_true",
+                        help="规则不命中时记录失败原因")
     args = parser.parse_args()
 
     # 日志文件
@@ -927,6 +1076,10 @@ def main():
         fh = logging.FileHandler(args.log_file, encoding="utf-8")
         fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         logging.getLogger().addHandler(fh)
+
+    # rule-debug 时启用 DEBUG 级别日志
+    if args.rule_debug:
+        logging.getLogger("game_proxy").setLevel(logging.DEBUG)
 
     # .fp 转换模式
     if args.convert_fp:
@@ -938,11 +1091,13 @@ def main():
         return
 
     # 加载规则
-    rule_engine = RuleEngine(dry_run=args.dry_run)
+    rule_engine = RuleEngine(dry_run=args.dry_run, rule_debug=args.rule_debug)
     if args.rules and os.path.exists(args.rules):
         rule_engine.load_from_json(args.rules)
     if args.dry_run:
         logger.info("*** DRY-RUN 模式：只记录规则匹配，不修改封包 ***")
+    if args.rule_debug:
+        logger.info("*** RULE-DEBUG 模式：记录规则诊断信息 ***")
 
     # 加载 Token
     tokens = None
@@ -950,6 +1105,14 @@ def main():
         with open(args.tokens, "r") as f:
             tokens = {line.strip() for line in f if line.strip()}
         logger.info(f"加载 {len(tokens)} 个 Token")
+
+    # 初始化封包抓取
+    capture = None
+    if args.capture_dir:
+        capture_ports = None
+        if args.capture_ports:
+            capture_ports = {int(p.strip()) for p in args.capture_ports.split(",")}
+        capture = PacketCapture(args.capture_dir, capture_ports)
 
     # 启动服务
     server = Socks5Server(
@@ -959,12 +1122,22 @@ def main():
         rule_engine=rule_engine,
         ca_cert=args.ca_cert,
         ca_key=args.ca_key,
+        capture=capture,
     )
 
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
         logger.info("服务停止")
+        # 输出最终统计
+        stats = rule_engine.stats
+        logger.info(f"=== 最终统计 ===")
+        logger.info(f"总封包: {stats['total_packets']}")
+        logger.info(f"已改写: {stats['modified_packets']}")
+        logger.info(f"规则命中: {stats['matched_rules']}")
+        if capture:
+            logger.info(f"抓取封包数: {capture._pkt_counter}")
+            logger.info(f"抓取连接数: {capture._conn_counter}")
 
 
 if __name__ == "__main__":
