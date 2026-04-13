@@ -66,40 +66,46 @@ class PacketRule:
             return False
 
         # header 过滤
+        # WPE 中 search/modify 位置是从 header 之后开始算的
+        offset = 0
         if self.header_match is not None:
             if len(data) < len(self.header_match):
                 return False
             if data[:len(self.header_match)] != self.header_match:
                 return False
+            offset = len(self.header_match)
 
-        # 字节模式匹配
+        # 字节模式匹配（位置 = header 之后的偏移）
         for pos, val in self.search:
-            if pos >= len(data):
+            actual_pos = pos + offset
+            if actual_pos >= len(data):
                 return False
-            if data[pos] != val:
+            if data[actual_pos] != val:
                 return False
 
         return True
 
     def apply(self, data: bytes) -> bytes:
         """应用修改"""
+        # WPE 中 modify 位置也是从 header 之后开始算的
+        offset = len(self.header_match) if self.header_match else 0
+
         if self.action == "change":
-            # 整包替换：modify 定义了完整的新包
-            max_pos = max(pos for pos, _ in self.modify) if self.modify else 0
+            max_pos = max(pos + offset for pos, _ in self.modify) if self.modify else 0
             new_data = bytearray(max(len(data), max_pos + 1))
-            # 先复制原数据
             new_data[:len(data)] = data
-            # 应用修改
             for pos, val in self.modify:
-                if pos < len(new_data):
-                    new_data[pos] = val
+                actual_pos = pos + offset
+                if actual_pos < len(new_data):
+                    new_data[actual_pos] = val
             return bytes(new_data[:max_pos + 1])
         else:
             # replace：只修改指定位置
             buf = bytearray(data)
             for pos, val in self.modify:
-                if pos < len(buf):
-                    buf[pos] = val
+                actual_pos = pos + offset
+                if actual_pos < len(buf):
+                    buf[actual_pos] = val
             return bytes(buf)
 
 
@@ -134,10 +140,12 @@ class RuleEngine:
         """处理一个封包，返回修改后的数据"""
         self._stats["total_packets"] += 1
 
-        # 记录前几个字节用于调试
-        if len(data) >= 4 and self._stats["total_packets"] <= 200:
+        # ��录前几个字节用于调试（前 500 个包每个都记录）
+        if len(data) >= 4 and self._stats["total_packets"] <= 500:
             header_hex = data[:min(16, len(data))].hex()
-            if self._stats["total_packets"] % 50 == 1:
+            logger.debug(f"封包 ({direction}) #{self._stats['total_packets']} "
+                        f"len={len(data)}: {header_hex}")
+            if self._stats["total_packets"] % 20 == 1:
                 logger.info(f"封包样本 ({direction}) len={len(data)}: {header_hex}")
 
         for rule in self.rules:
