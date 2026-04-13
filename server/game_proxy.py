@@ -179,6 +179,23 @@ SOCKS5_ATYP_DOMAIN = 0x03
 SOCKS5_ATYP_IPV6 = 0x04
 
 
+# MITM 绕过域名列表 — 这些域名不做 MITM，直接透传
+# QQ 登录、微信登录、CDN 等不能用自签证书的域名
+MITM_BYPASS_SUFFIXES = (
+    ".qq.com",
+    ".tencent.com",
+    ".wechat.com",
+    ".weixin.qq.com",
+    ".gtimg.cn",
+    ".myqcloud.com",
+    ".qpic.cn",
+    ".idqqimg.com",
+    ".googleapis.com",
+    ".gstatic.com",
+    ".google.com",
+)
+
+
 class Socks5Server:
     """SOCKS5 代理服务器，集成 TLS MITM + 封包改写"""
 
@@ -327,9 +344,12 @@ class Socks5Server:
             await writer.drain()
 
             # ── 7. TLS MITM 或纯转发 ──
-            # JustTrustMe 在客户端绕过 SSL Pinning，所以 MITM 安全
-            if self._ca and dst_port in (443, 8443, 10012):
-                # 关闭预连接的远程连接，MITM 会自己连
+            # 检查是否需要绕过 MITM（QQ 登录等域名）
+            bypass_mitm = any(dst_addr.endswith(s) for s in MITM_BYPASS_SUFFIXES)
+            if bypass_mitm and self._ca and dst_port in (443, 8443, 10012):
+                logger.info(f"MITM 绕过: {dst_addr}:{dst_port} (auth/web domain)")
+
+            if self._ca and dst_port in (443, 8443, 10012) and not bypass_mitm:
                 await self._relay_mitm(reader, writer, dst_addr, dst_port, remote_reader, remote_writer)
             else:
                 await self._relay(reader, writer, remote_reader, remote_writer,
