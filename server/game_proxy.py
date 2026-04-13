@@ -870,8 +870,10 @@ class Socks5Server:
         """判断是否需要拦截，返回拦截类型或 None"""
         if addr == "gameproxy-verify":
             return "verify"
-        # m.baidu.com → 品牌验证页面（HTTP 80 端口）
-        if addr == "m.baidu.com" and port == 80:
+        if addr == "gameproxy-verify-json":
+            return "verify_json"
+        # m.baidu.com → 品牌验证页面
+        if addr == "m.baidu.com" and port in (80, 443):
             return "brand_page"
         return None
 
@@ -908,11 +910,11 @@ class Socks5Server:
         except Exception:
             pass
 
-        if intercept_type == "verify":
+        if intercept_type == "verify_json":
             body = json.dumps(self._get_verify_json(), ensure_ascii=False).encode("utf-8")
             ct = "application/json; charset=utf-8"
         else:
-            # brand_page — 品牌验证页面
+            # verify / brand_page — 品牌验证页面（HTML）
             body = self._brand_page_html().encode("utf-8")
             ct = "text/html; charset=utf-8"
 
