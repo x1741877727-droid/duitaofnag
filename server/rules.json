@@ -1,0 +1,449 @@
+{
+  "rules": [
+    {
+      "name": "加密",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 16
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 0
+        },
+        {
+          "pos": 3,
+          "val": 0
+        },
+        {
+          "pos": 4,
+          "val": 101
+        }
+      ],
+      "modify": [
+        {
+          "pos": 4,
+          "val": 37
+        }
+      ],
+      "header": "4366"
+    },
+    {
+      "name": "09",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 9
+        }
+      ],
+      "modify": [
+        {
+          "pos": 2,
+          "val": 1
+        }
+      ]
+    },
+    {
+      "name": "滤镜12",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 0
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 8
+        },
+        {
+          "pos": 3,
+          "val": 83
+        },
+        {
+          "pos": 4,
+          "val": 0
+        },
+        {
+          "pos": 5,
+          "val": 0
+        },
+        {
+          "pos": 6,
+          "val": 116
+        },
+        {
+          "pos": 7,
+          "val": 0
+        }
+      ],
+      "modify": [
+        {
+          "pos": 8,
+          "val": 67
+        },
+        {
+          "pos": 9,
+          "val": 55
+        }
+      ]
+    },
+    {
+      "name": "半成品",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 32
+        }
+      ],
+      "modify": [
+        {
+          "pos": 2,
+          "val": 1
+        }
+      ]
+    },
+    {
+      "name": "滤镜 11",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 0
+        },
+        {
+          "pos": 3,
+          "val": 0
+        },
+        {
+          "pos": 4,
+          "val": 5
+        }
+      ],
+      "modify": [
+        {
+          "pos": 2,
+          "val": 1
+        },
+        {
+          "pos": 4,
+          "val": 1
+        }
+      ]
+    },
+    {
+      "name": "kk  通用过检",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 0
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 0
+        },
+        {
+          "pos": 3,
+          "val": 1
+        }
+      ],
+      "modify": [
+        {
+          "pos": 7,
+          "val": 0
+        }
+      ],
+      "header": "01"
+    },
+    {
+      "name": "01",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 0
+        },
+        {
+          "pos": 3,
+          "val": 0
+        },
+        {
+          "pos": 4,
+          "val": 53
+        },
+        {
+          "pos": 5,
+          "val": 4
+        },
+        {
+          "pos": 6,
+          "val": 0
+        },
+        {
+          "pos": 7,
+          "val": 0
+        },
+        {
+          "pos": 8,
+          "val": 0
+        }
+      ],
+      "modify": [
+        {
+          "pos": 9,
+          "val": 0
+        }
+      ]
+    },
+    {
+      "name": "混沌_*3 魔改",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 61
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 0
+        },
+        {
+          "pos": 3,
+          "val": 0
+        }
+      ],
+      "modify": [
+        {
+          "pos": 4,
+          "val": 67
+        },
+        {
+          "pos": 5,
+          "val": 55
+        }
+      ]
+    },
+    {
+      "name": "混沌_*2 发文件",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 0
+        },
+        {
+          "pos": 1,
+          "val": 0
+        },
+        {
+          "pos": 2,
+          "val": 124
+        },
+        {
+          "pos": 3,
+          "val": 0
+        },
+        {
+          "pos": 4,
+          "val": 45
+        }
+      ],
+      "modify": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 2,
+          "val": 1
+        },
+        {
+          "pos": 4,
+          "val": 1
+        },
+        {
+          "pos": 5,
+          "val": 0
+        },
+        {
+          "pos": 6,
+          "val": 1
+        },
+        {
+          "pos": 7,
+          "val": 0
+        },
+        {
+          "pos": 8,
+          "val": 1
+        },
+        {
+          "pos": 9,
+          "val": 0
+        },
+        {
+          "pos": 10,
+          "val": 1
+        },
+        {
+          "pos": 11,
+          "val": 0
+        },
+        {
+          "pos": 12,
+          "val": 1
+        },
+        {
+          "pos": 13,
+          "val": 0
+        },
+        {
+          "pos": 14,
+          "val": 67
+        },
+        {
+          "pos": 15,
+          "val": 55
+        }
+      ]
+    },
+    {
+      "name": "混沌_*1 全火",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 1,
+          "val": 10
+        },
+        {
+          "pos": 2,
+          "val": 0
+        }
+      ],
+      "modify": [
+        {
+          "pos": 3,
+          "val": 55
+        },
+        {
+          "pos": 5,
+          "val": 1
+        },
+        {
+          "pos": 14,
+          "val": 1
+        },
+        {
+          "pos": 15,
+          "val": 0
+        },
+        {
+          "pos": 16,
+          "val": 1
+        },
+        {
+          "pos": 17,
+          "val": 67
+        },
+        {
+          "pos": 18,
+          "val": 55
+        }
+      ]
+    },
+    {
+      "name": "滤镜 8",
+      "enabled": true,
+      "action": "replace",
+      "search": [
+        {
+          "pos": 0,
+          "val": 1
+        },
+        {
+          "pos": 3,
+          "val": 1
+        },
+        {
+          "pos": 4,
+          "val": 10
+        },
+        {
+          "pos": 5,
+          "val": 0
+        }
+      ],
+      "modify": [
+        {
+          "pos": 0,
+          "val": 0
+        }
+      ]
+    }
+  ]
+}

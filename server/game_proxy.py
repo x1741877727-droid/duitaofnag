@@ -206,6 +206,8 @@ MITM_BYPASS_SUFFIXES = (
     ".google.com",
     ".cdn-go.cn",
     ".gcloudsdk.com",
+    ".anticheatexpert.com",
+    ".crashsight.qq.com",
 )
 
 
@@ -436,14 +438,24 @@ class Socks5Server:
 
         async def client_to_remote():
             """客户端 → 远程服务器（游戏发出的包，应用改写规则）"""
+            apply_rules = True
             try:
+                first_packet = True
                 while True:
                     data = await client_reader.read(65536)
                     if not data:
                         break
-                    # 对发送到游戏服务器的封包应用规则
-                    modified = self.rule_engine.process(data, direction="send")
-                    remote_writer.write(modified)
+                    # 第一个包检测：如果是 TLS ClientHello (16 03 xx)，跳过规则
+                    if first_packet:
+                        first_packet = False
+                        if len(data) >= 3 and data[0] == 0x16 and data[1] == 0x03:
+                            apply_rules = False
+                            logger.info(f"TLS 检测: {dst_addr}:{dst_port} 是 TLS 连接，跳过规则")
+                    if apply_rules:
+                        modified = self.rule_engine.process(data, direction="send")
+                        remote_writer.write(modified)
+                    else:
+                        remote_writer.write(data)
                     await remote_writer.drain()
             except Exception:
                 pass
