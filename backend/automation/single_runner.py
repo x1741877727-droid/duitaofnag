@@ -125,19 +125,27 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 是否已连接 — 通过 gameproxy API 查询（<50ms）
+        """检查 VPN 是否已连接
 
-        优先查服务端 API（最准确），失败则回退到本地 tun0 检查。
+        优先查本地 tun0（快速，不依赖流量），API 作为补充。
+        tun0 UP = VPN 隧道已建立，即使没有游戏流量也算连接成功。
         """
-        import urllib.request
-        import json
+        loop = asyncio.get_event_loop()
+        raw_adb = getattr(self.adb, '_adb', self.adb)
 
-        # 方式1：查 gameproxy API（服务端真实状态）
+        # 方式1：本地 tun0 检查（<100ms）
+        tun_output = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+        )
+        if "UP" in tun_output:
+            self.dbg.log_vpn(True, "tun0 UP")
+            return True
+
+        # 方式2：tun0 不存在，查 API 确认（可能是 tun0 还没建立）
         try:
-            loop = asyncio.get_event_loop()
-            raw_adb = getattr(self.adb, '_adb', self.adb)
+            import urllib.request
+            import json
 
-            # 获取模拟器的出口 IP（通过 ADB 查网络接口）
             def _query_api():
                 try:
                     req = urllib.request.Request(f"{PROXY_API_URL}/api/clients", method="GET")
@@ -150,31 +158,12 @@ class SingleInstanceRunner:
             if data and data.get("ok"):
                 clients = data.get("clients") or []
                 if len(clients) > 0:
-                    # 有任何客户端连接 = VPN 工作中
-                    self.dbg.log_vpn(True, f"API: {len(clients)} 个客户端连接")
+                    self.dbg.log_vpn(True, f"API: {len(clients)} 个客户端")
                     return True
-                else:
-                    self.dbg.log_vpn(False, "API: 无客户端连接")
-                    return False
-        except Exception as e:
-            logger.debug(f"[VPN] API 查询失败: {e}，回退到 tun0 检查")
+        except Exception:
+            pass
 
-        # 方式2：回退 — 本地 tun0 检查
-        import re
-        loop = asyncio.get_event_loop()
-        raw_adb = getattr(self.adb, '_adb', self.adb)
-        tun_output = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
-        )
-        if "UP" not in tun_output:
-            self.dbg.log_vpn(False, "tun0 不存在")
-            return False
-        rx_match = re.search(r'RX bytes:(\d+)', tun_output)
-        if rx_match and int(rx_match.group(1)) > 0:
-            self.dbg.log_vpn(True, f"tun0 RX={rx_match.group(1)}")
-            return True
-
-        self.dbg.log_vpn(False, "tun0 RX=0")
+        self.dbg.log_vpn(False, "tun0 不存在且 API 无客户端")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
