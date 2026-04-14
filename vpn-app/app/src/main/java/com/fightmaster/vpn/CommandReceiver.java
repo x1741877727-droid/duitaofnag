@@ -59,11 +59,10 @@ public class CommandReceiver extends BroadcastReceiver {
     }
 
     private void setCaptureMode(Context context, boolean enabled) {
-        FightMasterVpnService service = FightMasterVpnService.getInstance();
-        if (service != null) {
-            service.setCaptureMode(enabled);
-        } else {
-            Log.w(TAG, "VPN service not running, cannot set capture mode");
-        }
+        // 通过 Intent action 传递给 Service（比 static instance 更可靠）
+        Intent vpnIntent = new Intent(context, FightMasterVpnService.class);
+        vpnIntent.setAction(enabled ? "CAPTURE_ON" : "CAPTURE_OFF");
+        context.startService(vpnIntent);
+        Log.i(TAG, "Sent capture mode " + (enabled ? "ON" : "OFF") + " to service via Intent");
     }
 }

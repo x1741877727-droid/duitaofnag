@@ -90,6 +90,16 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
             return START_NOT_STICKY;
         }
 
+        // 抓号模式切换（通过 Intent action）
+        if (intent != null && "CAPTURE_ON".equals(intent.getAction())) {
+            setCaptureMode(true);
+            return START_STICKY;
+        }
+        if (intent != null && "CAPTURE_OFF".equals(intent.getAction())) {
+            setCaptureMode(false);
+            return START_STICKY;
+        }
+
         if (running) {
             Log.w(TAG, "Already running, stopping first");
             stopVpnInternal();
@@ -249,36 +259,9 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
     public void setCaptureMode(boolean enabled) {
         this.captureMode = enabled;
         Log.i(TAG, "Capture mode: " + (enabled ? "ON" : "OFF"));
-        if (running) {
-            restartV2Ray();
-        }
-    }
-
-    /**
-     * 热重启 v2ray（不重建 TUN，仅替换路由配置）
-     */
-    private void restartV2Ray() {
-        // 停止当前 v2ray
-        try {
-            Tun2socks.stopV2Ray();
-        } catch (Exception e) {
-            Log.w(TAG, "stopV2Ray error during restart", e);
-        }
-
-        // 用新配置重启
-        byte[] configBytes = buildV2RayConfig().getBytes(StandardCharsets.UTF_8);
-        String filesDir = getFilesDir().getAbsolutePath();
-        long ret = Tun2socks.startV2Ray(
-                tunFd, this, new NoOpDBService(), configBytes,
-                "proxy", "http,tls", filesDir, false, false, filesDir
-        );
-        if (ret != 0) {
-            Log.e(TAG, "V2Ray restart failed, code=" + ret);
-            sendStatus("error", "V2Ray restart failed: " + ret);
-        } else {
-            sendStatus(captureMode ? "capture_mode" : "connected",
-                       PROXY_HOST + ":" + PROXY_PORT);
-        }
+        // 不在运行时重启 VPN，仅设置标志位
+        // 下次 VPN 启动时会使用新配置
+        // 如果需要立即生效，外部应先 STOP 再 START
     }
 
     private void sendStatus(String status, String detail) {
