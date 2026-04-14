@@ -46,7 +46,6 @@ class Phase(str, Enum):
 
 GAME_PACKAGE = "com.tencent.tmgp.pubgmhd"
 ACCELERATOR_PACKAGE = "com.fightmaster.vpn"
-PROXY_API_URL = "http://111.170.170.149:9901"  # gameproxy HTTP API
 
 
 class SingleInstanceRunner:
@@ -125,45 +124,52 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 是否已连接
+        """检查 VPN 是否已连接且隧道通畅（~100ms）
 
-        优先查本地 tun0（快速，不依赖流量），API 作为补充。
-        tun0 UP = VPN 隧道已建立，即使没有游戏流量也算连接成功。
+        两层检测：
+        1. VpnService 是否在运行（APP 层面连接）
+        2. tun0 RX > 0（隧道层面有数据回来）
+
+        假连接状态：VpnService 在跑但 tun0 RX=0（发了数据收不到回复）
         """
+        import re
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 
-        # 方式1：本地 tun0 检查（<100ms）
+        # 1. VpnService 是否在运行
+        output = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            f"dumpsys activity services {ACCELERATOR_PACKAGE}"
+        )
+        if "FightMasterVpnService" not in output:
+            self.dbg.log_vpn(False, "FightMaster VpnService 未运行")
+            return False
+
+        # 2. tun0 是否有收到数据（RX > 0）
         tun_output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
         )
-        if "UP" in tun_output:
-            self.dbg.log_vpn(True, "tun0 UP")
+        if "UP" not in tun_output:
+            self.dbg.log_vpn(False, "tun0 不存在")
+            return False
+
+        rx_match = re.search(r'RX bytes:(\d+)', tun_output)
+        rx_val = int(rx_match.group(1)) if rx_match else 0
+        if rx_val > 0:
+            self.dbg.log_vpn(True, f"tun0 RX={rx_val}")
             return True
 
-        # 方式2：tun0 不存在，查 API 确认（可能是 tun0 还没建立）
-        try:
-            import urllib.request
-            import json
+        # RX=0：可能是刚连上还没流量，等 2 秒重试
+        logger.debug("[VPN] tun0 RX=0，等待 2s 重试...")
+        await asyncio.sleep(2)
+        tun_output2 = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
+        )
+        rx_match2 = re.search(r'RX bytes:(\d+)', tun_output2)
+        if rx_match2 and int(rx_match2.group(1)) > 0:
+            return True
 
-            def _query_api():
-                try:
-                    req = urllib.request.Request(f"{PROXY_API_URL}/api/clients", method="GET")
-                    resp = urllib.request.urlopen(req, timeout=2)
-                    return json.loads(resp.read())
-                except Exception:
-                    return None
-
-            data = await loop.run_in_executor(None, _query_api)
-            if data and data.get("ok"):
-                clients = data.get("clients") or []
-                if len(clients) > 0:
-                    self.dbg.log_vpn(True, f"API: {len(clients)} 个客户端")
-                    return True
-        except Exception:
-            pass
-
-        self.dbg.log_vpn(False, "tun0 不存在且 API 无客户端")
+        logger.warning("[VPN] VpnService 运行但 tun0 RX 持续为 0 → 隧道未通（假连接）")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
