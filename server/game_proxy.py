@@ -533,34 +533,24 @@ class Socks5Server:
                 return
 
             # ── 6. 连接目标服务器 ──
-            # 检查失败缓存：同一目标短时间内失败多次则直接拒绝
             fail_key = f"{dst_addr}:{dst_port}"
-            if fail_key in self._fail_cache:
-                fail_count, last_fail = self._fail_cache[fail_key]
-                if fail_count >= 3 and time.time() - last_fail < 30:
-                    # 30 秒内失败 3 次，直接拒绝
-                    writer.write(bytes([SOCKS5_VER, 0x05, 0x00, 0x01,
-                                        0, 0, 0, 0, 0, 0]))
-                    await writer.drain()
-                    return
-                elif time.time() - last_fail >= 30:
-                    del self._fail_cache[fail_key]
-
             try:
                 remote_reader, remote_writer = await asyncio.wait_for(
                     asyncio.open_connection(dst_addr, dst_port),
-                    timeout=5  # 从 10 秒缩短到 5 秒
+                    timeout=5  # 5 秒超时
                 )
-                # 连接成功，清除失败记录
                 self._fail_cache.pop(fail_key, None)
             except Exception as e:
-                # 记录失败
-                fc, _ = self._fail_cache.get(fail_key, (0, 0))
+                # 失败计数 — 只控制日志频率，不拦截连接
+                fc, lt = self._fail_cache.get(fail_key, (0, 0))
+                if time.time() - lt >= 60:
+                    fc = 0  # 60 秒重置计数
                 self._fail_cache[fail_key] = (fc + 1, time.time())
                 if fc < 3:
                     logger.info(f"连接失败: {dst_addr}:{dst_port} - {e}")
                 elif fc == 3:
-                    logger.warning(f"连接失败: {dst_addr}:{dst_port} 已失败 {fc+1} 次，屏蔽 30 秒")
+                    logger.warning(f"连接失败: {dst_addr}:{dst_port} 频繁失败，后续不再逐条打印")
+                # 不屏蔽，正常返回 SOCKS5 失败让客户端重试
                 writer.write(bytes([SOCKS5_VER, 0x05, 0x00, 0x01,
                                     0, 0, 0, 0, 0, 0]))
                 await writer.drain()
