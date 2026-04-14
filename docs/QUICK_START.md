@@ -76,10 +76,28 @@ game-automation/
 └── docs/          # 技术文档
 ```
 
+## FightMaster VPN 控制
+
+通过 ADB 广播控制，不需要 UI 交互。backend 的 `single_runner.py` 已集成。
+
+```bash
+# 启动 VPN（默认代理 38.22.234.228:9900）
+adb shell am broadcast -a com.fightmaster.vpn.START -n com.fightmaster.vpn/.CommandReceiver
+
+# 启动 VPN（自定义代理地址）
+adb shell am broadcast -a com.fightmaster.vpn.START -n com.fightmaster.vpn/.CommandReceiver --es proxy_host "1.2.3.4" --ei proxy_port 9900
+
+# 停止 VPN
+adb shell am broadcast -a com.fightmaster.vpn.STOP -n com.fightmaster.vpn/.CommandReceiver
+```
+
+注意：首次使用需在模拟器 UI 上手动授权 VPN 权限（之后就不需要了）。
+
 ## 关键技术决策（已验证）
 
 | 决策 | 结论 |
 |------|------|
+| 加速器 | FightMaster VPN，ADB 广播控制，代理地址可配置 |
 | 代理方式 | FightMaster VPN → game_proxy SOCKS5，**不加 MITM** |
 | 封号原因 | MITM 导致 SSL 错误被 ACE 检测，去掉后不封号 |
 | 同局检测 | game_proxy 检测 UDP ASSOCIATE 爆发 → 提取战斗服 IP 比对 |
@@ -87,27 +105,16 @@ game-automation/
 | 模板匹配 | 1280×720 灰度截图，多尺度匹配 |
 | 弹窗关闭 | 遮罩亮度分析 + 模板匹配找 X 按钮 |
 
-## 待实现：QQ Token 抓号上号系统
+## 待实现：QQ Token 抓号上号
 
-**目标：** 扫一次 QQ 码获取 token，之后用 token 直接登录游戏，跳过扫码。
+capture mode 代码已从 game_proxy 和 FightMaster 中移除。保留 `proxy/tls_mitm.py` 和 `proxy/token_capture.py` 供未来使用。
 
-**已完成的代码：**
-- `proxy/tls_mitm.py` — CA 证书管理，per-hostname 伪造证书生成
-- `proxy/token_capture.py` — QQ OAuth `_Callback` JSONP 解析 + TokenStore 存储
-- `proxy/game_proxy.py` — 已增加抓号模式：`/capture/start`、`/capture/stop`、`/capture/status`、`/capture/tokens` API（端口 = SOCKS5 端口 + 1）
-- `vpn-app/FightMasterVpnService.java` — 已增加 `CAPTURE_ON/CAPTURE_OFF` 模式切换，`buildV2RayConfig()` 动态路由
-- `vpn-app/CommandReceiver.java` — 支持 `am broadcast -a com.fightmaster.vpn.CAPTURE_ON -n com.fightmaster.vpn/.CommandReceiver`
+**验证发现的阻塞点：**
+- MITM 白屏：WebView 不信任自签 CA（Android 7+ Network Security）
+- Scheme URL：和平精英 AppID `1106467070`，scheme `tencent1106467070://`，MSDK v5.20+ 可能已屏蔽
+- Token 格式：`access_token=xxx&openid=xxx&pay_token=xxx&expires_in=xxx`
 
-**验证发现的问题：**
-1. **MITM 白屏** — 游戏内 WebView 不信任自签 CA 证书（Android 7+ Network Security），TLS 握手失败。QQ auth 流量能到达 game_proxy（`xui.ptlogin2.qq.com:443`），但无法解密
-2. **Scheme URL 上号** — 和平精英 AppID 是 `1106467070`（不是 1104466820），scheme 为 `tencent1106467070://`、`tencentmsdk1106467070://`。Intent 能发出，但 MSDK v5.20+ 可能已屏蔽此方式
-3. **Token 格式** — `access_token=xxx&openid=xxx&pay_token=xxx&expires_in=xxx`
-
-**待探索方向：**
-- Xposed/LSPosed hook MSDK `OnLoginNotify` 回调抓明文 token（需要 ACE 不检测 Xposed）
-- SharedPreferences 整体备份恢复（加密的 itop.xml 等文件，同模拟器实例可用）
-- 浏览器端独立走 QQ OAuth 流程获取 `_Callback`，不经过游戏 WebView
-- 研究 `tencentmsdk1106467070://` scheme 的完整参数格式
+**待探索方向：** Xposed hook、SharedPreferences 备份恢复、浏览器独立 OAuth
 
 **详细计划：** `docs/superpowers/plans/2026-04-14-qq-token-capture.md`
 
