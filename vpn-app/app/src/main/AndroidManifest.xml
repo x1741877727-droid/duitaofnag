@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.fightmaster.vpn">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:allowBackup="false"
+        android:label="FightMaster"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FightMaster">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- ADB 启动接口 -->
+            <intent-filter>
+                <action android:name="com.fightmaster.vpn.CONNECT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".AppSelectActivity"
+            android:exported="false"
+            android:theme="@style/Theme.FightMaster" />
+
+        <service
+            android:name=".FightMasterVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <!-- ADB 广播接收器 — 用于脚本控制 -->
+        <receiver
+            android:name=".CommandReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.fightmaster.vpn.START" />
+                <action android:name="com.fightmaster.vpn.STOP" />
+                <action android:name="com.fightmaster.vpn.STATUS" />
+                <action android:name="com.fightmaster.vpn.CAPTURE_ON" />
+                <action android:name="com.fightmaster.vpn.CAPTURE_OFF" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>
