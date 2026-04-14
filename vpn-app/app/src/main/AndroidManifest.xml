@@ -50,8 +50,6 @@
                 <action android:name="com.fightmaster.vpn.START" />
                 <action android:name="com.fightmaster.vpn.STOP" />
                 <action android:name="com.fightmaster.vpn.STATUS" />
-                <action android:name="com.fightmaster.vpn.CAPTURE_ON" />
-                <action android:name="com.fightmaster.vpn.CAPTURE_OFF" />
             </intent-filter>
         </receiver>
 

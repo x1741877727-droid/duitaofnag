@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FightMaster" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:windowBackground">#0A0E1A</item>
+        <item name="android:statusBarColor">#0A0E1A</item>
+        <item name="android:navigationBarColor">#0A0E1A</item>
+        <item name="colorPrimary">#00D4FF</item>
+        <item name="colorPrimaryDark">#0A0E1A</item>
+        <item name="colorAccent">#00D4FF</item>
+    </style>
+</resources>

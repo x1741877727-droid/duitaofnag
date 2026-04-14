@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="fm_bg">#FF0A0E1A</color>
+    <color name="fm_card">#FF141929</color>
+    <color name="fm_accent">#FF00D4FF</color>
+    <color name="fm_green">#FF00FF88</color>
+    <color name="fm_text">#FFC8CDDA</color>
+    <color name="fm_text_dim">#FF5A6178</color>
+    <color name="fm_divider">#FF1C2235</color>
+    <color name="fm_btn">#FF1A2744</color>
+</resources>
