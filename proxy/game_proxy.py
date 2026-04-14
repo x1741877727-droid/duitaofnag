@@ -329,14 +329,6 @@ MITM_BYPASS_SUFFIXES = (
     ".crashsight.qq.com",
 )
 
-# QQ OAuth 域名 — 抓号模式时需要 MITM 拦截
-QQ_AUTH_DOMAINS = (
-    "ssl.ptlogin2.qq.com",
-    "xui.ptlogin2.qq.com",
-    "graph.qq.com",
-    "auth.qq.com",
-)
-
 
 class Socks5Server:
     """SOCKS5 代理服务器，集成 TLS MITM + 封包改写"""
@@ -346,7 +338,8 @@ class Socks5Server:
                  rule_engine: RuleEngine | None = None,
                  ca_cert: str | None = None,
                  ca_key: str | None = None,
-                 capture: PacketCapture | None = None):
+                 capture: PacketCapture | None = None,
+                 mitm_ports: set[int] | None = None):
         self.host = host
         self.port = port
         self.tokens = tokens  # None = 不鉴权
@@ -357,6 +350,7 @@ class Socks5Server:
         self._mitm_connections = 0      # MITM 成功次数
         self._start_time = time.time()
         self._ca = None
+        self._mitm_ports = mitm_ports or {443, 8443, 10012}
 
         # 初始化 TLS MITM
         if ca_cert and ca_key and os.path.exists(ca_cert) and os.path.exists(ca_key):
@@ -367,11 +361,6 @@ class Socks5Server:
             except Exception as e:
                 logger.warning(f"TLS MITM 初始化失败: {e}, 将只做纯转发")
 
-        # 抓号模式
-        self._capture_mode = False
-        from token_capture import TokenStore
-        capture_dir = capture.capture_dir if capture else "."
-        self._token_store = TokenStore(os.path.join(capture_dir, "tokens.json"))
 
     async def start(self, api_port: int | None = None):
         server = await asyncio.start_server(
@@ -416,28 +405,10 @@ class Socks5Server:
                 method, path, *_ = req.split(" ")
 
                 # 路由
-                if method == "GET" and path == "/capture/status":
-                    result = {
-                        "capture_mode": self._capture_mode,
-                        "tokens": self._token_store.list_all(),
-                    }
-                elif method == "POST" and path == "/capture/start":
-                    self._capture_mode = True
-                    logger.info("[抓号] 抓号模式已开启")
-                    result = {"ok": True, "capture_mode": True}
-                elif method == "POST" and path == "/capture/stop":
-                    self._capture_mode = False
-                    logger.info("[抓号] 抓号模式已关闭")
-                    result = {"ok": True, "capture_mode": False}
-                elif method == "GET" and path == "/capture/tokens":
-                    result = self._token_store.list_all()
+                if method == "GET" and path == "/status":
+                    result = self._get_verify_json()
                 else:
-                    result = {"error": "not found", "endpoints": [
-                        "GET /capture/status",
-                        "POST /capture/start",
-                        "POST /capture/stop",
-                        "GET /capture/tokens",
-                    ]}
+                    result = {"error": "not found", "endpoints": ["GET /status"]}
 
                 resp_body = json.dumps(result, ensure_ascii=False).encode("utf-8")
                 response = (
@@ -573,13 +544,7 @@ class Socks5Server:
             # ── 7. TLS MITM 或纯转发 ──
             # 判断目标是 IP 还是域名
             is_ip = _is_ip_address(dst_addr)
-            # 抓号模式下，QQ auth 域名不 bypass，走 MITM
-            is_qq_auth = (not is_ip) and dst_addr in QQ_AUTH_DOMAINS
-            if self._capture_mode and is_qq_auth and self._ca:
-                bypass_domain = False
-                logger.info(f"[抓号] QQ auth 域名走 MITM: {dst_addr}")
-            else:
-                bypass_domain = (not is_ip) and any(dst_addr.endswith(s) for s in MITM_BYPASS_SUFFIXES)
+            bypass_domain = (not is_ip) and any(dst_addr.endswith(s) for s in MITM_BYPASS_SUFFIXES)
 
             # 设置抓包
             capture = self._capture
@@ -598,7 +563,7 @@ class Socks5Server:
                 # QQ/微信/Google 等域名 → 不做 MITM，直接透传（不改包）
                 logger.info(f"直连透传: {dst_addr}:{dst_port} (bypass domain)")
                 await self._relay_passthrough(reader, writer, remote_reader, remote_writer)
-            elif self._ca and dst_port in (443, 8443, 10012):
+            elif self._ca and dst_port in self._mitm_ports:
                 # 其他域名 443 → MITM 解密 + 规则
                 await self._relay_mitm(reader, writer, dst_addr, dst_port, remote_reader, remote_writer)
             else:
@@ -748,25 +713,6 @@ class Socks5Server:
         hostname = dst_addr
 
         try:
-            # 0. peek 第一个包的内容（用 transport 底层 socket peek）
-            # Direct TLS for 443 ports
-            is_tls = True
-            if False:
-                # 非 TLS 私有协议 → 直连上游 + 封包改写
-                logger.info(f"游戏协议: {hostname}:{dst_port}, "
-                            f"peek={peek_data[:8].hex() if peek_data else 'empty'}")
-                try:
-                    r_reader, r_writer = await asyncio.wait_for(
-                        asyncio.open_connection(dst_addr, dst_port), timeout=10
-                    )
-                except Exception as e:
-                    logger.debug(f"游戏协议连接失败: {dst_addr}:{dst_port} - {e}")
-                    client_writer.close()
-                    return
-                await self._relay(client_reader, client_writer,
-                                  r_reader, r_writer, dst_addr, dst_port)
-                return
-
             # TLS 连接 → MITM
             logger.info(f"MITM: {hostname}:{dst_port}")
 
@@ -850,17 +796,6 @@ class Socks5Server:
                         data = await upstream_reader.read(65536)
                         if not data:
                             break
-                        # 抓号模式：检查 QQ OAuth _Callback 响应
-                        if self._capture_mode and hostname in QQ_AUTH_DOMAINS:
-                            try:
-                                body_text = data.decode("utf-8", errors="ignore")
-                                from token_capture import extract_callback_from_body
-                                tokens = extract_callback_from_body(body_text)
-                                if tokens:
-                                    logger.info(f"[抓号] 捕获到 token! openid={tokens['openid'][:8]}...")
-                                    self._token_store.save("latest", tokens)
-                            except Exception as e:
-                                logger.debug(f"[抓号] 解析 response 异常: {e}")
                         client_writer.write(data)
                         await client_writer.drain()
                 except Exception:
@@ -1179,6 +1114,8 @@ def main():
                         help="只抓这些端口（逗号分隔，默认游戏端口）")
     parser.add_argument("--rule-debug", action="store_true",
                         help="规则不命中时记录失败原因")
+    parser.add_argument("--mitm-ports", default="443,8443,10012",
+                        help="MITM 拦截端口（逗号分隔）")
     args = parser.parse_args()
 
     # 日志文件
@@ -1225,6 +1162,7 @@ def main():
         capture = PacketCapture(args.capture_dir, capture_ports)
 
     # 启动服务
+    mitm_ports = {int(p.strip()) for p in args.mitm_ports.split(",")}
     server = Socks5Server(
         host=args.host,
         port=args.port,
@@ -1233,6 +1171,7 @@ def main():
         ca_cert=args.ca_cert,
         ca_key=args.ca_key,
         capture=capture,
+        mitm_ports=mitm_ports,
     )
 
     try:
