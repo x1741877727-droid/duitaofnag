@@ -338,7 +338,8 @@ class Socks5Server:
                  rule_engine: RuleEngine | None = None,
                  ca_cert: str | None = None,
                  ca_key: str | None = None,
-                 capture: PacketCapture | None = None):
+                 capture: PacketCapture | None = None,
+                 mitm_ports: set[int] | None = None):
         self.host = host
         self.port = port
         self.tokens = tokens  # None = 不鉴权
@@ -349,6 +350,9 @@ class Socks5Server:
         self._mitm_connections = 0      # MITM 成功次数
         self._start_time = time.time()
         self._ca = None
+        self._fail_cache = {}           # {ip:port → (fail_count, last_fail_time)}
+        self._max_connections = 500     # 最大并发连接数
+        self._mitm_ports = mitm_ports or {443, 8443, 10012}
 
         # 初始化 TLS MITM
         if ca_cert and ca_key and os.path.exists(ca_cert) and os.path.exists(ca_key):
@@ -359,7 +363,8 @@ class Socks5Server:
             except Exception as e:
                 logger.warning(f"TLS MITM 初始化失败: {e}, 将只做纯转发")
 
-    async def start(self):
+
+    async def start(self, api_port: int | None = None):
         server = await asyncio.start_server(
             self._handle_client, self.host, self.port
         )
@@ -371,8 +376,67 @@ class Socks5Server:
             logger.info("鉴权: 无（开放访问）")
         logger.info(f"规则: {len(self.rule_engine.rules)} 条")
 
+        # 启动控制 API（HTTP，默认端口 = SOCKS5 端口 + 1）
+        if api_port is None:
+            api_port = self.port + 1
+
+        async def handle_api(reader, writer):
+            """简单 HTTP API handler"""
+            try:
+                request_line = await asyncio.wait_for(reader.readline(), timeout=5)
+                if not request_line:
+                    writer.close()
+                    return
+
+                # 读取 headers
+                content_length = 0
+                while True:
+                    line = await reader.readline()
+                    if line == b"\r\n" or line == b"\n" or not line:
+                        break
+                    if b":" in line:
+                        k, v = line.decode().split(":", 1)
+                        if k.strip().lower() == "content-length":
+                            content_length = int(v.strip())
+
+                # 读取 body
+                if content_length > 0:
+                    await asyncio.wait_for(reader.read(content_length), timeout=5)
+
+                req = request_line.decode().strip()
+                method, path, *_ = req.split(" ")
+
+                # 路由
+                if method == "GET" and path == "/status":
+                    result = self._get_verify_json()
+                else:
+                    result = {"error": "not found", "endpoints": ["GET /status"]}
+
+                resp_body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                response = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: application/json; charset=utf-8\r\n"
+                    f"Content-Length: {len(resp_body)}\r\n"
+                    f"Access-Control-Allow-Origin: *\r\n"
+                    f"Connection: close\r\n"
+                    f"\r\n"
+                ).encode("utf-8") + resp_body
+                writer.write(response)
+                await writer.drain()
+            except Exception as e:
+                logger.debug(f"API 请求异常: {e}")
+            finally:
+                writer.close()
+
+        api_server = await asyncio.start_server(handle_api, "0.0.0.0", api_port)
+        logger.info(f"[控制API] 监听 0.0.0.0:{api_port}")
+
         async with server:
-            await server.serve_forever()
+            async with api_server:
+                await asyncio.gather(
+                    server.serve_forever(),
+                    api_server.serve_forever(),
+                )
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter):
@@ -380,6 +444,13 @@ class Socks5Server:
         client_addr = writer.get_extra_info('peername')
         self._active_connections += 1
         self._total_connections += 1
+
+        # 并发连接数限制
+        if self._active_connections > self._max_connections:
+            logger.warning(f"连接数超限 ({self._active_connections}), 拒绝 {client_addr}")
+            self._active_connections -= 1
+            writer.close()
+            return
 
         try:
             # ── 1. 握手：协商认证方式 ──
@@ -462,13 +533,34 @@ class Socks5Server:
                 return
 
             # ── 6. 连接目标服务器 ──
+            # 检查失败缓存：同一目标短时间内失败多次则直接拒绝
+            fail_key = f"{dst_addr}:{dst_port}"
+            if fail_key in self._fail_cache:
+                fail_count, last_fail = self._fail_cache[fail_key]
+                if fail_count >= 3 and time.time() - last_fail < 30:
+                    # 30 秒内失败 3 次，直接拒绝
+                    writer.write(bytes([SOCKS5_VER, 0x05, 0x00, 0x01,
+                                        0, 0, 0, 0, 0, 0]))
+                    await writer.drain()
+                    return
+                elif time.time() - last_fail >= 30:
+                    del self._fail_cache[fail_key]
+
             try:
                 remote_reader, remote_writer = await asyncio.wait_for(
                     asyncio.open_connection(dst_addr, dst_port),
-                    timeout=10
+                    timeout=5  # 从 10 秒缩短到 5 秒
                 )
+                # 连接成功，清除失败记录
+                self._fail_cache.pop(fail_key, None)
             except Exception as e:
-                logger.debug(f"连接失败: {dst_addr}:{dst_port} - {e}")
+                # 记录失败
+                fc, _ = self._fail_cache.get(fail_key, (0, 0))
+                self._fail_cache[fail_key] = (fc + 1, time.time())
+                if fc < 3:
+                    logger.info(f"连接失败: {dst_addr}:{dst_port} - {e}")
+                elif fc == 3:
+                    logger.warning(f"连接失败: {dst_addr}:{dst_port} 已失败 {fc+1} 次，屏蔽 30 秒")
                 writer.write(bytes([SOCKS5_VER, 0x05, 0x00, 0x01,
                                     0, 0, 0, 0, 0, 0]))
                 await writer.drain()
@@ -501,7 +593,7 @@ class Socks5Server:
                 # QQ/微信/Google 等域名 → 不做 MITM，直接透传（不改包）
                 logger.info(f"直连透传: {dst_addr}:{dst_port} (bypass domain)")
                 await self._relay_passthrough(reader, writer, remote_reader, remote_writer)
-            elif self._ca and dst_port in (443, 8443, 10012):
+            elif self._ca and dst_port in self._mitm_ports:
                 # 其他域名 443 → MITM 解密 + 规则
                 await self._relay_mitm(reader, writer, dst_addr, dst_port, remote_reader, remote_writer)
             else:
@@ -651,25 +743,6 @@ class Socks5Server:
         hostname = dst_addr
 
         try:
-            # 0. peek 第一个包的内容（用 transport 底层 socket peek）
-            # Direct TLS for 443 ports
-            is_tls = True
-            if False:
-                # 非 TLS 私有协议 → 直连上游 + 封包改写
-                logger.info(f"游戏协议: {hostname}:{dst_port}, "
-                            f"peek={peek_data[:8].hex() if peek_data else 'empty'}")
-                try:
-                    r_reader, r_writer = await asyncio.wait_for(
-                        asyncio.open_connection(dst_addr, dst_port), timeout=10
-                    )
-                except Exception as e:
-                    logger.debug(f"游戏协议连接失败: {dst_addr}:{dst_port} - {e}")
-                    client_writer.close()
-                    return
-                await self._relay(client_reader, client_writer,
-                                  r_reader, r_writer, dst_addr, dst_port)
-                return
-
             # TLS 连接 → MITM
             logger.info(f"MITM: {hostname}:{dst_port}")
 
@@ -1071,6 +1144,8 @@ def main():
                         help="只抓这些端口（逗号分隔，默认游戏端口）")
     parser.add_argument("--rule-debug", action="store_true",
                         help="规则不命中时记录失败原因")
+    parser.add_argument("--mitm-ports", default="443,8443,10012",
+                        help="MITM 拦截端口（逗号分隔）")
     args = parser.parse_args()
 
     # 日志文件
@@ -1117,6 +1192,7 @@ def main():
         capture = PacketCapture(args.capture_dir, capture_ports)
 
     # 启动服务
+    mitm_ports = {int(p.strip()) for p in args.mitm_ports.split(",")}
     server = Socks5Server(
         host=args.host,
         port=args.port,
@@ -1125,6 +1201,7 @@ def main():
         ca_cert=args.ca_cert,
         ca_key=args.ca_key,
         capture=capture,
+        mitm_ports=mitm_ports,
     )
 
     try:
