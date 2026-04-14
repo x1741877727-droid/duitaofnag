@@ -45,7 +45,8 @@ class Phase(str, Enum):
 # ====================================================================
 
 GAME_PACKAGE = "com.tencent.tmgp.pubgmhd"
-ACCELERATOR_PACKAGE = "com.tencent.lhjsqxfb"  # 六花加速器 (待确认)
+ACCELERATOR_PACKAGE = "com.fightmaster.vpn"
+PROXY_API_URL = "http://111.170.170.149:9901"  # gameproxy HTTP API
 
 
 class SingleInstanceRunner:
@@ -93,87 +94,87 @@ class SingleInstanceRunner:
     # ================================================================
 
     async def phase_accelerator(self) -> bool:
-        """启动加速器并确认连接
+        """启动 FightMaster VPN 并确认连接
 
-        优化策略：
-        1. 先检查 tun0 接口 + wget 连通性（<1秒），已连接直接跳过
-        2. 没连接才启动加速器 app + 点击连接
-        3. 验证用 tun0 + wget，不打开浏览器
+        通过 ADB 广播控制，不需要 UI 交互：
+        1. 先检查 tun0 是否已连接（<100ms）
+        2. 没连接则发 START 广播
+        3. 等待 tun0 UP + RX > 0
         """
         self.phase = Phase.ACCELERATOR
 
-        # ── 快速检查：VPN 是否已连接 ──
+        # 快速检查：VPN 是否已连接
         if await self._check_vpn_connected():
-            logger.info("[阶段0] 加速器已连接 ✓ 跳过启动")
+            logger.info("[阶段0] FightMaster 已连接 ✓ 跳过启动")
             return True
 
-        # ── 需要启动加速器 ──
+        # 启动 FightMaster VPN
         for retry in range(3):
             if retry > 0:
                 logger.info(f"[阶段0] 第{retry+1}次重试")
-                await self.adb.stop_app(ACCELERATOR_PACKAGE)
-                await asyncio.sleep(1)
+                await self._stop_vpn()
+                await asyncio.sleep(2)
 
-            if not await self._start_accelerator():
-                continue
+            await self._start_vpn()
 
-            # 等待 VPN 连接建立
             if await self._wait_vpn_connected(timeout=15):
-                logger.info("[阶段0] 加速器连接成功 ✓")
-                await self.adb.key_event("KEYCODE_HOME")
-                await asyncio.sleep(0.3)
+                logger.info("[阶段0] FightMaster 连接成功 ✓")
                 return True
 
-        logger.error("[阶段0] 加速器3次重试均失败")
+        logger.error("[阶段0] FightMaster 3次重试均失败")
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 是否已连接且隧道通畅（~100ms）
+        """检查 VPN 是否已连接 — 通过 gameproxy API 查询（<50ms）
 
-        两层检测：
-        1. VpnService 是否在运行（APP 层面连接）
-        2. tun0 RX > 0（隧道层面有数据回来）
-
-        假连接状态：VpnService 在跑但 tun0 RX=0（发了数据收不到回复）
+        优先查服务端 API（最准确），失败则回退到本地 tun0 检查。
         """
+        import urllib.request
+        import json
+
+        # 方式1：查 gameproxy API（服务端真实状态）
+        try:
+            loop = asyncio.get_event_loop()
+            raw_adb = getattr(self.adb, '_adb', self.adb)
+
+            # 获取模拟器的出口 IP（通过 ADB 查网络接口）
+            def _query_api():
+                try:
+                    req = urllib.request.Request(f"{PROXY_API_URL}/api/clients", method="GET")
+                    resp = urllib.request.urlopen(req, timeout=2)
+                    return json.loads(resp.read())
+                except Exception:
+                    return None
+
+            data = await loop.run_in_executor(None, _query_api)
+            if data and data.get("ok"):
+                clients = data.get("clients") or []
+                if len(clients) > 0:
+                    # 有任何客户端连接 = VPN 工作中
+                    self.dbg.log_vpn(True, f"API: {len(clients)} 个客户端连接")
+                    return True
+                else:
+                    self.dbg.log_vpn(False, "API: 无客户端连接")
+                    return False
+        except Exception as e:
+            logger.debug(f"[VPN] API 查询失败: {e}，回退到 tun0 检查")
+
+        # 方式2：回退 — 本地 tun0 检查
         import re
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
-
-        # 1. VpnService 是否在运行
-        output = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell",
-            f"dumpsys activity services {ACCELERATOR_PACKAGE}"
-        )
-        if "VpnService" not in output:
-            self.dbg.log_vpn(False, "VpnService 未运行")
-            return False
-
-        # 2. tun0 是否有收到数据（RX > 0）
         tun_output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
         )
         if "UP" not in tun_output:
             self.dbg.log_vpn(False, "tun0 不存在")
             return False
-
         rx_match = re.search(r'RX bytes:(\d+)', tun_output)
-        rx_val = int(rx_match.group(1)) if rx_match else 0
-        if rx_val > 0:
-            self.dbg.log_vpn(True, f"tun0 RX={rx_val}")
+        if rx_match and int(rx_match.group(1)) > 0:
+            self.dbg.log_vpn(True, f"tun0 RX={rx_match.group(1)}")
             return True
 
-        # RX=0：可能是刚连上还没流量，等 2 秒重试
-        logger.debug("[VPN] tun0 RX=0，等待 2s 重试...")
-        await asyncio.sleep(2)
-        tun_output2 = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
-        )
-        rx_match2 = re.search(r'RX bytes:(\d+)', tun_output2)
-        if rx_match2 and int(rx_match2.group(1)) > 0:
-            return True
-
-        logger.warning("[VPN] VpnService 运行但 tun0 RX 持续为 0 → 隧道未通（假连接）")
+        self.dbg.log_vpn(False, "tun0 RX=0")
         return False
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
@@ -184,44 +185,26 @@ class SingleInstanceRunner:
                 return True
         return False
 
-    async def _start_accelerator(self) -> bool:
-        """启动加速器并等待连接成功"""
-        logger.info("[阶段0] 启动加速器")
-        await self.adb.start_app(ACCELERATOR_PACKAGE)
+    async def _start_vpn(self):
+        """通过 ADB 广播启动 FightMaster VPN"""
+        logger.info("[阶段0] 启动 FightMaster VPN")
+        loop = asyncio.get_event_loop()
+        raw_adb = getattr(self.adb, '_adb', self.adb)
+        await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            "am broadcast -a com.fightmaster.vpn.START "
+            "-n com.fightmaster.vpn/.CommandReceiver"
+        )
 
-        play_click_count = 0
-        for attempt in range(20):  # 最多 20 × 1.5s = 30 秒
-            await asyncio.sleep(1.5)
-            shot = await self.adb.screenshot()
-            if shot is None:
-                continue
-
-            # 检查是否已连接（可能加速器自动连接了）
-            status = self.matcher.is_accelerator_connected(shot)
-
-            if status is True:
-                logger.info(f"[阶段0] 加速器界面显示已连接 ({attempt+1}轮)")
-                return True
-
-            if status is False:
-                play_click_count += 1
-                if play_click_count >= 3:
-                    await self.adb.key_event("KEYCODE_BACK")
-                    play_click_count = 0
-                    continue
-
-                logger.info("[阶段0] 点击启动按钮")
-                play_hit = self.matcher.match_one(shot, "accelerator_play")
-                if play_hit:
-                    await self.adb.tap(play_hit.cx, play_hit.cy)
-                continue
-
-            # 不在主界面
-            await self.adb.key_event("KEYCODE_BACK")
-            play_click_count = 0
-
-        logger.error("[阶段0] 加速器启动超时")
-        return False
+    async def _stop_vpn(self):
+        """通过 ADB 广播停止 FightMaster VPN"""
+        loop = asyncio.get_event_loop()
+        raw_adb = getattr(self.adb, '_adb', self.adb)
+        await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            "am broadcast -a com.fightmaster.vpn.STOP "
+            "-n com.fightmaster.vpn/.CommandReceiver"
+        )
 
     # ================================================================
     # 阶段 1: 启动游戏
