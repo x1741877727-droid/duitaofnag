@@ -58,9 +58,9 @@ class DebugLogger:
         name = f"{ts}_{self._current_phase}_{self._current_step}"
         if tag:
             name += f"_{tag}"
-        name += f"_{self._screenshot_count}.png"
+        name += f"_{self._screenshot_count}.jpg"
         path = os.path.join(self._run_dir, name)
-        cv2.imwrite(path, shot)
+        cv2.imwrite(path, shot, [cv2.IMWRITE_JPEG_QUALITY, 50])
         return path
 
     def log_ocr(self, hits: list, roi_desc: str = "全图"):

@@ -700,13 +700,25 @@ class MultiRunnerService:
             "running": self._running,
         }
 
+    # 截图缓存：{instance_index: (timestamp, jpeg_bytes)}
+    _screenshot_cache: dict[int, tuple[float, bytes]] = {}
+    _SCREENSHOT_CACHE_TTL = 2.0  # 秒
+
     async def get_screenshot(self, instance_index: int,
                              adb_path: str = "") -> Optional[bytes]:
         """获取指定实例截图，返回 JPEG bytes
 
-        自动化运行中 → 用 runner 的 ADB（可能是 minicap）
+        2秒内重复请求返回缓存，避免多个前端请求同时触发 screencap。
+        自动化运行中 → 用 runner 的 ADB（可能是 minicap，~0ms）
         未运行 → 临时建 ADB 连接截图
         """
+        # 检查缓存
+        cached = self._screenshot_cache.get(instance_index)
+        if cached:
+            ts, jpg = cached
+            if time.time() - ts < self._SCREENSHOT_CACHE_TTL:
+                return jpg
+
         raw_adb = None
 
         # 优先用正在运行的 runner（有 minicap 流）
@@ -726,8 +738,12 @@ class MultiRunnerService:
         if shot is None:
             return None
 
-        _, buf = cv2.imencode(".jpg", shot, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        return buf.tobytes()
+        _, buf = cv2.imencode(".jpg", shot, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        jpg = buf.tobytes()
+
+        # 写入缓存
+        self._screenshot_cache[instance_index] = (time.time(), jpg)
+        return jpg
 
     async def _snapshot_loop(self):
         """每秒推送一次全量快照"""
