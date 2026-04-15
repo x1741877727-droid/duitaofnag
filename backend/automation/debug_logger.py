@@ -70,6 +70,30 @@ class DebugLogger:
         texts = [(h.text, h.cx, h.cy) for h in hits]
         logger.info(f"  OCR [{roi_desc}] {len(hits)}个结果: {texts}")
 
+    def log_ocr_annotated(self, shot: np.ndarray, hits: list,
+                          tag: str = "", roi_desc: str = "全图") -> str:
+        """保存标注截图：在原图上画出每个 OCR 命中的位置和文字
+
+        用于后续分析 ROI 区域。每个命中画一个圆点 + 文字标签。
+        """
+        if not self.enabled or shot is None or not hits:
+            return ""
+        annotated = shot.copy()
+        for h in hits:
+            cv2.circle(annotated, (h.cx, h.cy), 6, (0, 255, 0), -1)
+            cv2.putText(annotated, h.text, (h.cx + 8, h.cy - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        self._screenshot_count += 1
+        ts = datetime.now().strftime("%H%M%S")
+        name = f"{ts}_ocr_{roi_desc}"
+        if tag:
+            name += f"_{tag}"
+        name += f"_{self._screenshot_count}.jpg"
+        path = os.path.join(self._run_dir, name)
+        cv2.imwrite(path, annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        self.log_ocr(hits, roi_desc)
+        return path
+
     def log_match(self, keyword: str, hit, fuzzy: bool = False):
         """记录关键词匹配成功"""
         if not self.enabled:

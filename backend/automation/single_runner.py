@@ -16,7 +16,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .adb_lite import ADBController
+from .adb_lite import ADBController, phash, phash_distance
 from .screen_matcher import MatchHit, ScreenMatcher
 from .popup_dismisser import PopupDismisser
 from .ocr_dismisser import OcrDismisser
@@ -75,7 +75,18 @@ class SingleInstanceRunner:
         self.popup_dismisser = PopupDismisser(matcher)
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
+        self._last_phash: int = 0  # 帧差跳过：上一帧的 pHash
         self.dbg = DebugLogger(enabled=bool(log_dir), save_dir=log_dir or "logs")
+
+    def _frame_changed(self, shot: np.ndarray, threshold: int = 4) -> bool:
+        """pHash 帧差检测：画面没变返回 False，跳过 OCR"""
+        h = phash(shot)
+        dist = phash_distance(h, self._last_phash)
+        self._last_phash = h
+        if dist < threshold:
+            logger.debug(f"[帧差] 跳过 OCR (距离={dist})")
+            return False
+        return True
 
     @property
     def phase(self) -> Phase:
@@ -359,15 +370,18 @@ class SingleInstanceRunner:
                 self.dbg.log_screenshot(shot, tag="game_loaded")
                 return True
 
+            # 帧差跳过：画面没变就不跑 OCR
+            if not self._frame_changed(shot):
+                continue
+
             # 用OCR检测当前画面
             hits = self.ocr_dismisser.ocr_screen(shot)
             all_text = " ".join(h.text for h in hits)
             logger.info(f"[阶段1] 加载中R{attempt+1}: OCR={all_text[:80]}")
 
-            # 每5次保存一次截图+OCR，避免文件过多
+            # 每5次保存标注截图（OCR命中位置可视化，用于定 ROI）
             if (attempt + 1) % 5 == 0:
-                self.dbg.log_screenshot(shot, tag=f"loading_R{attempt+1}")
-                self.dbg.log_ocr(hits)
+                self.dbg.log_ocr_annotated(shot, hits, tag=f"loading_R{attempt+1}", roi_desc="加载检测")
 
             # 检测到大厅标志或弹窗标志 → 加载完成
             if any(kw in all_text for kw in ["开始游戏", "公告", "活动", "更新公告", "立即前往"]):

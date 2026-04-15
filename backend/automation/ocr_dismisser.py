@@ -386,7 +386,17 @@ class OcrDismisser:
                 await asyncio.sleep(0.3)  # 短等，快速二次确认
                 continue
 
-            # ━━ 慢速路径: 需要OCR分析 ━━
+            # ━━ 慢速路径: 需要OCR分析（帧差跳过）━━
+            from .adb_lite import phash, phash_distance
+            h = phash(shot)
+            if not hasattr(self, '_last_ph'):
+                self._last_ph = 0
+            if phash_distance(h, self._last_ph) < 4:
+                logger.debug(f"[R{rnd+1}] 帧差跳过 OCR")
+                await asyncio.sleep(0.5)
+                continue
+            self._last_ph = h
+
             state = self.detect_state(shot, matcher)
             logger.info(f"[R{rnd+1}] 状态: {state.value}")
 

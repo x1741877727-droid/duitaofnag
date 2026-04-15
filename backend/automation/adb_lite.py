@@ -372,3 +372,30 @@ class ADBController:
     async def _async_cmd(self, *args) -> str:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._cmd, *args)
+
+
+# ====================================================================
+# pHash 帧差检测
+# ====================================================================
+
+def phash(img: np.ndarray) -> int:
+    """计算感知哈希（64bit），用于快速判断画面是否变化
+
+    缩小到 8x8 灰度 → DCT → 取低频 → 生成 64bit 哈希。~0.3ms。
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    resized = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
+    dct = cv2.dct(np.float32(resized))
+    dct_low = dct[:8, :8]
+    med = np.median(dct_low)
+    h = 0
+    for i in range(8):
+        for j in range(8):
+            if dct_low[i, j] > med:
+                h |= 1 << (i * 8 + j)
+    return h
+
+
+def phash_distance(h1: int, h2: int) -> int:
+    """两个 pHash 的汉明距离（不同 bit 数）"""
+    return bin(h1 ^ h2).count('1')
