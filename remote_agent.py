@@ -1,102 +1,80 @@
 """
-Remote Agent — 远程命令执行代理
-让 Claude 通过 HTTP API 远程帮 Windows 用户执行安装/调试命令
+Remote Agent v2 — 远程命令执行代理
+
+改进:
+  - 持久 token (存 .remote_agent_token.txt，重启不变，Claude 记一次即可)
+  - 自动启动 cloudflared，解析公网 URL
+  - WebSocket 流式输出 + 内嵌 Web 终端 UI
+  - 无命令白名单，token 即权限
 
 启动:
   python remote_agent.py
-  (会自动生成密码并打印)
 
-通过 cloudflared 暴露:
-  cloudflared tunnel --url http://localhost:9100
+Web UI:
+  http://localhost:9100/ui?token=<TOKEN>
 
-安全机制:
-  - 必须带密码 (header X-Auth)
-  - 命令白名单
-  - 危险关键词黑名单
-  - 所有命令记日志到 remote_agent.log
+Claude 获取当前公网 URL:
+  GET http://192.168.0.102:9100/  →  cf_url 字段
 """
 
 import asyncio
 import json
 import logging
 import os
+import re
 import secrets
-import shlex
 import subprocess
 import sys
 import time
+import threading
+import socket
 from datetime import datetime
 from pathlib import Path
 
 try:
-    from fastapi import FastAPI, Header, HTTPException, Request
-    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+    from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, HTMLResponse
     from pydantic import BaseModel
     import uvicorn
 except ImportError:
-    print("请先安装 FastAPI:")
-    print("  pip install fastapi uvicorn")
+    print("请先安装依赖:")
+    print("  pip install fastapi 'uvicorn[standard]'")
     sys.exit(1)
-
 
 # =====================
 # 配置
 # =====================
 
 PORT = 9100
-WORK_DIR = Path.home()  # 默认工作目录: 用户主目录
-
-# 命令白名单：只允许这些可执行文件（程序名）
-ALLOWED_COMMANDS = {
-    "git", "python", "pip", "pip3", "python3",
-    "node", "npm", "npx", "yarn",
-    "cd", "dir", "ls", "type", "cat", "echo", "where", "which",
-    "tasklist", "chcp", "set",
-    "cloudflared",
-    "powershell",  # 用于一些特殊查询
-    "adb",  # Android 调试，用于 logcat / install / shell
-    "findstr", "find",  # Windows/通用 文本过滤
-    "more",  # 分页查看
-}
-
-# 危险关键词（命令中包含就拒绝）
-DANGEROUS_PATTERNS = [
-    "format ", "del /", "rmdir /s", "rm -rf", "rm -r",
-    ":(){", "shutdown", "restart-computer",
-    "reg delete", "reg add hklm",
-    "diskpart", "fdisk", "mkfs",
-    "net user", "net localgroup",
-    " | curl ", " | wget ", "curl | sh", "wget | sh",
-    "iex(", "iex ", "invoke-expression",
-    "&&del", ";del", "&del",
-    "/format", "/fs:ntfs",
-]
-
-# 命令最大执行时间
-COMMAND_TIMEOUT = 600  # 10 分钟（pip install 可能很久）
+WORK_DIR = Path.home()
+TOKEN_FILE = Path(__file__).parent / ".remote_agent_token.txt"
+COMMAND_TIMEOUT = 600  # 10 分钟
 
 # =====================
-# 状态
+# 持久 Token
 # =====================
 
-PASSWORD = secrets.token_urlsafe(16)  # 启动时生成的随机密码
+def _load_or_create_token() -> str:
+    if TOKEN_FILE.exists():
+        t = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if len(t) >= 16:
+            return t
+    t = secrets.token_urlsafe(16)
+    TOKEN_FILE.write_text(t, encoding="utf-8")
+    return t
 
-# 把密码写到磁盘，方便远程获取（避免你看图打字）
-try:
-    _pwd_file = Path(__file__).parent / ".remote_agent_password.txt"
-    _pwd_file.write_text(PASSWORD, encoding="utf-8")
-except Exception:
-    pass
+TOKEN = _load_or_create_token()
 START_TIME = time.time()
-COMMAND_HISTORY: list[dict] = []
 CURRENT_DIR = WORK_DIR
+CLOUDFLARE_URL = ""
+HOSTNAME = socket.gethostname()
+COMMAND_HISTORY: list[dict] = []
 
 # =====================
 # 日志
 # =====================
 
 LOG_FILE = Path(__file__).parent / "remote_agent.log"
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -107,95 +85,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # =====================
-# 安全检查
+# cloudflared 自动启动 + 注册
 # =====================
 
-def is_command_allowed(cmd: str) -> tuple[bool, str]:
-    """检查命令是否允许执行"""
-    cmd_lower = cmd.lower().strip()
-
-    if not cmd_lower:
-        return False, "空命令"
-
-    # 检查危险关键词
-    for pattern in DANGEROUS_PATTERNS:
-        if pattern in cmd_lower:
-            return False, f"包含危险关键词: {pattern.strip()}"
-
-    # 提取主程序
+def _start_cloudflared():
+    global CLOUDFLARE_URL
     try:
-        parts = shlex.split(cmd, posix=False)
-    except ValueError:
-        parts = cmd.split()
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        proc = subprocess.Popen(
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{PORT}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            creationflags=flags,
+        )
+        logger.info("cloudflared 启动中，等待公网 URL...")
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace")
+            m = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', line)
+            if m:
+                CLOUDFLARE_URL = m.group()
+                logger.info(f"Cloudflare URL: {CLOUDFLARE_URL}")
+                print(f"\n  公网 URL: {CLOUDFLARE_URL}")
+                print(f"  Web UI:  {CLOUDFLARE_URL}/ui?token={TOKEN}\n")
+                break
+        proc.wait()
+    except FileNotFoundError:
+        logger.warning("cloudflared 未安装，跳过（仅局域网可用）")
+    except Exception as e:
+        logger.warning(f"cloudflared 启动失败: {e}")
 
-    if not parts:
-        return False, "无法解析命令"
-
-    main_cmd = parts[0].lower()
-    # 去掉路径前缀和扩展名
-    main_cmd = os.path.basename(main_cmd).replace(".exe", "").replace(".bat", "").replace(".cmd", "")
-
-    if main_cmd not in ALLOWED_COMMANDS:
-        return False, f"命令 '{main_cmd}' 不在白名单 (允许: {', '.join(sorted(ALLOWED_COMMANDS))})"
-
-    return True, ""
-
-
-def check_auth(x_auth: str | None):
-    """验证密码"""
-    if not x_auth or x_auth != PASSWORD:
-        raise HTTPException(status_code=401, detail="密码错误")
-
+threading.Thread(target=_start_cloudflared, daemon=True).start()
 
 # =====================
-# 命令执行
+# 命令执行 (无白名单)
 # =====================
 
 async def run_command(cmd: str, cwd: str | None = None) -> dict:
-    """异步执行命令"""
     global CURRENT_DIR
-
     if cwd is None:
         cwd = str(CURRENT_DIR)
 
-    # 处理 cd 命令（特殊处理，因为 subprocess 不会改主进程目录）
-    cmd_stripped = cmd.strip()
-    if cmd_stripped.lower().startswith("cd "):
-        target = cmd_stripped[3:].strip().strip('"').strip("'")
-        # 处理 cd /d X:\xxx
+    # cd 特殊处理（subprocess 不影响主进程目录）
+    s = cmd.strip()
+    if s.lower().startswith("cd "):
+        target = s[3:].strip().strip('"').strip("'")
         if target.lower().startswith("/d "):
             target = target[3:].strip()
         try:
-            new_path = (Path(cwd) / target).resolve() if not os.path.isabs(target) else Path(target).resolve()
-            if not new_path.exists():
-                return {
-                    "ok": False,
-                    "stdout": "",
-                    "stderr": f"目录不存在: {new_path}",
-                    "returncode": 1,
-                    "cwd": cwd,
-                    "duration_ms": 0,
-                }
-            CURRENT_DIR = new_path
-            return {
-                "ok": True,
-                "stdout": f"已切换目录到: {new_path}",
-                "stderr": "",
-                "returncode": 0,
-                "cwd": str(new_path),
-                "duration_ms": 0,
-            }
+            new = (Path(cwd) / target).resolve() if not os.path.isabs(target) else Path(target).resolve()
+            if not new.exists():
+                return {"ok": False, "stdout": "", "stderr": f"目录不存在: {new}",
+                        "returncode": 1, "cwd": cwd, "duration_ms": 0}
+            CURRENT_DIR = new
+            return {"ok": True, "stdout": f"已切换到: {new}", "stderr": "",
+                    "returncode": 0, "cwd": str(new), "duration_ms": 0}
         except Exception as e:
-            return {
-                "ok": False,
-                "stdout": "",
-                "stderr": str(e),
-                "returncode": 1,
-                "cwd": cwd,
-                "duration_ms": 0,
-            }
+            return {"ok": False, "stdout": "", "stderr": str(e),
+                    "returncode": 1, "cwd": cwd, "duration_ms": 0}
 
     start = time.time()
     try:
@@ -205,76 +151,169 @@ async def run_command(cmd: str, cwd: str | None = None) -> dict:
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
-
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=COMMAND_TIMEOUT,
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return {
-                "ok": False,
-                "stdout": "",
-                "stderr": f"命令超时 ({COMMAND_TIMEOUT}s)",
-                "returncode": -1,
-                "cwd": cwd,
-                "duration_ms": int((time.time() - start) * 1000),
-            }
+            return {"ok": False, "stdout": "", "stderr": f"超时 ({COMMAND_TIMEOUT}s)",
+                    "returncode": -1, "cwd": cwd, "duration_ms": int((time.time()-start)*1000)}
 
-        duration_ms = int((time.time() - start) * 1000)
-
-        # 尝试用多种编码解码（Windows 中文环境常见）
-        def decode(data: bytes) -> str:
+        def decode(b: bytes) -> str:
             for enc in ("utf-8", "gbk", "gb2312"):
                 try:
-                    return data.decode(enc)
+                    return b.decode(enc)
                 except UnicodeDecodeError:
                     continue
-            return data.decode("utf-8", errors="replace")
+            return b.decode("utf-8", errors="replace")
 
         return {
             "ok": proc.returncode == 0,
             "stdout": decode(stdout),
             "stderr": decode(stderr),
             "returncode": proc.returncode,
-            "cwd": cwd,
-            "duration_ms": duration_ms,
+            "cwd": str(CURRENT_DIR),
+            "duration_ms": int((time.time()-start)*1000),
         }
     except Exception as e:
-        return {
-            "ok": False,
-            "stdout": "",
-            "stderr": f"执行异常: {e}",
-            "returncode": -1,
-            "cwd": cwd,
-            "duration_ms": int((time.time() - start) * 1000),
-        }
+        return {"ok": False, "stdout": "", "stderr": f"执行异常: {e}",
+                "returncode": -1, "cwd": cwd, "duration_ms": int((time.time()-start)*1000)}
 
+# =====================
+# 内嵌 Web 终端 UI
+# =====================
+
+_UI_HTML = r"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Remote Agent</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#e6edf3;font-family:'Cascadia Code','Consolas',monospace;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+#hdr{padding:10px 16px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.htitle{color:#58a6ff;font-size:14px;font-weight:600}
+.hcwd{color:#8b949e;font-size:11px;margin-left:12px}
+#cf-url{font-size:11px;color:#3fb950;margin-right:10px}
+#ws-st{font-size:11px;color:#8b949e}
+#term{flex:1;overflow-y:auto;padding:12px 16px;font-size:13px;line-height:1.6}
+.ln{white-space:pre-wrap;word-break:break-all}
+.cmd-ln{color:#79c0ff}.cmd-ln::before{content:"❯ ";color:#3fb950}
+.out{color:#e6edf3}.err{color:#ff7b72}.sys{color:#a371f7;font-style:italic}
+.ok{color:#3fb950}.fail{color:#ff7b72}
+#inp{padding:8px 16px;background:#161b22;border-top:1px solid #30363d;display:flex;gap:8px;align-items:center;flex-shrink:0}
+#cmd{flex:1;background:transparent;border:none;outline:none;color:#e6edf3;font-family:inherit;font-size:13px}
+#run{background:#238636;border:none;color:#fff;padding:5px 14px;border-radius:6px;cursor:pointer;font-size:12px}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="hdr">
+  <div style="display:flex;align-items:center">
+    <span class="htitle">⚡ Remote Agent</span>
+    <span class="hcwd" id="cwd-d">~</span>
+  </div>
+  <div style="display:flex;align-items:center">
+    <span id="cf-url"></span>
+    <span id="ws-st">connecting...</span>
+  </div>
+</div>
+<div id="term"></div>
+<div id="inp">
+  <span style="color:#3fb950;font-size:13px;white-space:nowrap">$&nbsp;</span>
+  <input id="cmd" type="text" placeholder="输入命令..." autocomplete="off" spellcheck="false">
+  <button id="run">运行</button>
+</div>
+<script>
+const TOKEN=new URLSearchParams(location.search).get('token')||'';
+const term=document.getElementById('term');
+const cmdEl=document.getElementById('cmd');
+const cwdEl=document.getElementById('cwd-d');
+const wsStEl=document.getElementById('ws-st');
+const cfEl=document.getElementById('cf-url');
+const hist=[];let hi=-1;
+
+function addLine(text,cls){
+  if(!text&&cls!=='ok'&&cls!=='fail')return;
+  const d=document.createElement('div');
+  d.className='ln '+cls;
+  d.textContent=text;
+  term.appendChild(d);
+  term.scrollTop=term.scrollHeight;
+}
+
+function send(cmd){
+  if(!cmd.trim())return;
+  hist.unshift(cmd);hi=-1;
+  addLine(cmd,'cmd-ln');
+  if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({cmd}));
+  else addLine('WebSocket 未连接','err');
+  cmdEl.value='';
+}
+
+document.getElementById('run').onclick=()=>send(cmdEl.value);
+cmdEl.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){send(cmdEl.value);return;}
+  if(e.key==='ArrowUp'){hi=Math.min(hi+1,hist.length-1);cmdEl.value=hist[hi]||'';e.preventDefault();}
+  if(e.key==='ArrowDown'){hi=Math.max(hi-1,-1);cmdEl.value=hi<0?'':hist[hi];e.preventDefault();}
+});
+
+let ws;
+function connect(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws/exec?token='+encodeURIComponent(TOKEN));
+  ws.onopen=()=>{
+    wsStEl.textContent='已连接';wsStEl.style.color='#3fb950';
+    addLine('已连接到 Remote Agent','sys');
+    ws.send(JSON.stringify({cmd:'__status__'}));
+  };
+  ws.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==='out'){const t=m.data.replace(/\r\n|\r/g,'\n');t.split('\n').forEach(l=>addLine(l,'out'));}
+    else if(m.type==='err'){const t=m.data.replace(/\r\n|\r/g,'\n');t.split('\n').forEach(l=>addLine(l,'err'));}
+    else if(m.type==='done')addLine(m.code===0?'✓ 完成':'✗ 退出码 '+m.code,m.code===0?'ok':'fail');
+    else if(m.type==='status'){cwdEl.textContent=m.cwd||'~';if(m.cf_url){cfEl.textContent='🌐 '+m.cf_url+' |';}}
+  };
+  ws.onerror=()=>{wsStEl.textContent='错误';wsStEl.style.color='#ff7b72';};
+  ws.onclose=()=>{wsStEl.textContent='断开，3s后重连';wsStEl.style.color='#f0883e';setTimeout(connect,3000);};
+}
+connect();
+</script>
+</body>
+</html>"""
 
 # =====================
 # FastAPI 应用
 # =====================
 
-app = FastAPI(title="Remote Agent", docs_url="/docs")
+app = FastAPI(title="Remote Agent v2", docs_url=None, redoc_url=None)
 
 
 class ExecRequest(BaseModel):
     cmd: str
     cwd: str | None = None
+    timeout: int | None = None
+
+
+def check_auth(x_auth: str | None):
+    if not x_auth or x_auth != TOKEN:
+        raise HTTPException(status_code=401, detail="Token 错误")
 
 
 @app.get("/")
 async def root():
     return {
         "name": "Remote Agent",
-        "version": "1.0",
+        "version": "2.0",
         "uptime": int(time.time() - START_TIME),
-        "current_dir": str(CURRENT_DIR),
+        "hostname": HOSTNAME,
         "platform": sys.platform,
         "python": sys.version,
-        "hint": "需要 X-Auth header 才能执行命令",
+        "current_dir": str(CURRENT_DIR),
+        "cf_url": CLOUDFLARE_URL,
+        "ui": f"http://localhost:{PORT}/ui?token={TOKEN}",
+        "hint": "需要 X-Auth header 执行命令",
     }
 
 
@@ -283,25 +322,17 @@ async def health():
     return {"ok": True, "uptime": int(time.time() - START_TIME)}
 
 
+@app.get("/ui", response_class=HTMLResponse)
+async def ui():
+    return HTMLResponse(_UI_HTML)
+
+
 @app.post("/exec")
 async def execute(req: ExecRequest, x_auth: str | None = Header(None)):
-    """执行命令"""
     check_auth(x_auth)
-
-    allowed, reason = is_command_allowed(req.cmd)
-    if not allowed:
-        logger.warning(f"拒绝命令: {req.cmd} ({reason})")
-        return JSONResponse(
-            status_code=403,
-            content={"ok": False, "error": f"命令被拒绝: {reason}", "cmd": req.cmd},
-        )
-
-    logger.info(f"执行: {req.cmd} (cwd={req.cwd or CURRENT_DIR})")
-
+    logger.info(f"exec: {req.cmd}")
     result = await run_command(req.cmd, req.cwd)
     result["cmd"] = req.cmd
-
-    # 记录历史
     COMMAND_HISTORY.append({
         "timestamp": time.time(),
         "cmd": req.cmd,
@@ -310,113 +341,110 @@ async def execute(req: ExecRequest, x_auth: str | None = Header(None)):
     })
     if len(COMMAND_HISTORY) > 100:
         COMMAND_HISTORY.pop(0)
-
     return result
 
 
-@app.get("/cwd")
-async def get_cwd(x_auth: str | None = Header(None)):
-    """获取当前工作目录"""
+@app.get("/history")
+async def get_history(x_auth: str | None = Header(None)):
     check_auth(x_auth)
-    return {"cwd": str(CURRENT_DIR)}
-
-
-@app.post("/cwd")
-async def set_cwd(path: str, x_auth: str | None = Header(None)):
-    """设置工作目录"""
-    check_auth(x_auth)
-    global CURRENT_DIR
-    new_path = Path(path).resolve()
-    if not new_path.exists():
-        raise HTTPException(status_code=404, detail=f"目录不存在: {new_path}")
-    CURRENT_DIR = new_path
-    return {"ok": True, "cwd": str(CURRENT_DIR)}
-
-
-@app.get("/ls")
-async def list_dir(path: str | None = None, x_auth: str | None = Header(None)):
-    """列出目录内容"""
-    check_auth(x_auth)
-    target = Path(path) if path else CURRENT_DIR
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="目录不存在")
-    try:
-        items = []
-        for entry in sorted(target.iterdir()):
-            try:
-                stat = entry.stat()
-                items.append({
-                    "name": entry.name,
-                    "type": "dir" if entry.is_dir() else "file",
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                })
-            except OSError:
-                pass
-        return {"path": str(target.resolve()), "items": items}
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="无权限访问")
+    return {"history": COMMAND_HISTORY[-50:]}
 
 
 @app.get("/read")
 async def read_file(path: str, max_size: int = 1024 * 1024,
                     x_auth: str | None = Header(None)):
-    """读取小文件内容（最大 1MB）"""
     check_auth(x_auth)
     p = Path(path) if os.path.isabs(path) else CURRENT_DIR / path
     if not p.exists():
-        raise HTTPException(status_code=404, detail="文件不存在")
+        raise HTTPException(404, "文件不存在")
     if p.stat().st_size > max_size:
-        raise HTTPException(status_code=413, detail=f"文件超过 {max_size} bytes")
-    try:
-        for enc in ("utf-8", "gbk", "gb2312"):
-            try:
-                return PlainTextResponse(p.read_text(encoding=enc))
-            except UnicodeDecodeError:
-                continue
-        return PlainTextResponse(p.read_bytes().decode("utf-8", errors="replace"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(413, f"文件超过 {max_size} bytes")
+    for enc in ("utf-8", "gbk", "gb2312"):
+        try:
+            return PlainTextResponse(p.read_text(encoding=enc))
+        except UnicodeDecodeError:
+            continue
+    return PlainTextResponse(p.read_bytes().decode("utf-8", errors="replace"))
 
 
 @app.get("/download")
-async def download_file(path: str, x_auth: str | None = Header(None)):
-    """下载二进制文件"""
+async def download(path: str, x_auth: str | None = Header(None)):
     check_auth(x_auth)
     p = Path(path) if os.path.isabs(path) else CURRENT_DIR / path
     if not p.exists() or not p.is_file():
-        raise HTTPException(status_code=404, detail="文件不存在")
+        raise HTTPException(404, "文件不存在")
     return FileResponse(p)
 
 
-@app.get("/history")
-async def get_history(x_auth: str | None = Header(None)):
-    """查看命令历史"""
-    check_auth(x_auth)
-    return {"history": COMMAND_HISTORY[-50:]}
+# =====================
+# WebSocket 流式终端
+# =====================
 
+@app.websocket("/ws/exec")
+async def ws_exec(ws: WebSocket, token: str = ""):
+    if token != TOKEN:
+        await ws.close(code=4001)
+        return
+    await ws.accept()
 
-@app.get("/info")
-async def system_info(x_auth: str | None = Header(None)):
-    """系统信息"""
-    check_auth(x_auth)
-    info = {
-        "platform": sys.platform,
-        "python": sys.version,
-        "python_path": sys.executable,
-        "cwd": str(CURRENT_DIR),
-        "home": str(Path.home()),
-        "uptime": int(time.time() - START_TIME),
-    }
+    async def send(msg: dict):
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
 
-    # 检查常用工具是否安装
-    tools = {}
-    for tool in ["git", "python", "pip", "node", "npm", "cloudflared"]:
-        result = await run_command(f"where {tool}" if sys.platform == "win32" else f"which {tool}")
-        tools[tool] = result["stdout"].strip().split("\n")[0] if result["ok"] else None
-    info["tools"] = tools
+    try:
+        while True:
+            data = await ws.receive_json()
+            cmd = data.get("cmd", "")
 
-    return info
+            if cmd == "__status__":
+                await send({"type": "status", "cwd": str(CURRENT_DIR), "cf_url": CLOUDFLARE_URL})
+                continue
+
+            if not cmd.strip():
+                continue
+
+            logger.info(f"[WS] {cmd}")
+
+            # cd 走同步路径
+            if cmd.strip().lower().startswith("cd "):
+                r = await run_command(cmd)
+                await send({"type": "out" if r["ok"] else "err",
+                            "data": r["stdout"] or r["stderr"]})
+                await send({"type": "done", "code": r["returncode"]})
+                await send({"type": "status", "cwd": str(CURRENT_DIR), "cf_url": CLOUDFLARE_URL})
+                continue
+
+            # 流式执行
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(CURRENT_DIR),
+                )
+
+                async def drain(pipe, mtype: str):
+                    while True:
+                        chunk = await pipe.read(4096)
+                        if not chunk:
+                            break
+                        await send({"type": mtype, "data": chunk.decode("utf-8", errors="replace")})
+
+                await asyncio.gather(drain(proc.stdout, "out"), drain(proc.stderr, "err"))
+                await proc.wait()
+                await send({"type": "done", "code": proc.returncode})
+                await send({"type": "status", "cwd": str(CURRENT_DIR), "cf_url": CLOUDFLARE_URL})
+
+            except Exception as e:
+                await send({"type": "err", "data": str(e)})
+                await send({"type": "done", "code": -1})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug(f"WS 断开: {e}")
 
 
 # =====================
@@ -424,39 +452,31 @@ async def system_info(x_auth: str | None = Header(None)):
 # =====================
 
 def main():
-    import socket
-
-    print()
-    print("=" * 70)
-    print("  Remote Agent 启动")
-    print("=" * 70)
-    print()
-    print(f"  端口: {PORT}")
-    print(f"  当前目录: {CURRENT_DIR}")
-    print(f"  日志: {LOG_FILE}")
-    print()
-    print("  ┌─────────────────────────────────────────────────────────────┐")
-    print(f"  │  密码 (发给 Claude): {PASSWORD}".ljust(70) + "│")
-    print("  └─────────────────────────────────────────────────────────────┘")
-    print()
-    print("  本地访问:")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
-        print(f"    http://127.0.0.1:{PORT}")
-        print(f"    http://{local_ip}:{PORT}  (局域网)")
     except Exception:
-        print(f"    http://127.0.0.1:{PORT}")
+        local_ip = "127.0.0.1"
+
     print()
-    print("  下一步:")
-    print("    1. 新开一个 CMD 窗口")
-    print("    2. 运行: cloudflared tunnel --url http://localhost:9100")
-    print("    3. 把 cloudflared 输出的 https URL + 上面的密码 都发给 Claude")
+    print("=" * 68)
+    print("  Remote Agent v2")
+    print("=" * 68)
     print()
+    print(f"  主机名:  {HOSTNAME}")
+    print(f"  局域网:  http://{local_ip}:{PORT}")
+    print(f"  Web UI:  http://{local_ip}:{PORT}/ui?token={TOKEN}")
+    print()
+    print(f"  ┌──────────────────────────────────────────────────────────┐")
+    tok_line = f"  │  Token: {TOKEN}"
+    print(tok_line.ljust(64) + "│")
+    print(f"  └──────────────────────────────────────────────────────────┘")
+    print()
+    print("  cloudflared 启动中... (公网 URL 稍后显示)")
     print("  按 Ctrl+C 停止")
-    print("=" * 70)
+    print("=" * 68)
     print()
 
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")

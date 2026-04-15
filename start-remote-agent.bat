@@ -1,30 +1,30 @@
 @echo off
 chcp 65001 >nul
-title Remote Agent
+title Remote Agent v2
 echo.
 echo ============================================================
-echo  Remote Agent 启动器
+echo  Remote Agent v2
 echo ============================================================
 echo.
 
-REM 1. 检查 fastapi 是否已安装
-python -c "import fastapi, uvicorn" 2>nul
+REM 检查并安装依赖
+python -c "import fastapi, uvicorn, websockets" 2>nul
 if errorlevel 1 (
-    echo [1/2] Installing FastAPI and uvicorn (one-time, 1-2 min)...
-    pip install fastapi uvicorn
+    echo [1/2] 安装依赖 (首次运行，约 1-2 分钟)...
+    pip install fastapi "uvicorn[standard]"
     if errorlevel 1 (
         echo.
-        echo [ERROR] FastAPI install failed
+        echo [ERROR] 安装失败，请手动运行: pip install fastapi "uvicorn[standard]"
         pause
         exit /b 1
     )
 ) else (
-    echo [1/2] FastAPI already installed
+    echo [1/2] 依赖已安装
 )
 
-REM 2. 启动 remote_agent.py
+REM 启动
 echo.
-echo [2/2] 启动 Remote Agent...
+echo [2/2] 启动 Remote Agent v2...
 echo.
 python remote_agent.py
 pause
