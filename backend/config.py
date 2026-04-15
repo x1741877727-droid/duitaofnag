@@ -129,19 +129,8 @@ class ConfigManager:
         self.accounts = [AccountConfig(**item) for item in data]
 
     def _create_default_accounts(self):
-        """生成默认 6 个账号配置模板"""
+        """首次运行创建空账号列表，由用户在设置页面自行分配"""
         self.accounts = []
-        for i in range(6):
-            group = "A" if i < 3 else "B"
-            role = "captain" if i in (0, 3) else "member"
-            self.accounts.append(AccountConfig(
-                qq=f"账号{i+1}",
-                nickname=f"玩家{i+1}",
-                game_id=f"ID{i+1}",
-                group=group,
-                role=role,
-                instance_index=i,
-            ))
         self.save_accounts()
 
 
