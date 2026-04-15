@@ -220,6 +220,12 @@ class MultiRunnerService:
 
             raw_adb = ADBController(serial, adb_path)
 
+            # 初始化 minicap 流式截图（失败则自动回退到 screencap）
+            if raw_adb.setup_minicap():
+                logger.info(f"[实例{idx}] minicap 流式截图就绪 ✓")
+            else:
+                logger.info(f"[实例{idx}] minicap 不可用，使用 screencap 回退")
+
             # 用 GuardedADB 包装：任何阶段截图时自动清除意外弹窗
             from .automation.ocr_dismisser import OcrDismisser
             dismisser = OcrDismisser(max_rounds=25)
@@ -587,6 +593,14 @@ class MultiRunnerService:
         for handler in self._log_handlers.values():
             auto_logger.removeHandler(handler)
         self._log_handlers.clear()
+
+        # 停止所有 minicap 流
+        for runner in self._runners.values():
+            adb = getattr(runner, 'adb', None)
+            raw = getattr(adb, '_adb', adb) if adb else None
+            mc = getattr(raw, '_minicap', None) if raw else None
+            if mc:
+                mc.stop()
 
         self._tasks.clear()
         self._runners.clear()
