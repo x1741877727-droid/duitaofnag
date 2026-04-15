@@ -86,8 +86,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =====================
-# cloudflared 自动启动 + 注册
+# cloudflared 自动启动 + beacon 上报
 # =====================
+
+BEACON_URL = "http://111.170.170.149:9901/api/beacon"
+
+def _post_beacon():
+    """把 cloudflared URL 上报到 gameproxy beacon，Claude 查一次就能找到"""
+    if not CLOUDFLARE_URL:
+        return
+    import urllib.request
+    data = json.dumps({
+        "hostname": HOSTNAME,
+        "url": CLOUDFLARE_URL,
+        "ui": f"{CLOUDFLARE_URL}/ui?token={TOKEN}",
+        "token": TOKEN,
+        "platform": sys.platform,
+    }).encode()
+    req = urllib.request.Request(BEACON_URL, data=data,
+                                  headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=5)
+        logger.info(f"beacon 上报成功: {CLOUDFLARE_URL}")
+    except Exception as e:
+        logger.debug(f"beacon 上报失败(可忽略): {e}")
 
 def _start_cloudflared():
     global CLOUDFLARE_URL
@@ -107,6 +129,7 @@ def _start_cloudflared():
                 logger.info(f"Cloudflare URL: {CLOUDFLARE_URL}")
                 print(f"\n  公网 URL: {CLOUDFLARE_URL}")
                 print(f"  Web UI:  {CLOUDFLARE_URL}/ui?token={TOKEN}\n")
+                _post_beacon()
                 break
         proc.wait()
     except FileNotFoundError:
