@@ -19,6 +19,7 @@ export function DeployView() {
   const [refreshing, setRefreshing] = useState(false)
   const [testingIdx, setTestingIdx] = useState<number | null>(null)
   const [expandedSquads, setExpandedSquads] = useState<Set<number>>(new Set([1, 2, 3]))
+  const [startingSquad, setStartingSquad] = useState<number | null>(null)
 
   useEffect(() => {
     loadEmulators()
@@ -115,13 +116,15 @@ export function DeployView() {
   }
 
   const handleStartSquad = async (squadId: number) => {
-    // 启动该大组所有在线实例
-    // TODO: 后端支持按大组启动，目前用全局启动
+    if (startingSquad !== null) return  // 防重复点击
+    setStartingSquad(squadId)
     try {
       const res = await fetch('/api/start', { method: 'POST' })
       const json = await res.json()
       if (json.ok) setIsRunning(true)
-    } catch {}
+    } catch {} finally {
+      setStartingSquad(null)
+    }
   }
 
   function toggleSquad(id: number) {
@@ -199,9 +202,13 @@ export function DeployView() {
                   size="sm"
                   className="gap-1.5 h-7 text-xs"
                   onClick={() => handleStartSquad(squad.squadId)}
+                  disabled={startingSquad !== null}
                 >
-                  <Play className="w-3 h-3" />
-                  启动大组
+                  {startingSquad === squad.squadId ? (
+                    <><RefreshCw className="w-3 h-3 animate-spin" />启动中...</>
+                  ) : (
+                    <><Play className="w-3 h-3" />启动大组</>
+                  )}
                 </Button>
               )}
             </div>

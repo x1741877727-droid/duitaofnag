@@ -237,7 +237,7 @@ def create_app(config: ConfigManager) -> FastAPI:
 
     @app.post("/api/start")
     async def start():
-        if service.running:
+        if service.running or service._starting:
             return {"ok": False, "error": "已在运行中"}
         config.load()
         try:

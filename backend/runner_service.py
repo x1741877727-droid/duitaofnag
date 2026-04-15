@@ -118,6 +118,7 @@ class MultiRunnerService:
         self._tasks: dict[int, asyncio.Task] = {}
         self._log_handlers: dict[int, WSLogHandler] = {}
         self._running = False
+        self._starting = False  # 防止重复启动（start_all 执行期间为 True）
         self._start_time: float = 0
         self._snapshot_task: Optional[asyncio.Task] = None
         self._ws_broadcast: Optional[Callable] = None
@@ -157,9 +158,10 @@ class MultiRunnerService:
 
     async def start_all(self, settings: Settings, accounts: list[AccountConfig]):
         """启动所有配置的实例"""
-        if self._running:
-            logger.warning("已经在运行中")
+        if self._running or self._starting:
+            logger.warning("已经在运行中或正在启动")
             return
+        self._starting = True
 
         self._running = True
         self._start_time = time.time()
@@ -266,6 +268,7 @@ class MultiRunnerService:
         # 启动状态快照定期推送
         self._snapshot_task = asyncio.create_task(self._snapshot_loop())
 
+        self._starting = False
         logger.info(f"已启动 {len(accounts)} 个实例")
         self._broadcast({"type": "log", "data": {
             "timestamp": time.time(), "instance": -1,
