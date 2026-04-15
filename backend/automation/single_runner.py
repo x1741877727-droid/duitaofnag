@@ -104,12 +104,16 @@ class SingleInstanceRunner:
         # 快速检查：VPN 是否已连接
         if await self._check_vpn_connected():
             logger.info("[阶段0] FightMaster 已连接 ✓ 跳过启动")
+            shot = await self.adb.screenshot()
+            self.dbg.log_screenshot(shot, tag="vpn_connected")
             return True
 
         # 先尝试广播启动（快速路径）
         await self._start_vpn()
         if await self._wait_vpn_connected(timeout=8):
             logger.info("[阶段0] FightMaster 广播启动成功 ✓")
+            shot = await self.adb.screenshot()
+            self.dbg.log_screenshot(shot, tag="vpn_connected")
             return True
 
         # 广播失败 → UI 回退（拉起界面点连接）
@@ -124,9 +128,13 @@ class SingleInstanceRunner:
 
             if await self._wait_vpn_connected(timeout=10):
                 logger.info("[阶段0] FightMaster UI 启动成功 ✓")
+                shot = await self.adb.screenshot()
+                self.dbg.log_screenshot(shot, tag="vpn_connected")
                 return True
 
         logger.error("[阶段0] FightMaster 所有方式均失败")
+        shot = await self.adb.screenshot()
+        self.dbg.log_screenshot(shot, tag="vpn_failed")
         return False
 
     async def _check_vpn_connected(self) -> bool:
@@ -348,6 +356,7 @@ class SingleInstanceRunner:
             # 模板快速检查大厅（~20ms，每轮都做）
             if self.matcher and self.matcher.is_at_lobby(shot):
                 logger.info("[阶段1] 游戏已在大厅（模板检测）")
+                self.dbg.log_screenshot(shot, tag="game_loaded")
                 return True
 
             # 用OCR检测当前画面
@@ -355,9 +364,15 @@ class SingleInstanceRunner:
             all_text = " ".join(h.text for h in hits)
             logger.info(f"[阶段1] 加载中R{attempt+1}: OCR={all_text[:80]}")
 
+            # 每5次保存一次截图+OCR，避免文件过多
+            if (attempt + 1) % 5 == 0:
+                self.dbg.log_screenshot(shot, tag=f"loading_R{attempt+1}")
+                self.dbg.log_ocr(hits)
+
             # 检测到大厅标志或弹窗标志 → 加载完成
             if any(kw in all_text for kw in ["开始游戏", "公告", "活动", "更新公告", "立即前往"]):
                 logger.info("[阶段1] 游戏加载完成，进入弹窗清理阶段")
+                self.dbg.log_screenshot(shot, tag="game_loaded")
                 return True
 
         logger.warning("[阶段1] 游戏加载超时(90s)")
@@ -404,7 +419,13 @@ class SingleInstanceRunner:
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = False
 
+        shot = await self.adb.screenshot()
+        self.dbg.log_screenshot(shot, tag="popups_before")
+
         result = await self.ocr_dismisser.dismiss_all(self.adb, self.matcher)
+
+        shot = await self.adb.screenshot()
+        self.dbg.log_screenshot(shot, tag="popups_after")
 
         # 恢复守卫
         if hasattr(self.adb, 'guard_enabled'):
@@ -477,6 +498,8 @@ class SingleInstanceRunner:
             return False
 
         logger.info(f"[阶段6] 面板已打开 ({len(hits)}个文字)")
+        self.dbg.log_screenshot(shot, tag="map_panel")
+        self.dbg.log_ocr(hits, roi_desc="地图面板")
         h_img, w = shot.shape[:2]
 
         # ── 一次性提取所有目标 ──
@@ -615,6 +638,9 @@ class SingleInstanceRunner:
         # 禁用守卫
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = False
+
+        shot = await self.adb.screenshot()
+        self.dbg.log_screenshot(shot, tag="team_create_start")
 
         ocr = OcrDismisser()
 
@@ -793,6 +819,8 @@ class SingleInstanceRunner:
             await asyncio.sleep(0.3)
 
         logger.info("[阶段4] 已关闭组队面板")
+        shot = await self.adb.screenshot()
+        self.dbg.log_screenshot(shot, tag="team_create_done")
         self._restore_guard()
         return game_scheme
 
@@ -854,6 +882,9 @@ class SingleInstanceRunner:
         raw_adb = getattr(self.adb, '_adb', self.adb)
         loop = asyncio.get_event_loop()
 
+        shot = await self.adb.screenshot()
+        self.dbg.log_screenshot(shot, tag="team_join_start")
+
         # 一条命令直接加入
         output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell",
@@ -873,6 +904,7 @@ class SingleInstanceRunner:
             for h in hits:
                 if "取消" in h.text and "准备" in h.text:
                     logger.info("[阶段5] 队员加入完成 ✓（检测到取消准备）")
+                    self.dbg.log_screenshot(shot, tag="team_join_done")
                     return True
             # 模板兜底
             if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7):
