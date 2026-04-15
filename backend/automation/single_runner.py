@@ -63,7 +63,7 @@ class SingleInstanceRunner:
         target_mode: str = "团队竞技",
         target_map: str = "狙击团竞",
         on_phase_change=None,  # 回调: (Phase) -> None
-        debug: bool = False,   # 启用详细调试日志
+        log_dir: str = "",     # 实例日志目录（空字符串=禁用调试日志）
     ):
         self.adb = adb
         self.matcher = matcher
@@ -75,7 +75,7 @@ class SingleInstanceRunner:
         self.popup_dismisser = PopupDismisser(matcher)
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
-        self.dbg = DebugLogger(enabled=debug)
+        self.dbg = DebugLogger(enabled=bool(log_dir), save_dir=log_dir or "logs")
 
     @property
     def phase(self) -> Phase:

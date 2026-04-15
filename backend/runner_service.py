@@ -124,6 +124,8 @@ class MultiRunnerService:
         self._ws_broadcast: Optional[Callable] = None
         self._team_schemes: dict[str, str] = {}  # group → game scheme URL
         self._team_events: dict[str, asyncio.Event] = {}  # group → Event (队员等待队长)
+        self._session_dir: str = ""
+        self._file_handler: Optional[logging.FileHandler] = None
 
     def set_broadcast(self, fn: Callable):
         """设置 WebSocket 广播函数（由 api.py 注入）"""
@@ -168,6 +170,28 @@ class MultiRunnerService:
         self._instances.clear()
         self._runners.clear()
         self._tasks.clear()
+
+        # 创建会话日志目录
+        from datetime import datetime
+        session_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._session_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "logs", session_name
+        )
+        os.makedirs(self._session_dir, exist_ok=True)
+
+        # 文件日志：所有 automation 日志写入 run.log
+        self._file_handler = logging.FileHandler(
+            os.path.join(self._session_dir, "run.log"),
+            encoding="utf-8"
+        )
+        self._file_handler.setLevel(logging.DEBUG)
+        self._file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S"
+        ))
+        logging.getLogger("backend.automation").addHandler(self._file_handler)
+        logger.info(f"会话日志: {self._session_dir}")
 
         # 解析 ADB 路径
         adb_path = settings.adb_path
@@ -239,11 +263,14 @@ class MultiRunnerService:
                     self._on_phase_change(instance_idx, phase)
                 return on_phase
 
+            instance_log_dir = os.path.join(self._session_dir, f"instance_{idx}")
+
             runner = SingleInstanceRunner(
                 adb=guarded_adb,
                 matcher=matcher,
                 role=account.role,
                 on_phase_change=make_phase_cb(idx),
+                log_dir=instance_log_dir,
             )
 
             self._runners[idx] = runner
@@ -604,6 +631,12 @@ class MultiRunnerService:
             mc = getattr(raw, '_minicap', None) if raw else None
             if mc:
                 mc.stop()
+
+        # 关闭会话文件日志
+        if self._file_handler:
+            logging.getLogger("backend.automation").removeHandler(self._file_handler)
+            self._file_handler.close()
+            self._file_handler = None
 
         self._tasks.clear()
         self._runners.clear()

@@ -30,18 +30,13 @@ class DebugLogger:
 
     def __init__(self, enabled: bool = True, save_dir: str = "logs"):
         self.enabled = enabled
-        self.save_dir = save_dir
+        self._run_dir = save_dir
         self._step_start = 0.0
         self._current_phase = ""
         self._current_step = ""
         self._screenshot_count = 0
 
         if enabled:
-            os.makedirs(save_dir, exist_ok=True)
-            # 每次运行创建一个子目录
-            self._run_dir = os.path.join(
-                save_dir, datetime.now().strftime("%Y%m%d_%H%M%S")
-            )
             os.makedirs(self._run_dir, exist_ok=True)
             logger.info(f"[调试日志] 保存目录: {self._run_dir}")
 
