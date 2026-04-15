@@ -700,27 +700,29 @@ class SingleInstanceRunner:
             self._restore_guard()
             return None
 
-        # ── 步骤2: 等面板出现，处理弹窗，点底部"组队码"tab ──
+        # ── 步骤2: 等面板出现，点底部"组队码"tab ──
+        # 只扫底部和中部 ROI，不做全屏 OCR
         tab_clicked = False
-        for attempt in range(10):
-            await asyncio.sleep(0.5)
+        await asyncio.sleep(0.8)  # 等面板动画
+        for attempt in range(5):
             shot = await self.adb.screenshot()
             if shot is None:
+                await asyncio.sleep(0.3)
                 continue
-            hits = ocr._ocr_all(shot)
-            all_text = " ".join(h.text for h in hits)
 
-            # 处理"使用组队码加入"弹窗
-            if any(OcrDismisser.fuzzy_match(all_text, kw) for kw in ["加入队伍", "使用组队码"]):
-                for h in hits:
-                    if OcrDismisser.fuzzy_match(h.text, "取消") and h.cy > shot.shape[0] * 0.55:
+            # 检查中部是否有"使用组队码加入"弹窗 — ROI 中部
+            mid_hits = ocr._ocr_roi(shot, 0.2, 0.45, 0.8, 0.7, scale=2)
+            mid_text = " ".join(h.text for h in mid_hits)
+            if any(OcrDismisser.fuzzy_match(mid_text, kw) for kw in ["加入队伍", "使用组队码"]):
+                for h in mid_hits:
+                    if OcrDismisser.fuzzy_match(h.text, "取消"):
                         logger.info(f"[阶段4] 弹窗出现，点击取消 ({h.cx},{h.cy})")
                         await self.adb.tap(h.cx, h.cy)
                         await asyncio.sleep(0.5)
                         break
                 continue
 
-            # 找底部"组队码"tab — ROI 底部 10% + 放大
+            # 找底部"组队码"tab — ROI 底部 10%
             bottom_hits = ocr._ocr_roi(shot, 0.2, 0.9, 0.5, 1.0, scale=2)
             for h in bottom_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队码"):
@@ -730,15 +732,16 @@ class SingleInstanceRunner:
                     break
             if tab_clicked:
                 break
+            await asyncio.sleep(0.3)
 
         # ── 步骤3: 在组队码面板找"二维码组队"并点击 ──
         # ROI: 左侧栏 (0~25% 宽度) + 放大
         await asyncio.sleep(0.5)
         qr_clicked = False
-        for attempt in range(8):
+        for attempt in range(4):
             shot = await self.adb.screenshot()
             if shot is None:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 continue
             left_hits = ocr._ocr_roi(shot, 0, 0.3, 0.25, 0.9, scale=2)
             for h in left_hits:
@@ -749,7 +752,7 @@ class SingleInstanceRunner:
                     break
             if qr_clicked:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
         if not qr_clicked:
             logger.warning("[阶段4] 未找到二维码组队入口")

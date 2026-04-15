@@ -186,8 +186,16 @@ class MultiRunnerService:
             encoding="utf-8"
         )
         self._file_handler.setLevel(logging.DEBUG)
-        self._file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s: %(message)s",
+
+        class _InstanceFormatter(logging.Formatter):
+            """日志格式带实例号（从 contextvars 读取）"""
+            def format(self, record):
+                idx = _current_instance.get(-1)
+                record.inst = f"#{idx}" if idx >= 0 else "SYS"
+                return super().format(record)
+
+        self._file_handler.setFormatter(_InstanceFormatter(
+            "%(asctime)s [%(inst)s] %(levelname)s: %(message)s",
             datefmt="%H:%M:%S"
         ))
         logging.getLogger("backend.automation").addHandler(self._file_handler)
