@@ -18,6 +18,17 @@ logger = logging.getLogger(__name__)
 # Windows 下隐藏 subprocess 的 cmd 窗口
 _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 
+# 全局信号量：限制并发 ADB 截图数（screencap 是最重的操作）
+# 6个实例同时 screencap 会让 ADB 排队到 8 秒+，限制并发到 2 就能控制在 1 秒内
+_screenshot_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _screenshot_semaphore
+    if _screenshot_semaphore is None:
+        _screenshot_semaphore = asyncio.Semaphore(2)
+    return _screenshot_semaphore
+
 
 class ADBController:
     """
@@ -53,14 +64,15 @@ class ADBController:
             return ""
 
     async def screenshot(self) -> Optional[np.ndarray]:
-        """截图并返回numpy数组 (BGR)"""
-        loop = asyncio.get_event_loop()
-        try:
-            raw = await loop.run_in_executor(None, self._screenshot_sync)
-            return raw
-        except Exception as e:
-            logger.error(f"截图失败: {e}")
-            return None
+        """截图并返回numpy数组 (BGR)，信号量限制并发防止 ADB 排队"""
+        async with _get_semaphore():
+            loop = asyncio.get_event_loop()
+            try:
+                raw = await loop.run_in_executor(None, self._screenshot_sync)
+                return raw
+            except Exception as e:
+                logger.error(f"截图失败: {e}")
+                return None
 
     def _screenshot_sync(self) -> Optional[np.ndarray]:
         """同步截图"""
