@@ -95,10 +95,9 @@ class SingleInstanceRunner:
     async def phase_accelerator(self) -> bool:
         """启动 FightMaster VPN 并确认连接
 
-        通过 ADB 广播控制，不需要 UI 交互：
-        1. 先检查 tun0 是否已连接（<100ms）
-        2. 没连接则发 START 广播
-        3. 等待 tun0 UP + RX > 0
+        两级策略：
+        1. 广播 START（快速路径，~1s，适合 VPN 已初始化过的情况）
+        2. UI 回退（拉起界面 + 点击连接，处理首次权限弹窗等）
         """
         self.phase = Phase.ACCELERATOR
 
@@ -107,20 +106,27 @@ class SingleInstanceRunner:
             logger.info("[阶段0] FightMaster 已连接 ✓ 跳过启动")
             return True
 
-        # 启动 FightMaster VPN
+        # 先尝试广播启动（快速路径）
+        await self._start_vpn()
+        if await self._wait_vpn_connected(timeout=8):
+            logger.info("[阶段0] FightMaster 广播启动成功 ✓")
+            return True
+
+        # 广播失败 → UI 回退（拉起界面点连接）
+        logger.warning("[阶段0] 广播启动失败，切换到 UI 模式")
         for retry in range(3):
             if retry > 0:
-                logger.info(f"[阶段0] 第{retry+1}次重试")
+                logger.info(f"[阶段0] UI 模式第{retry+1}次重试")
                 await self._stop_vpn()
                 await asyncio.sleep(2)
 
-            await self._start_vpn()
+            await self._start_vpn_via_ui()
 
-            if await self._wait_vpn_connected(timeout=15):
-                logger.info("[阶段0] FightMaster 连接成功 ✓")
+            if await self._wait_vpn_connected(timeout=10):
+                logger.info("[阶段0] FightMaster UI 启动成功 ✓")
                 return True
 
-        logger.error("[阶段0] FightMaster 3次重试均失败")
+        logger.error("[阶段0] FightMaster 所有方式均失败")
         return False
 
     async def _check_vpn_connected(self) -> bool:
@@ -200,6 +206,116 @@ class SingleInstanceRunner:
             "am broadcast -a com.fightmaster.vpn.STOP "
             "-n com.fightmaster.vpn/.CommandReceiver"
         )
+
+    async def _start_vpn_via_ui(self):
+        """通过拉起 FightMaster UI + OCR 点击连接按钮启动 VPN
+
+        广播 establish() 可能因未经 UI 初始化而失败，
+        从界面点击则走完整流程（prepare → consent → establish）
+        """
+        loop = asyncio.get_event_loop()
+        raw_adb = getattr(self.adb, '_adb', self.adb)
+
+        # 1. 拉起 FightMaster 主界面
+        logger.info("[阶段0] 拉起 FightMaster 界面")
+        await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            f"am start -n {ACCELERATOR_PACKAGE}/.MainActivity"
+        )
+        await asyncio.sleep(2)
+
+        # 2. 截图 + OCR
+        shot = await raw_adb.screenshot()
+        if shot is None:
+            logger.error("[阶段0] UI 模式截图失败")
+            return
+
+        hits = self.ocr_dismisser._ocr_all(shot)
+        all_text = " ".join(h.text for h in hits)
+        logger.info(f"[阶段0] FightMaster UI OCR: {all_text[:100]}")
+
+        # 如果已连接，直接返回
+        if "已连接" in all_text:
+            logger.info("[阶段0] FightMaster 界面显示已连接 ✓")
+            await loop.run_in_executor(
+                None, raw_adb._cmd, "shell", "input keyevent KEYCODE_HOME"
+            )
+            return
+
+        # 3. OCR 找连接按钮（文字可能是 "连 接" "连接"）
+        connect_hit = None
+        for h in hits:
+            clean = h.text.replace(" ", "")
+            if clean in ("连接", "断开"):
+                connect_hit = h
+                break
+
+        if connect_hit is None:
+            logger.warning("[阶段0] OCR 未找到连接按钮")
+            return
+
+        if "断" in connect_hit.text:
+            # 按钮显示"断开"说明已连接
+            logger.info("[阶段0] 按钮显示断开，VPN 已连接 ✓")
+            await loop.run_in_executor(
+                None, raw_adb._cmd, "shell", "input keyevent KEYCODE_HOME"
+            )
+            return
+
+        # 4. 点击连接
+        logger.info(f"[阶段0] OCR 点击连接按钮 ({connect_hit.cx},{connect_hit.cy})")
+        await raw_adb.tap(connect_hit.cx, connect_hit.cy)
+        await asyncio.sleep(1.5)
+
+        # 5. 处理可能的 VPN 权限弹窗（仅首次安装时出现）
+        await self._dismiss_vpn_consent()
+
+        # 6. 回到桌面
+        await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "input keyevent KEYCODE_HOME"
+        )
+
+    async def _dismiss_vpn_consent(self):
+        """自动处理 Android VPN 权限弹窗（仅首次安装时出现）
+
+        弹窗来自 com.android.vpndialogs，包含"确定"按钮。
+        用 OCR 找到"确定"并点击，找不到则 ENTER 键兜底。
+        """
+        loop = asyncio.get_event_loop()
+        raw_adb = getattr(self.adb, '_adb', self.adb)
+
+        # 检查前台是否是 VPN 权限弹窗
+        output = await loop.run_in_executor(
+            None, raw_adb._cmd, "shell",
+            "dumpsys activity activities | grep mResumedActivity"
+        )
+        if "vpndialogs" not in output.lower():
+            return  # 无弹窗
+
+        logger.info("[阶段0] 检测到 VPN 权限弹窗，OCR 定位确定按钮")
+
+        shot = await raw_adb.screenshot()
+        if shot is None:
+            # 截图失败，用 ENTER 键兜底
+            await loop.run_in_executor(
+                None, raw_adb._cmd, "shell", "input keyevent KEYCODE_ENTER"
+            )
+            return
+
+        hits = self.ocr_dismisser._ocr_all(shot)
+        for h in hits:
+            if "确定" in h.text or h.text.upper() == "OK":
+                logger.info(f"[阶段0] 点击 VPN 授权确定 ({h.cx},{h.cy})")
+                await raw_adb.tap(h.cx, h.cy)
+                await asyncio.sleep(1)
+                return
+
+        # OCR 没找到，ENTER 键兜底
+        logger.warning("[阶段0] OCR 未找到确定按钮，ENTER 键兜底")
+        await loop.run_in_executor(
+            None, raw_adb._cmd, "shell", "input keyevent KEYCODE_ENTER"
+        )
+        await asyncio.sleep(1)
 
     # ================================================================
     # 阶段 1: 启动游戏
