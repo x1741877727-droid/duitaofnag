@@ -27,5 +27,5 @@ REM 启动
 echo.
 echo [2/2] 启动 Remote Agent v2...
 echo.
-python remote_agent.py
-pause
+pip install fastapi "uvicorn[standard]" -q
+cmd /k python remote_agent.py
