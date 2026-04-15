@@ -640,15 +640,28 @@ class MultiRunnerService:
             "running": self._running,
         }
 
-    async def get_screenshot(self, instance_index: int) -> Optional[bytes]:
-        """获取指定实例截图（纯观察，不触发守卫），返回 JPEG bytes"""
+    async def get_screenshot(self, instance_index: int,
+                             adb_path: str = "") -> Optional[bytes]:
+        """获取指定实例截图，返回 JPEG bytes
+
+        自动化运行中 → 用 runner 的 ADB（可能是 minicap）
+        未运行 → 临时建 ADB 连接截图
+        """
+        raw_adb = None
+
+        # 优先用正在运行的 runner（有 minicap 流）
         runner = self._runners.get(instance_index)
-        if not runner:
+        if runner:
+            adb = runner.adb
+            raw_adb = getattr(adb, '_adb', adb)
+        elif adb_path:
+            # 未运行时临时创建 ADB 连接
+            serial = f"emulator-{5554 + instance_index * 2}"
+            raw_adb = ADBController(serial, adb_path)
+
+        if raw_adb is None:
             return None
 
-        # 用底层 ADB 截图，避免触发 GuardedADB 的弹窗清除
-        adb = runner.adb
-        raw_adb = getattr(adb, '_adb', adb)  # 如果是 GuardedADB 取底层
         shot = await raw_adb.screenshot()
         if shot is None:
             return None

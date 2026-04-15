@@ -339,7 +339,10 @@ def create_app(config: ConfigManager) -> FastAPI:
 
     @app.get("/api/screenshot/{instance_index}")
     async def screenshot(instance_index: int):
-        jpg = await service.get_screenshot(instance_index)
+        # 传入 adb_path，未运行时也能临时截图
+        adb_path = config.settings.adb_path or os.path.join(
+            config.settings.ldplayer_path, "adb.exe")
+        jpg = await service.get_screenshot(instance_index, adb_path=adb_path)
         if jpg is None:
             return Response(content=b"", status_code=204)
         return Response(content=jpg, media_type="image/jpeg")
