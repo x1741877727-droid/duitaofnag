@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
 title Remote Agent v2
+cd /d "%~dp0"
 echo.
 echo ============================================================
 echo  Remote Agent v2
