@@ -5,11 +5,15 @@ MultiRunnerService — 多实例并行运行服务
 """
 
 import asyncio
+import contextvars
 import logging
 import os
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Callable, Optional
+
+# 当前运行实例标识 — asyncio task 级别隔离，WSLogHandler 用来过滤
+_current_instance: contextvars.ContextVar[int] = contextvars.ContextVar('_current_instance', default=-1)
 
 import cv2
 import numpy as np
@@ -73,6 +77,10 @@ class WSLogHandler(logging.Handler):
         self._callback = callback
 
     def emit(self, record):
+        # 只处理属于本实例的日志（通过 contextvars 判断当前 task 是哪个实例）
+        ctx_instance = _current_instance.get(-1)
+        if ctx_instance >= 0 and ctx_instance != self.instance_index:
+            return
         try:
             self._callback({
                 "type": "log",
@@ -289,6 +297,7 @@ class MultiRunnerService:
 
     async def _run_mock_instance(self, idx: int):
         """模拟单个实例的阶段流转"""
+        _current_instance.set(idx)
         import random
         phases = [
             ("accelerator", "启动加速器", 2),
@@ -345,6 +354,7 @@ class MultiRunnerService:
         - 队员等队长 → 事件驱动无限等（不再固定 60 秒）
         - 单实例崩溃不影响其他实例
         """
+        _current_instance.set(idx)
         inst = self._instances[idx]
         group = inst.group
         phase_retries = 0       # 当前阶段重试计数
