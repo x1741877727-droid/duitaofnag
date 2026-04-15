@@ -1,8 +1,9 @@
 ' Remote Agent 停止脚本
-Dim ws, pid_file, pid, fso
-ws = CreateObject("WScript.Shell")
+Dim ws, fso, pid_file, pid
+Set ws = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+
 pid_file = "D:\game-automation\duitaofnag\.agent.pid"
-fso = CreateObject("Scripting.FileSystemObject")
 
 If Not fso.FileExists(pid_file) Then
     MsgBox "Remote Agent 未在运行", 48, "Remote Agent"
