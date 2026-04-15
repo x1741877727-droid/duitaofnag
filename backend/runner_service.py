@@ -705,15 +705,17 @@ class MultiRunnerService:
     _SCREENSHOT_CACHE_TTL = 2.0  # 秒
 
     async def get_screenshot(self, instance_index: int,
-                             adb_path: str = "") -> Optional[bytes]:
+                             adb_path: str = "",
+                             max_width: int = 0) -> Optional[bytes]:
         """获取指定实例截图，返回 JPEG bytes
 
         2秒内重复请求返回缓存，避免多个前端请求同时触发 screencap。
-        自动化运行中 → 用 runner 的 ADB（可能是 minicap，~0ms）
-        未运行 → 临时建 ADB 连接截图
+        max_width > 0 时缩小图片（缩略图用，省带宽 + 渲染更快）。
         """
+        cache_key = (instance_index, max_width)
+
         # 检查缓存
-        cached = self._screenshot_cache.get(instance_index)
+        cached = self._screenshot_cache.get(cache_key)
         if cached:
             ts, jpg = cached
             if time.time() - ts < self._SCREENSHOT_CACHE_TTL:
@@ -727,7 +729,6 @@ class MultiRunnerService:
             adb = runner.adb
             raw_adb = getattr(adb, '_adb', adb)
         elif adb_path:
-            # 未运行时临时创建 ADB 连接
             serial = f"emulator-{5554 + instance_index * 2}"
             raw_adb = ADBController(serial, adb_path)
 
@@ -738,11 +739,16 @@ class MultiRunnerService:
         if shot is None:
             return None
 
+        # 缩小（缩略图场景：1280→320，数据量减少 16 倍）
+        if max_width > 0 and shot.shape[1] > max_width:
+            scale = max_width / shot.shape[1]
+            new_h = int(shot.shape[0] * scale)
+            shot = cv2.resize(shot, (max_width, new_h), interpolation=cv2.INTER_AREA)
+
         _, buf = cv2.imencode(".jpg", shot, [cv2.IMWRITE_JPEG_QUALITY, 50])
         jpg = buf.tobytes()
 
-        # 写入缓存
-        self._screenshot_cache[instance_index] = (time.time(), jpg)
+        self._screenshot_cache[cache_key] = (time.time(), jpg)
         return jpg
 
     async def _snapshot_loop(self):

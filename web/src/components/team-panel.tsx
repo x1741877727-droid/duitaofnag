@@ -122,9 +122,10 @@ function CaptainCard({
         {/* 截图区域 */}
         <div className="relative w-36 h-22 rounded-md bg-muted/80 flex items-center justify-center flex-shrink-0 overflow-hidden">
           <img
-            src={`/api/screenshot/${instance.index}?t=${Math.floor(Date.now() / 3000)}`}
+            src={`/api/screenshot/${instance.index}?w=320&t=${Math.floor(Date.now() / 3000)}`}
             className="w-full h-full object-cover"
             alt=""
+            loading="lazy"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
           />
           <div className={cn(
