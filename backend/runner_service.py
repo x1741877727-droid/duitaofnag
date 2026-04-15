@@ -501,6 +501,15 @@ class MultiRunnerService:
                     logger.warning(f"[实例{idx}] {e.reason} (重试 {phase_retries}/{self._MAX_PHASE_RETRIES})")
                     inst.error = f"{e.reason} (重试 {phase_retries})"
 
+                    # 失败时保存截图供排查
+                    try:
+                        raw_adb = getattr(runner.adb, '_adb', runner.adb)
+                        err_shot = await raw_adb.screenshot()
+                        runner.dbg.log_screenshot(err_shot, tag=f"error_{failed_phase}")
+                        runner.dbg.log_fail(e.reason)
+                    except Exception:
+                        pass
+
                     if phase_retries >= self._MAX_PHASE_RETRIES:
                         # 升级：重启游戏
                         game_restarts += 1
@@ -566,6 +575,21 @@ class MultiRunnerService:
         finally:
             inst._phase_start = time.time()
             self._broadcast_state_change(idx, "running", inst.state)
+            # 写入运行摘要
+            try:
+                import json as _json
+                summary = {
+                    "instance": idx,
+                    "final_state": inst.state,
+                    "error": inst.error,
+                    "stage_times": inst.stage_times,
+                    "game_restarts": game_restarts,
+                }
+                summary_path = os.path.join(runner.dbg._run_dir, "summary.json")
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    _json.dump(summary, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
 
 
     def _on_phase_change(self, idx: int, phase: Phase):
