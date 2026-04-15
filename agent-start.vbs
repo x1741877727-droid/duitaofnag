@@ -1,11 +1,12 @@
-' Remote Agent - Start (background, no window)
+' Remote Agent - Start (minimized window)
 Dim ws, fso
 Set ws = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 Dim py, script
-py = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\pythonw.exe"
+py = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
 script = "D:\game-automation\duitaofnag\remote_agent.py"
+work_dir = "D:\game-automation\duitaofnag"
 
 ' Check if already running (port 9100)
 Dim ret
@@ -15,12 +16,6 @@ If ret = 0 Then
     WScript.Quit
 End If
 
-' Delete stale pid file if exists
-Dim pid_file
-pid_file = "D:\game-automation\duitaofnag\.agent.pid"
-If fso.FileExists(pid_file) Then fso.DeleteFile pid_file
-
-' Start in background
-ws.Run Chr(34) & py & Chr(34) & " " & Chr(34) & script & Chr(34), 0, False
-WScript.Sleep 2000
-MsgBox "Remote Agent started! Running in background.", 64, "Remote Agent"
+' Start minimized (7 = minimized, no focus)
+ws.Run Chr(34) & py & Chr(34) & " " & Chr(34) & script & Chr(34), 7, False
+MsgBox "Remote Agent started (minimized in taskbar).", 64, "Remote Agent"
