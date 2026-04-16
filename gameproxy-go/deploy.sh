@@ -1,36 +1,35 @@
 #!/bin/bash
-# gameproxy-go 部署脚本
-# 用法：在服务器上 /opt/gameproxy-src/gameproxy-go/ 目录下执行 ./deploy.sh
-
+# gameproxy-go 部署脚本（raw 文件下载）
 set -e
 
 SRC_DIR="/opt/gameproxy-src/gameproxy-go"
 DEST_DIR="/opt/gameproxy"
-BINARY_NAME="gameproxy"
+MIRROR=$(cat /opt/gameproxy-src/.mirror 2>/dev/null || echo "https://ghfast.top/https://raw.githubusercontent.com/x1741877727-droid/duitaofnag/main/gameproxy-go")
+
+export PATH=$PATH:/usr/local/go/bin
+export GOPROXY=https://goproxy.cn,direct
 
 cd "$SRC_DIR"
 
-# 1. 拉取最新代码
-echo "→ git pull..."
-git pull
+# 1. 下载最新源码
+echo "→ downloading latest sources from $MIRROR ..."
+FILES="capture.go clients.go failcache.go fpconvert.go go.mod intercept.go main.go relay.go rules.go socks5.go udp.go deploy.sh"
+for f in $FILES; do
+    curl -sfo "$f.new" "$MIRROR/$f" && mv "$f.new" "$f"
+done
 
 # 2. 编译
 echo "→ go build..."
-go build -o "$BINARY_NAME" .
+go build -o gameproxy .
 
-# 3. 停止旧进程
-echo "→ stopping old process..."
-pkill -9 -f "$DEST_DIR/$BINARY_NAME" 2>/dev/null || true
+# 3. 停旧启新
+pkill -9 -f "$DEST_DIR/gameproxy" 2>/dev/null || true
 sleep 2
 
-# 4. 替换二进制
-echo "→ replacing binary..."
-mv -f "$BINARY_NAME" "$DEST_DIR/$BINARY_NAME"
-chmod +x "$DEST_DIR/$BINARY_NAME"
+mv -f gameproxy "$DEST_DIR/gameproxy"
+chmod +x "$DEST_DIR/gameproxy"
 
-# 5. 启动
 SESSION="${1:-session_latest}"
-echo "→ starting gameproxy ($SESSION)..."
 mkdir -p "$DEST_DIR/captures/$SESSION"
 cd "$DEST_DIR"
 nohup ./gameproxy -port 9900 -rules rules.json -dry-run \
@@ -39,13 +38,11 @@ nohup ./gameproxy -port 9900 -rules rules.json -dry-run \
 disown
 
 sleep 2
-
-# 6. 验证
 if ss -tlnp | grep -q ":9900"; then
-    echo "✓ deployed and running"
+    echo "✓ deployed"
     head -8 "$DEST_DIR/proxy.log"
 else
-    echo "✗ failed to start"
+    echo "✗ failed"
     tail -20 "$DEST_DIR/proxy.log"
     exit 1
 fi
