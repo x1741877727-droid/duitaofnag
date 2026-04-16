@@ -245,16 +245,14 @@ func (s *Socks5Server) handleClient(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// ── 5.5. 灯塔上报黑洞（8081 端口）──
-	// 拦截腾讯 Beacon SDK 上报（TYPE_COMPRESS/bea_key）
-	// 假装连接成功，但吞掉所有数据，不转发给腾讯服务器
-	if dstPort == 8081 {
-		logInfo("[BLACKHOLE] 灯塔上报拦截: %s:%d", dstAddr, dstPort)
-		socks5Reply(conn, 0x00)
-		conn.SetDeadline(time.Time{})
-		s.relayBlackhole(conn, dstAddr, dstPort)
-		return
-	}
+	// [已禁用] 灯塔 blackhole — 实测拦截反而引发本地封号
+	// 8081 出现本身 = ACE 已判定异常，不论拦不拦都封
+	// if dstPort == 8081 {
+	//     socks5Reply(conn, 0x00)
+	//     conn.SetDeadline(time.Time{})
+	//     s.relayBlackhole(conn, dstAddr, dstPort)
+	//     return
+	// }
 
 	// ── 6. 连接目标服务器 ──
 	failKey := fmt.Sprintf("%s:%d", dstAddr, dstPort)
