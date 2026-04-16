@@ -17,6 +17,28 @@ func isBanPacket(data []byte) bool {
 	return len(data) >= 8 && bytes.Equal(data[:8], banPktSignature)
 }
 
+// patchACEReport 改写 443 端口 ACE 私有协议上报包
+// "105 转 77" - WPE 经典规则: 把 pos21 的 0x69 改成 0x4D
+// ACE 协议特征: 01 00 开头（区别于 TLS 的 16 03）
+// 改写后: 腾讯不识别 0x4D 的上报数据 → 不判定 → 不封号
+// 返回 (modified, changed)
+func patchACEReport(data []byte) ([]byte, bool) {
+	if len(data) < 22 {
+		return data, false
+	}
+	// 仅改 ACE 私有协议（01 00 开头），不动 TLS（16 03 开头）
+	if data[0] != 0x01 || data[1] != 0x00 {
+		return data, false
+	}
+	if data[21] != 0x69 {
+		return data, false
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	out[21] = 0x4D
+	return out, true
+}
+
 // relay 双向转发 + 规则引擎 + 可选抓包 + 流量统计
 func (s *Socks5Server) relay(client, remote net.Conn,
 	dstAddr string, dstPort int, connID string) {
@@ -62,6 +84,18 @@ func (s *Socks5Server) relay(client, remote net.Conn,
 				// 抓包：保存原始封包
 				if s.capture != nil && connID != "" {
 					s.capture.SavePacket(connID, copyBytes(data), "send", seq)
+				}
+
+				// 443 端口 ACE 私有协议改写: pos21 0x69 → 0x4D（"105 转 77"）
+				if dstPort == 443 {
+					if patched, changed := patchACEReport(data); changed {
+						logInfo("[ACE-PATCH] %s:%d c2s pos21: 0x69→0x4D, len=%d",
+							dstAddr, dstPort, len(data))
+						data = patched
+						if s.capture != nil && connID != "" {
+							s.capture.SavePacket(connID, copyBytes(data), "send_mod", seq)
+						}
+					}
 				}
 
 				if applyRules {
