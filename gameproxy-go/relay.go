@@ -1,11 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"io"
 	"net"
 	"sync"
 )
+
+// banPktSignature 17500 主控长连接里的封号通知包特征
+// 33 66 00 0a 00 0a 50 02 = 明文系统消息（实测：唯一会出现的非 4013 加密类型）
+var banPktSignature = []byte{0x33, 0x66, 0x00, 0x0a, 0x00, 0x0a, 0x50, 0x02}
+
+// isBanPacket 检查 s2c 数据是否为封号通知包
+func isBanPacket(data []byte) bool {
+	return len(data) >= 8 && bytes.Equal(data[:8], banPktSignature)
+}
 
 // relay 双向转发 + 规则引擎 + 可选抓包 + 流量统计
 func (s *Socks5Server) relay(client, remote net.Conn,
@@ -98,6 +108,14 @@ func (s *Socks5Server) relay(client, remote net.Conn,
 
 				if s.ruleEngine.dryRun || s.ruleEngine.ruleDebug {
 					s.ruleEngine.Process(data, "recv")
+				}
+
+				// 17500 主控长连接：丢弃 50 02 封号通知包，连接保持
+				if dstPort == 17500 && isBanPacket(data) {
+					logInfo("[BANPKT-DROP] 拦截封号通知 17500 s2c %d 字节: %s",
+						len(data), hex.EncodeToString(data[:min(32, len(data))]))
+					seq++
+					continue
 				}
 
 				if nw, werr := client.Write(data); werr != nil {
