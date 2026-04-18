@@ -37,8 +37,8 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
     public static final String EXTRA_PROXY_PORT = "proxy_port";
 
     // 代理服务器默认配置
-    private static final String DEFAULT_PROXY_HOST = "38.22.234.228";
-    private static final int DEFAULT_PROXY_PORT = 9900;
+    private static final String DEFAULT_PROXY_HOST = HostObfuscate.getHost();
+    private static final int DEFAULT_PROXY_PORT = HostObfuscate.getPort();
     private String proxyHost = DEFAULT_PROXY_HOST;
     private int proxyPort = DEFAULT_PROXY_PORT;
 
@@ -58,13 +58,18 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
         try {
             JSONObject config = new JSONObject();
 
-            // log
-            config.put("log", new JSONObject().put("loglevel", "warning"));
+            // ══════════════════════════════════════════════════════════
+            // [2026-04-18] 实验配置：改成 geosite/geoip 简单 5 条规则
+            // 依赖 assets/geoip.dat + assets/geosite.dat（已打包）
+            // ══════════════════════════════════════════════════════════
 
-            // dns
+            // log — 关掉（none）
+            config.put("log", new JSONObject().put("loglevel", "none"));
+
+            // dns — 223.5.5.5 + 1.1.1.1，保留 gameproxy-verify
             JSONObject dns = new JSONObject();
             dns.put("hosts", new JSONObject().put("gameproxy-verify", "1.2.3.4"));
-            dns.put("servers", new JSONArray().put("223.5.5.5").put("8.8.8.8"));
+            dns.put("servers", new JSONArray().put("223.5.5.5").put("1.1.1.1"));
             config.put("dns", dns);
 
             // outbound (主代理)
@@ -78,49 +83,96 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
             outbound.put("tag", "proxy");
             config.put("outbound", outbound);
 
-            // outboundDetour
+            // outboundDetour — direct / dns-out (保留 block 防未来规则需要)
             JSONArray detour = new JSONArray();
             detour.put(new JSONObject().put("protocol", "freedom").put("settings", new JSONObject()).put("tag", "direct"));
             detour.put(new JSONObject().put("protocol", "dns").put("settings", new JSONObject()).put("tag", "dns-out"));
+            detour.put(new JSONObject().put("protocol", "blackhole").put("settings", new JSONObject()).put("tag", "block"));
             config.put("outboundDetour", detour);
 
-            // routing rules
+            // ══════════════════════════════════════════════════════════
+            // 路由规则 — 5 条简单 geo 规则
+            // ══════════════════════════════════════════════════════════
             JSONArray rules = new JSONArray();
+
+            // 0. DNS 内部路由
             rules.put(new JSONObject()
                 .put("type", "field").put("port", "53").put("outboundTag", "dns-out"));
+
+            // 0.5 保留：gameproxy-verify 域名 → proxy（验证页面）
             rules.put(new JSONObject()
                 .put("type", "field")
-                .put("domain", new JSONArray()
-                    .put("domain:qq.com").put("domain:tencent.com")
-                    .put("domain:wechat.com").put("domain:weixin.qq.com")
-                    .put("domain:gtimg.cn").put("domain:qpic.cn")
-                    .put("domain:idqqimg.com").put("domain:qlogo.cn")
-                    .put("domain:myqcloud.com"))
-                .put("outboundTag", "direct"));
+                .put("domain", new JSONArray().put("gameproxy-verify"))
+                .put("outboundTag", "proxy"));
+
+            // 1. geosite:google → proxy
             rules.put(new JSONObject()
                 .put("type", "field")
-                .put("ip", new JSONArray()
-                    .put("120.204.207.84").put("101.226.94.67").put("101.226.96.203")
-                    .put("116.128.169.94").put("58.246.163.95").put("221.181.98.213")
-                    .put("183.192.196.121").put("116.128.169.68").put("101.226.101.163"))
-                .put("outboundTag", "direct"));
+                .put("domain", new JSONArray().put("geosite:google"))
+                .put("outboundTag", "proxy"));
+
+            // 2. geosite:cn → direct
             rules.put(new JSONObject()
                 .put("type", "field")
-                .put("domain", new JSONArray()
-                    .put("domain:googleapis.com").put("domain:google.com").put("domain:gstatic.com"))
+                .put("domain", new JSONArray().put("geosite:cn"))
                 .put("outboundTag", "direct"));
+
+            // 3. geoip:cn → direct
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("ip", new JSONArray().put("geoip:cn"))
+                .put("outboundTag", "direct"));
+
+            // 4. geoip:private → direct
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("ip", new JSONArray().put("geoip:private"))
+                .put("outboundTag", "direct"));
+
+            // 5. FINAL → proxy（走 0.0.0.0/0 兜底）
             rules.put(new JSONObject()
                 .put("type", "field").put("outboundTag", "proxy").put("port", "0-65535"));
 
+            // domainStrategy: AsIs（不做 IP 解析即匹配，按配置严格）
             config.put("routing", new JSONObject()
                 .put("settings", new JSONObject()
-                    .put("domainStrategy", "IPOnDemand")
+                    .put("domainStrategy", "AsIs")
                     .put("rules", rules)));
 
             return config.toString();
         } catch (JSONException e) {
             Log.e(TAG, "Failed to build v2ray config", e);
             return "{}";
+        }
+    }
+
+    /**
+     * 把 assets 里的 geoip.dat / geosite.dat 解压到 filesDir
+     * v2ray 启动时会从 filesDir 读取 geo 数据
+     * 只在首次启动或文件变更时解压
+     */
+    private void extractGeoAssets() {
+        String[] files = {"geoip.dat", "geosite.dat"};
+        java.io.File filesDir = getFilesDir();
+        for (String name : files) {
+            java.io.File dest = new java.io.File(filesDir, name);
+            try (java.io.InputStream in = getAssets().open(name)) {
+                long assetSize = in.available();
+                if (dest.exists() && dest.length() == assetSize) {
+                    Log.d(TAG, "geo asset up-to-date: " + name);
+                    continue;
+                }
+                try (java.io.FileOutputStream out = new java.io.FileOutputStream(dest)) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                    }
+                }
+                Log.i(TAG, "extracted asset: " + name + " (" + dest.length() + " bytes)");
+            } catch (java.io.IOException e) {
+                Log.e(TAG, "extract asset failed: " + name, e);
+            }
         }
     }
 
@@ -167,13 +219,16 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
     private void startVpn() {
         bgThread = new Thread(() -> {
             try {
+                // 0. 解压 geoip.dat / geosite.dat 到 filesDir（v2ray 启动前必须就绪）
+                extractGeoAssets();
+
                 // 1. 建立 TUN 设备
                 Builder builder = new Builder();
                 builder.setSession("FightMaster")
                        .addAddress("26.26.26.1", 30)
                        .addRoute("0.0.0.0", 0)
                        .addDnsServer("223.5.5.5")
-                       .addDnsServer("8.8.8.8")
+                       .addDnsServer("1.1.1.1")
                        .setMtu(1500);
 
                 // 分应用代理 — 从用户选择读取
@@ -196,7 +251,7 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
                 }
 
                 // 2. 设置本地 DNS
-                Tun2socks.setLocalDNS("223.5.5.5:53");
+                Tun2socks.setLocalDNS("223.5.5.5:53,1.1.1.1:53");
 
                 // 3. 启动 v2ray
                 tunFd = pfd.detachFd();
