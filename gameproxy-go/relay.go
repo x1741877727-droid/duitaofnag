@@ -86,17 +86,20 @@ func (s *Socks5Server) relay(client, remote net.Conn,
 					s.capture.SavePacket(connID, copyBytes(data), "send", seq)
 				}
 
-				// 443 端口 ACE 私有协议改写: pos21 0x69 → 0x4D（"105 转 77"）
-				if dstPort == 443 {
-					if patched, changed := patchACEReport(data); changed {
-						logInfo("[ACE-PATCH] %s:%d c2s pos21: 0x69→0x4D, len=%d",
-							dstAddr, dstPort, len(data))
-						data = patched
-						if s.capture != nil && connID != "" {
-							s.capture.SavePacket(connID, copyBytes(data), "send_mod", seq)
-						}
-					}
-				}
+				// [已禁用 2026-04-18] 443 pos21 0x69→0x4D 改写
+				// 根因：pos21 的 0x69 在 `08 53 45 e5 e0 69 85 1b 04` 签名区域内
+				// 千钰明确列出 08 53 是"不能改的特征"，改了立刻封
+				// pcap 对比证实 cmp(封) vs lh(六花没封) 唯一差异就是被我们改过这字节
+				// if dstPort == 443 {
+				//     if patched, changed := patchACEReport(data); changed {
+				//         logInfo("[ACE-PATCH] %s:%d c2s pos21: 0x69→0x4D, len=%d",
+				//             dstAddr, dstPort, len(data))
+				//         data = patched
+				//         if s.capture != nil && connID != "" {
+				//             s.capture.SavePacket(connID, copyBytes(data), "send_mod", seq)
+				//         }
+				//     }
+				// }
 
 				if applyRules {
 					modified := s.ruleEngine.Process(data, "send")
@@ -144,13 +147,16 @@ func (s *Socks5Server) relay(client, remote net.Conn,
 					s.ruleEngine.Process(data, "recv")
 				}
 
-				// 17500 主控长连接：丢弃 50 02 封号通知包，连接保持
-				if dstPort == 17500 && isBanPacket(data) {
-					logInfo("[BANPKT-DROP] 拦截封号通知 17500 s2c %d 字节: %s",
-						len(data), hex.EncodeToString(data[:min(32, len(data))]))
-					seq++
-					continue
-				}
+				// [已禁用 2026-04-18] 17500 50 02 BANPKT-DROP
+				// 千钰原话："光拦截不行 会禁网"
+				// 拦到通知时封号决定已下，光拦通知不能扭转服务器状态
+				// 而且拦掉正常 50 02 业务消息会让游戏认为网络异常 → 触发禁网
+				// if dstPort == 17500 && isBanPacket(data) {
+				//     logInfo("[BANPKT-DROP] 拦截封号通知 17500 s2c %d 字节: %s",
+				//         len(data), hex.EncodeToString(data[:min(32, len(data))]))
+				//     seq++
+				//     continue
+				// }
 
 				if nw, werr := client.Write(data); werr != nil {
 					break

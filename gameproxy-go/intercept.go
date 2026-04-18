@@ -5,8 +5,39 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
+
+// HIT 上报 IP 段 — 六花抓包对比发现这些 IP 只出现在"我们模式"不出现在"六花模式"
+// 特征：随机高位端口（41762/51762/63861）+ 小流量单向上报 = 典型 Tencent HIT/Beacon 上报
+var hitBlockRanges []*net.IPNet
+
+func init() {
+	cidrs := []string{
+		"222.189.172.0/24", // 江苏电信 — 2026-04-18 pcap 确认主要 HIT 上报目的地
+		"27.155.112.0/24",  // 福建电信 — 同批次上报
+	}
+	for _, s := range cidrs {
+		_, n, err := net.ParseCIDR(s)
+		if err == nil {
+			hitBlockRanges = append(hitBlockRanges, n)
+		}
+	}
+}
+
+func isHITBlockIP(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	for _, r := range hitBlockRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
 
 // shouldIntercept 检查是否需要拦截
 func shouldIntercept(addr string, port int) string {
@@ -19,13 +50,69 @@ func shouldIntercept(addr string, port int) string {
 	if addr == "m.baidu.com" && (port == 80 || port == 443) {
 		return "brand_page"
 	}
+	// ── HIT 安全系统上报拦截：假 accept + blackhole（不能 REJECT 否则禁网）──
+	if isHITBlockIP(addr) {
+		return "hit_block"
+	}
+	// ── 六花式防封：灯塔 8081 返回假 HTTP 200 ──
+	if port == 8081 {
+		return "fake_beacon"
+	}
+	// ── 六花式防封：ACE 反作弊域名直接拒绝 ──
+	lower := strings.ToLower(addr)
+	if strings.Contains(lower, "anticheatexpert") || strings.Contains(lower, "crashsight") {
+		return "ace_block"
+	}
 	return ""
 }
 
 // handleIntercept 处理拦截请求
 func (s *Socks5Server) handleIntercept(conn net.Conn, addr string, port int, interceptType string) {
+	// ACE 域名：SOCKS5 直接拒绝 (host unreachable)
+	if interceptType == "ace_block" {
+		socks5Reply(conn, 0x04) // host unreachable
+		logInfo("[ACE-BLOCK] 拒绝 ACE 域名连接: %s:%d", addr, port)
+		return
+	}
+
 	// SOCKS5 成功回复
 	socks5Reply(conn, 0x00)
+
+	// HIT 上报 IP：假 accept + 吞包（不能 REJECT/RST，否则游戏判定网络异常会禁网）
+	if interceptType == "hit_block" {
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf := make([]byte, 4096)
+		total := 0
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				total += n
+			}
+			if err != nil {
+				break
+			}
+		}
+		conn.SetReadDeadline(time.Time{})
+		logInfo("[HIT-BLOCK] 吞包: %s:%d recv=%dB", addr, port, total)
+		return
+	}
+
+	// 灯塔 8081：模仿六花，返回假 HTTP 200
+	if interceptType == "fake_beacon" {
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		discard := make([]byte, 4096)
+		n, _ := io.ReadAtLeast(conn, discard, 1)
+		conn.SetReadDeadline(time.Time{})
+		fakeResp := "HTTP/1.1 200 OK\r\n" +
+			"Content-Type: text/plain\r\n" +
+			"Content-Length: 2\r\n" +
+			"Connection: close\r\n" +
+			"\r\n" +
+			"OK"
+		conn.Write([]byte(fakeResp))
+		logInfo("[FAKE-BEACON] 假响应 8081 上报: %s:%d recv=%dB", addr, port, n)
+		return
+	}
 
 	// 读取 HTTP 请求（丢弃）
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
