@@ -549,23 +549,34 @@ class DXHookStream:
             logger.warning(f"[dxhook] {self.serial}: 跑 inject.exe 失败: {e}")
             return False
 
-        # 打开共享内存（DLL 在 hook_init_thread 异步建，最多等 5s）
+        # 打开共享内存（DLL 用 "Local\\GameBotCap_<PID>" 命名）
         import mmap
-        shm_name = f"GameBotCap_{self.box_pid}"
+        # 试两种 tagname：带 Local\ 前缀（DLL 实际用的）和不带（兼容 Python 默认）
+        candidate_names = [
+            f"Local\\GameBotCap_{self.box_pid}",
+            f"GameBotCap_{self.box_pid}",
+        ]
         for _ in range(50):
-            try:
-                self._mmap = mmap.mmap(-1, _DXHOOK_SHM_TOTAL,
-                                        tagname=shm_name,
-                                        access=mmap.ACCESS_READ)
-                hdr = self._mmap[:_DXHOOK_SHM_HEADER_BYTES]
-                magic, *_ = struct.unpack("<IIIIIIII", hdr)
-                if magic == _DXHOOK_SHM_MAGIC:
-                    break
-            except Exception:
-                pass
+            for name in candidate_names:
+                try:
+                    m = mmap.mmap(-1, _DXHOOK_SHM_TOTAL,
+                                   tagname=name,
+                                   access=mmap.ACCESS_READ)
+                    hdr = m[:_DXHOOK_SHM_HEADER_BYTES]
+                    magic, *_ = struct.unpack("<IIIIIIII", hdr)
+                    if magic == _DXHOOK_SHM_MAGIC:
+                        self._mmap = m
+                        logger.info(f"[dxhook] {self.serial} 共享内存连上 {name}")
+                        break
+                    m.close()
+                except Exception:
+                    pass
+            if self._mmap is not None:
+                break
             time.sleep(0.1)
         else:
-            logger.warning(f"[dxhook] {self.serial}: 共享内存 {shm_name} 未就绪")
+            logger.warning(f"[dxhook] {self.serial}: 共享内存未就绪 "
+                           f"(tried: {candidate_names})")
             return False
 
         self._available = True
