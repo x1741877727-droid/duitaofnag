@@ -23,6 +23,7 @@ import numpy as np
 
 from . import metrics
 from .ocr_cache import cached as _ocr_cached, cached_full as _ocr_cached_full
+from .ocr_pool import OcrPool
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,14 @@ class OcrDismisser:
             cls._shared_ocr = RapidOCR()
         logger.info("RapidOCR 预热完成")
 
+        # 启动多进程 OCR 池（让多实例 asyncio 真正并发）
+        # workers 数：环境变量 GAMEBOT_OCR_WORKERS 优先，否则按 CPU 核数算
+        try:
+            OcrPool.init(ocr_params=params)
+            logger.info(f"OCR Pool: {OcrPool.stats()}")
+        except Exception as e:
+            logger.warning(f"OcrPool 初始化失败（fallback 主进程 OCR）: {e}")
+
     @staticmethod
     def _load_ocr_params_from_config() -> dict:
         """从 config/runtime.json 读 ocr_backend.ocr_params。失败返回空 dict。"""
@@ -185,6 +194,24 @@ class OcrDismisser:
                     hits.append(self.TextHit(text=text, cx=cx, cy=cy))
             tags["n_texts"] = len(hits)
             return hits
+
+    async def _ocr_all_async(self, screenshot: np.ndarray) -> list:
+        """全屏 OCR 的异步版本 — 路由到多进程 pool 让 N 实例真正并发。
+
+        Pool 没启用 → 主线程 executor 跑同步版（不阻塞 asyncio loop）
+        Pool 启用 → 跑 worker 进程，主进程不卡
+        """
+        if OcrPool.is_enabled() and OcrPool._executor is not None:
+            with metrics.timed("ocr_full_pool") as tags:
+                hits_raw = await OcrPool.ocr_async(screenshot)
+                tags["n_texts"] = len(hits_raw)
+                return [
+                    self.TextHit(text=h.text, cx=h.cx, cy=h.cy)
+                    for h in hits_raw
+                ]
+        # fallback：用默认 ThreadPool 跑同步 _ocr_all（不阻塞 loop，但单 OCR 实例）
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._ocr_all, screenshot)
 
     def _ocr_roi_named(self, screenshot: np.ndarray, name: str) -> list:
         """按 config/roi.yaml 的命名 ROI 裁剪 + OCR。
@@ -492,8 +519,17 @@ class OcrDismisser:
                 continue
             self._last_ph = h
 
-            state = self.detect_state(shot, matcher)
+            # OCR 走 async + pool（多实例真正并发，不阻塞 asyncio loop）
+            ocr_hits = await self._ocr_all_async(shot)
+            state = self.detect_state(shot, matcher, ocr_hits=ocr_hits)
             logger.info(f"[R{rnd+1}] 状态: {state.value}")
+
+            # 顺手为 YOLO 训练采集这帧（pHash dedup 保证不重复）
+            try:
+                from .screenshot_collector import collect as _yolo_collect
+                _yolo_collect(shot, tag=f"popup_{state.value}")
+            except Exception:
+                pass
 
             if state == ScreenState.LOBBY:
                 lobby_confirm += 1

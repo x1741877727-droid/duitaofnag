@@ -186,8 +186,9 @@ a = Analysis(
         'backend.automation.screen_matcher', 'backend.automation.ocr_dismisser',
         'backend.automation.popup_dismisser', 'backend.automation.metrics',
         'backend.automation.ocr_cache', 'backend.automation.roi_config',
-        'backend.automation.yolo_detector',
-        'yaml', 'psutil',
+        'backend.automation.yolo_detector', 'backend.automation.ocr_pool',
+        'backend.automation.screenshot_collector',
+        'yaml', 'psutil', 'multiprocessing',
     ],
 )
 pyz = PYZ(a.pure)
