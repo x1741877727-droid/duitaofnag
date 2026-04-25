@@ -513,12 +513,12 @@ def get_team_members(instance_index: int = None, pid: int = None,
             return {"ok": False, "error": "找不到 LDPlayer 进程", "members": []}
 
         # ── v2 实现：以推送锚点 + 精确 TLV 解析 ──
-        # 优先扫这两个 anchor，它们的 blob 含当前队伍 name 字段
+        # 这些 anchor 的 blob 含当前 4 人车队的 name 字段
+        # query_carteam_rsp 是兵团（corps）数据，会污染 → 不用
         anchor_keywords = [
             b"notify_update_carteam_member",
             b"team_info_notify",
             b"notify_join_carteam",
-            b"query_carteam_rsp",  # 兵团 backup（万一队伍 anchor 抢空了）
         ]
         result = scan_process_memory(pid, anchor_keywords,
                                      max_findings=100, timeout=timeout)
