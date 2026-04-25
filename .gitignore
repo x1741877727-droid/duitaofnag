@@ -30,8 +30,8 @@ build/
 
 # 配置（可能含 API key, 各机器独立）
 # 注意: 如果团队共用 git，建议提交 .example 模板
-# settings.json
-# accounts.json
+# config/settings.json
+# config/accounts.json
 
 # Cloudflared
 cloudflared.exe
@@ -43,3 +43,4 @@ cloudflared
 *.swp
 .DS_Store
 Thumbs.db
+config/runtime.json
