@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -33,6 +34,14 @@
             android:exported="false"
             android:theme="@style/Theme.FightMaster" />
 
+        <!-- 透明 Activity，仅用于触发 MediaProjection 授权对话框 -->
+        <activity
+            android:name=".CapturePermissionActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
+
         <service
             android:name=".FightMasterVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
@@ -42,7 +51,13 @@
             </intent-filter>
         </service>
 
-        <!-- ADB 广播接收器 — 用于脚本控制 -->
+        <!-- 屏幕捕获前台服务 -->
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- ADB 广播接收器 — 用于脚本控制 VPN + Capture -->
         <receiver
             android:name=".CommandReceiver"
             android:exported="true">
@@ -50,6 +65,8 @@
                 <action android:name="com.fightmaster.vpn.START" />
                 <action android:name="com.fightmaster.vpn.STOP" />
                 <action android:name="com.fightmaster.vpn.STATUS" />
+                <action android:name="com.fightmaster.vpn.CAPTURE_START" />
+                <action android:name="com.fightmaster.vpn.CAPTURE_STOP" />
             </intent-filter>
         </receiver>
 
