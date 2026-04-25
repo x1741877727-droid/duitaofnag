@@ -55,25 +55,28 @@ def capture_one(adb: str, serial: str, idx: int) -> tuple[bool, str]:
         "-",
     ]
 
+    h264_path = OUT_DIR / f"inst_{idx}_{serial}.h264"
+
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        # 直接落盘成 .h264 文件（避免 PyAV 不能 seek pipe 的问题）
+        with open(h264_path, "wb") as f:
+            proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE,
+                                  timeout=DURATION + 5)
+    except subprocess.TimeoutExpired:
+        return False, "screenrecord timeout"
     except FileNotFoundError:
         return False, f"adb not found: {adb}"
 
-    # 用 av 解 h264
+    if not h264_path.exists() or h264_path.stat().st_size < 1000:
+        return False, f"h264 too small: {h264_path.stat().st_size if h264_path.exists() else 0} bytes"
+
     try:
         import av
     except ImportError:
-        proc.kill()
         return False, "PyAV not installed (pip install av)"
 
     try:
-        # av 直接吃 stdout file-like
-        container = av.open(proc.stdout, format="h264", mode="r")
+        container = av.open(str(h264_path), format="h264", mode="r")
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
 
@@ -82,24 +85,16 @@ def capture_one(adb: str, serial: str, idx: int) -> tuple[bool, str]:
         for packet in container.demux(stream):
             for frame in packet.decode():
                 frame_n += 1
-                if frame_n >= TARGET_FRAME:
+                if frame_n >= TARGET_FRAME or (captured is None and frame_n >= 5):
                     captured = frame.to_ndarray(format="bgr24")
-                    break
-            if captured is not None:
+                    if frame_n >= TARGET_FRAME:
+                        break
+            if captured is not None and frame_n >= TARGET_FRAME:
                 break
 
         container.close()
     except Exception as e:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False, f"decode error: {e}"
-
-    try:
-        proc.kill()
-    except Exception:
-        pass
+        return False, f"decode error: {e} (h264 size={h264_path.stat().st_size})"
 
     if captured is None:
         return False, f"got 0 frames in {DURATION}s"
