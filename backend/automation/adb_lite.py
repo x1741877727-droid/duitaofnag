@@ -3,9 +3,10 @@ ADB 控制器 — 基于 subprocess 直接调用 adb 命令
 专门为雷电模拟器优化，已在实机测试中验证通过。
 
 截图策略（GAMEBOT_CAPTURE 环境变量）：
-  - wgc (推荐): Windows Graphics Capture 抓 LDPlayer 窗口，~50ms/帧，
-    在 Windows 端走 DXGI 完全绕开 Android，无 ACE 接触面
-  - screenrecord: adb shell screenrecord（已知 6 实例并发崩游戏）
+  - dxhook (生产推荐): 注入 hook DLL 到 Ld9BoxHeadless.exe，glReadPixels 抓
+    GPU 帧到共享内存。1280x720 原生分辨率，~0ms get_frame，绕窗口/ACE
+  - wgc: Windows Graphics Capture 抓 LDPlayer 窗口（窗口缩小会糊）
+  - screenrecord: adb shell screenrecord（6 实例并发崩游戏）
   - 默认: adb screencap（慢但稳）
 """
 
@@ -284,11 +285,13 @@ class WGCStream:
       - 窗口被遮挡仍能抓（OBS Game Capture 同款 API）
     """
 
-    # LDPlayer 9 自有 UI chrome 偏移（不是 Windows 标题栏，是 LDPlayer 在 client area 内画的）
-    #   - 顶部 toolbar 约 30 px（LDPlayer 标题 + 9.1.67.0 版本号）
-    #   - 右侧 sidebar 约 56 px（加速/截图/拍照 等快捷按钮）
-    LDPLAYER_TOP_TOOLBAR = 30
-    LDPLAYER_RIGHT_SIDEBAR = 56
+    # LDPlayer 9 自有 UI chrome 比例（client area 内画的，非 Windows 标题栏）
+    # 实测 1318×754 窗口下：top toolbar 30px / right sidebar 56px
+    LDPLAYER_TOP_RATIO = 30 / 754      # ≈ 4.0%
+    LDPLAYER_RIGHT_RATIO = 56 / 1318   # ≈ 4.3%
+    # 最小可用窗口尺寸（小于此值文字会糊到 OCR 失效）
+    MIN_WINDOW_W = 1100
+    MIN_WINDOW_H = 620
 
     def __init__(self, serial: str):
         self.serial = serial
@@ -417,6 +420,200 @@ class WGCStream:
 
 
 # ====================================================================
+# DXHookStream — 注入 64-bit DLL 到 Ld9BoxHeadless 抓 GPU 帧（生产推荐）
+# ====================================================================
+
+# 共享内存协议（与 tools/dxhook/hook.c 同步）
+_DXHOOK_SHM_MAGIC = 0x42476843  # 'GBhC'
+_DXHOOK_SHM_HEADER_BYTES = 32
+_DXHOOK_SHM_MAX_W = 2560
+_DXHOOK_SHM_MAX_H = 1440
+_DXHOOK_SHM_TOTAL = _DXHOOK_SHM_HEADER_BYTES + _DXHOOK_SHM_MAX_W * _DXHOOK_SHM_MAX_H * 4
+
+
+def _find_dxhook_assets() -> Optional[tuple]:
+    """定位 64-bit dll + injector 路径（开发模式 / PyInstaller frozen 都支持）"""
+    import sys as _sys
+    if getattr(_sys, 'frozen', False):
+        roots = [
+            os.path.dirname(_sys.executable),
+            os.path.join(os.path.dirname(_sys.executable), "_internal"),
+        ]
+    else:
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        roots = [repo_root]
+    for root in roots:
+        dll = os.path.join(root, "tools", "dxhook", "build", "x64", "gamebot_hook.dll")
+        injector = os.path.join(root, "tools", "dxhook", "build", "x64", "inject.exe")
+        if os.path.isfile(dll) and os.path.isfile(injector):
+            return dll, injector
+    # 兼容已部署到 _internal/dxhook/ 的扁平布局
+    for root in roots:
+        dll = os.path.join(root, "dxhook", "gamebot_hook.dll")
+        injector = os.path.join(root, "dxhook", "inject.exe")
+        if os.path.isfile(dll) and os.path.isfile(injector):
+            return dll, injector
+    return None
+
+
+def _serial_to_ldidx(serial: str) -> int:
+    """emulator-5554 → 0, emulator-5556 → 1, ..."""
+    try:
+        port = int(serial.split("-")[1])
+        return (port - 5554) // 2
+    except (IndexError, ValueError):
+        return 0
+
+
+def _find_box_pid_for_idx(ld_idx: int) -> Optional[int]:
+    """通过 cmdline `--comment leidianN` 找 Ld9BoxHeadless.exe PID"""
+    try:
+        import psutil
+    except ImportError:
+        return None
+    # 实例 0 是 "leidian"，1+ 是 "leidian1"、"leidian2" ...
+    target = "leidian" if ld_idx == 0 else f"leidian{ld_idx}"
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if proc.info['name'] != 'Ld9BoxHeadless.exe':
+                continue
+            cmd = ' '.join(proc.info['cmdline'] or [])
+            # 用 token 边界匹配避免 leidian1 误匹配 leidian10
+            for tok in cmd.split():
+                if tok == target:
+                    return proc.info['pid']
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
+
+
+class DXHookStream:
+    """注入 hook DLL 到 LDPlayer 9 的 Ld9BoxHeadless.exe，glReadPixels 抓帧。
+
+    工作流程：
+      1. serial → LDPlayer instance idx → 找对应 Ld9BoxHeadless.exe PID（cmdline `--comment leidianN`）
+      2. subprocess 跑 inject.exe pid dll_path
+      3. 等共享内存 "Local\\GameBotCap_<PID>" 出现 + magic 校验通过
+      4. mmap 该共享内存，每次 get_frame 读 header 拿最新帧
+
+    优势 vs 其他方案：
+      - 抓 GPU 渲染管线最深层（Ld9BoxHeadless 内部，比 dnplayer 早）
+      - 1280x720 Android 原生分辨率，与窗口大小完全无关
+      - hook 在 Windows 主机端，不进 Android，无 ACE 接触面
+      - get_frame() 直接从内存读，~0ms latency
+    """
+
+    def __init__(self, serial: str):
+        self.serial = serial
+        self.ld_idx = _serial_to_ldidx(serial)
+        self.box_pid: Optional[int] = None
+        self._mmap: Optional["mmap.mmap"] = None
+        self._latest_arr: Optional[np.ndarray] = None
+        self._latest_frame_n = -1
+        self._available = False
+
+    def setup(self) -> bool:
+        if platform.system() != "Windows":
+            logger.warning("[dxhook] 只支持 Windows")
+            return False
+
+        try:
+            import psutil  # noqa: F401
+        except ImportError:
+            logger.warning("[dxhook] psutil 未安装")
+            return False
+
+        assets = _find_dxhook_assets()
+        if not assets:
+            logger.warning("[dxhook] 找不到 gamebot_hook.dll / inject.exe（先 make all64）")
+            return False
+        dll_path, injector_path = assets
+
+        self.box_pid = _find_box_pid_for_idx(self.ld_idx)
+        if not self.box_pid:
+            logger.warning(f"[dxhook] {self.serial}: 找不到 leidian{self.ld_idx} Ld9BoxHeadless 进程")
+            return False
+
+        # 运行注入器
+        try:
+            r = subprocess.run(
+                [injector_path, str(self.box_pid), dll_path],
+                capture_output=True, timeout=10,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+            if r.returncode != 0:
+                logger.warning(f"[dxhook] {self.serial}: inject 失败 rc={r.returncode} "
+                               f"out={r.stdout.decode(errors='replace')[:200]}")
+                return False
+        except Exception as e:
+            logger.warning(f"[dxhook] {self.serial}: 跑 inject.exe 失败: {e}")
+            return False
+
+        # 打开共享内存（DLL 在 hook_init_thread 异步建，最多等 5s）
+        import mmap
+        shm_name = f"GameBotCap_{self.box_pid}"
+        for _ in range(50):
+            try:
+                self._mmap = mmap.mmap(-1, _DXHOOK_SHM_TOTAL,
+                                        tagname=shm_name,
+                                        access=mmap.ACCESS_READ)
+                hdr = self._mmap[:_DXHOOK_SHM_HEADER_BYTES]
+                magic, *_ = struct.unpack("<IIIIIIII", hdr)
+                if magic == _DXHOOK_SHM_MAGIC:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.1)
+        else:
+            logger.warning(f"[dxhook] {self.serial}: 共享内存 {shm_name} 未就绪")
+            return False
+
+        self._available = True
+        logger.info(f"[dxhook] {self.serial} 启用 (box_pid={self.box_pid} shm={shm_name})")
+        return True
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        if not self._available or self._mmap is None:
+            return None
+        hdr = self._mmap[:_DXHOOK_SHM_HEADER_BYTES]
+        magic, frame_n, w, h, _ts, _stride, _r0, _r1 = struct.unpack("<IIIIIIII", hdr)
+        if magic != _DXHOOK_SHM_MAGIC or w == 0 or h == 0:
+            return self._latest_arr  # 返回缓存的最后一帧
+        if frame_n & 0x80000000:
+            # 写入中，返回上一帧
+            return self._latest_arr
+        if frame_n == self._latest_frame_n and self._latest_arr is not None:
+            return self._latest_arr  # 没新帧
+
+        # 读新帧
+        if w > _DXHOOK_SHM_MAX_W or h > _DXHOOK_SHM_MAX_H:
+            return self._latest_arr
+        nbytes = w * h * 4
+        raw = bytes(self._mmap[_DXHOOK_SHM_HEADER_BYTES:_DXHOOK_SHM_HEADER_BYTES + nbytes])
+        rgba = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 4))
+        # OpenGL 原点左下，图像左上 → 上下翻转
+        rgba = np.flipud(rgba)
+        bgr = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+        # ascontiguousarray 防 numpy view 问题
+        self._latest_arr = np.ascontiguousarray(bgr)
+        self._latest_frame_n = frame_n
+        return self._latest_arr
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def stop(self):
+        self._available = False
+        if self._mmap is not None:
+            try:
+                self._mmap.close()
+            except Exception:
+                pass
+            self._mmap = None
+
+
+# ====================================================================
 # ADB 控制器
 # ====================================================================
 
@@ -436,13 +633,23 @@ class ADBController:
         """[向后兼容名] 初始化截图流。
 
         backend = GAMEBOT_CAPTURE 环境变量：
-        - wgc (生产推荐): Windows Graphics Capture，~50ms/帧，绕开 Android
-        - screenrecord (已知 6 实例并发崩游戏): adb shell screenrecord
+        - dxhook (生产推荐): 注入 64-bit DLL 到 Ld9BoxHeadless，glReadPixels 抓 GPU 帧
+        - wgc: Windows Graphics Capture 抓 LDPlayer 窗口（受窗口尺寸影响）
+        - screenrecord: adb shell screenrecord（6 实例崩游戏）
         - 默认 (空): screencap（慢但稳）
 
         旧名 setup_minicap 保留是因为外部调用点很多。
         """
         backend = os.environ.get("GAMEBOT_CAPTURE", "").lower()
+
+        if backend == "dxhook":
+            stream = DXHookStream(self.serial)
+            if stream.setup():
+                self._stream = stream
+                logger.info(f"[capture] {self.serial} 启用 DXHook")
+                return True
+            logger.warning(f"[capture] {self.serial} DXHook 启动失败，回退 screencap")
+            return False
 
         if backend == "wgc":
             stream = WGCStream(self.serial)
