@@ -42,33 +42,33 @@ def adb_path() -> str:
 
 
 def capture_one(adb: str, serial: str, idx: int) -> tuple[bool, str]:
-    """对一个 serial 跑 screenrecord pipe，取 1 帧解码保存"""
+    """对一个 serial 跑 screenrecord 写设备 mp4 → adb pull → PyAV 解 mp4"""
     out_png = OUT_DIR / f"inst_{idx}_{serial}.png"
+    device_mp4 = f"/sdcard/_capture_test_{idx}.mp4"
+    local_mp4 = OUT_DIR / f"inst_{idx}_{serial}.mp4"
 
-    # 启 adb shell screenrecord 输出 h264 到 stdout
+    # 1. 设备上跑 screenrecord（默认 mp4）
     cmd = [
-        adb, "-s", serial, "exec-out",
-        "screenrecord",
-        f"--time-limit={DURATION}",
-        "--output-format=h264",
-        "--bit-rate", "2000000",
-        "-",
+        adb, "-s", serial, "shell",
+        f"screenrecord --time-limit={DURATION} {device_mp4}",
     ]
 
-    h264_path = OUT_DIR / f"inst_{idx}_{serial}.h264"
-
     try:
-        # 直接落盘成 .h264 文件（避免 PyAV 不能 seek pipe 的问题）
-        with open(h264_path, "wb") as f:
-            proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE,
-                                  timeout=DURATION + 5)
+        # 1. screenrecord 写设备 mp4（阻塞到完成或超时）
+        subprocess.run(cmd, capture_output=True, timeout=DURATION + 5)
+        # 2. adb pull mp4 到本地
+        subprocess.run([adb, "-s", serial, "pull", device_mp4, str(local_mp4)],
+                       capture_output=True, timeout=15)
+        # 3. 设备上删除
+        subprocess.run([adb, "-s", serial, "shell", f"rm {device_mp4}"],
+                       capture_output=True, timeout=5)
     except subprocess.TimeoutExpired:
-        return False, "screenrecord timeout"
+        return False, "screenrecord/pull timeout"
     except FileNotFoundError:
         return False, f"adb not found: {adb}"
 
-    if not h264_path.exists() or h264_path.stat().st_size < 1000:
-        return False, f"h264 too small: {h264_path.stat().st_size if h264_path.exists() else 0} bytes"
+    if not local_mp4.exists() or local_mp4.stat().st_size < 1000:
+        return False, f"mp4 too small: {local_mp4.stat().st_size if local_mp4.exists() else 0} bytes"
 
     try:
         import av
@@ -76,25 +76,21 @@ def capture_one(adb: str, serial: str, idx: int) -> tuple[bool, str]:
         return False, "PyAV not installed (pip install av)"
 
     try:
-        container = av.open(str(h264_path), format="h264", mode="r")
+        container = av.open(str(local_mp4))
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
 
         frame_n = 0
         captured = None
-        for packet in container.demux(stream):
-            for frame in packet.decode():
-                frame_n += 1
-                if frame_n >= TARGET_FRAME or (captured is None and frame_n >= 5):
-                    captured = frame.to_ndarray(format="bgr24")
-                    if frame_n >= TARGET_FRAME:
-                        break
-            if captured is not None and frame_n >= TARGET_FRAME:
+        for frame in container.decode(stream):
+            frame_n += 1
+            if frame_n >= TARGET_FRAME:
+                captured = frame.to_ndarray(format="bgr24")
                 break
 
         container.close()
     except Exception as e:
-        return False, f"decode error: {e} (h264 size={h264_path.stat().st_size})"
+        return False, f"decode error: {e} (mp4 size={local_mp4.stat().st_size})"
 
     if captured is None:
         return False, f"got 0 frames in {DURATION}s"
