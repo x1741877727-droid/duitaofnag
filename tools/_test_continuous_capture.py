@@ -88,6 +88,9 @@ class ScreenrecordStream:
                     break
                 total_bytes += len(chunk)
                 chunks_seen += 1
+                if chunks_seen == 1:
+                    head = chunk[:32].hex()
+                    print(f"[reader {self.serial}] chunk #1 first32hex={head}", flush=True)
                 if chunks_seen <= 3 or chunks_seen % 50 == 0:
                     print(f"[reader {self.serial}] chunk #{chunks_seen} bytes={len(chunk)} total={total_bytes}", flush=True)
                 try:
