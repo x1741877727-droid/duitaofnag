@@ -157,12 +157,15 @@ import os, importlib
 ROOT = {repr(ROOT)}
 
 # 自动收集 rapidocr 的数据文件（yaml 配置 + ONNX 模型）
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 rapidocr_datas = collect_data_files('rapidocr', include_py_files=False)
+# onnxruntime DLLs（含 DirectML provider/dlls，使 GPU 加速生效）
+onnx_binaries = collect_dynamic_libs('onnxruntime')
 
 a = Analysis(
     [os.path.join(ROOT, 'backend', 'main.py')],
     pathex=[ROOT],
+    binaries=onnx_binaries,
     datas=[
         (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
