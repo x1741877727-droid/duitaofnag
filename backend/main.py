@@ -180,4 +180,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller + multiprocessing.spawn 必须：
+    # 让 worker 子进程启动时识别自己是 worker 后退出 multiprocessing 路径，
+    # 不重跑整个 FastAPI app。否则 OcrPool 子进程会递归启动 → pool 崩溃。
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

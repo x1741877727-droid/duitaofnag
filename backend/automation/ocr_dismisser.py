@@ -198,18 +198,20 @@ class OcrDismisser:
     async def _ocr_all_async(self, screenshot: np.ndarray) -> list:
         """全屏 OCR 的异步版本 — 路由到多进程 pool 让 N 实例真正并发。
 
-        Pool 没启用 → 主线程 executor 跑同步版（不阻塞 asyncio loop）
-        Pool 启用 → 跑 worker 进程，主进程不卡
+        Pool 启用 → 跑 worker 进程，主进程不卡（最理想）
+        Pool 失败 → 自动降级到默认 ThreadPool（asyncio loop 仍非阻塞）
         """
         if OcrPool.is_enabled() and OcrPool._executor is not None:
             with metrics.timed("ocr_full_pool") as tags:
                 hits_raw = await OcrPool.ocr_async(screenshot)
-                tags["n_texts"] = len(hits_raw)
-                return [
-                    self.TextHit(text=h.text, cx=h.cx, cy=h.cy)
-                    for h in hits_raw
-                ]
-        # fallback：用默认 ThreadPool 跑同步 _ocr_all（不阻塞 loop，但单 OCR 实例）
+                if hits_raw:  # pool 正常返回
+                    tags["n_texts"] = len(hits_raw)
+                    return [
+                        self.TextHit(text=h.text, cx=h.cx, cy=h.cy)
+                        for h in hits_raw
+                    ]
+                # pool 返回空（已自动禁用） → fall through 到下面 ThreadPool
+        # fallback：默认 ThreadPool 跑同步 _ocr_all（不阻塞 loop）
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._ocr_all, screenshot)
 

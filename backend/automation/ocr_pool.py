@@ -128,10 +128,9 @@ class OcrPool:
             return True
 
         if workers is None:
-            workers = int(os.environ.get(
-                "GAMEBOT_OCR_WORKERS",
-                str(min(8, max(2, (os.cpu_count() or 4) // 4)))
-            ))
+            # 默认 2 个 worker（低显存机器友好；4GB GPU 大致 ~500MB/worker × 2 = 1GB OCR 占用）
+            # 重型机用 GAMEBOT_OCR_WORKERS=4 / 8 显式抬高
+            workers = int(os.environ.get("GAMEBOT_OCR_WORKERS", "2"))
 
         cls._workers = workers
         cls._ocr_params = ocr_params
@@ -159,13 +158,26 @@ class OcrPool:
 
     @classmethod
     async def ocr_async(cls, img: np.ndarray) -> List[OcrHit]:
-        """异步 OCR。会被 asyncio loop 调度到空闲 worker，不阻塞主线程。"""
+        """异步 OCR。会被 asyncio loop 调度到空闲 worker，不阻塞主线程。
+
+        worker 崩 / BrokenProcessPool → 自动 disable，往后调用方走 fallback。
+        """
         if not cls.is_enabled() or cls._executor is None:
-            # 没初始化或被禁用 → 调用方应该 fallback 主进程 OCR
             return []
         loop = asyncio.get_event_loop()
         t0 = time.perf_counter()
-        raw = await loop.run_in_executor(cls._executor, _worker_ocr, img)
+        try:
+            raw = await loop.run_in_executor(cls._executor, _worker_ocr, img)
+        except Exception as e:
+            # BrokenProcessPool / EOFError / WorkerCrash → 永久禁用本会话的 pool
+            cls._enabled = False
+            try:
+                cls._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            cls._executor = None
+            logger.warning(f"OcrPool 故障，本会话禁用 pool 转 ThreadPool fallback: {e}")
+            return []
         dt = (time.perf_counter() - t0) * 1000
         cls._stats_calls += 1
         cls._stats_total_ms += dt
