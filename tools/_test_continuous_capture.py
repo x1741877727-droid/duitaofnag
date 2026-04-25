@@ -75,20 +75,34 @@ class ScreenrecordStream:
         codec = av.codec.CodecContext.create("h264", "r")
         codec.thread_type = "AUTO"
 
+        total_bytes = 0
+        chunks_seen = 0
+        packets_seen = 0
         try:
             while not self._stop.is_set():
                 if self._proc.stdout is None:
                     break
-                # 读一块
                 chunk = self._proc.stdout.read(65536)
                 if not chunk:
+                    print(f"[reader {self.serial}] stdout EOF after {total_bytes} bytes / {chunks_seen} chunks", flush=True)
                     break
-                # 喂给 codec parse
-                packets = codec.parse(chunk)
+                total_bytes += len(chunk)
+                chunks_seen += 1
+                if chunks_seen <= 3 or chunks_seen % 50 == 0:
+                    print(f"[reader {self.serial}] chunk #{chunks_seen} bytes={len(chunk)} total={total_bytes}", flush=True)
+                try:
+                    packets = codec.parse(chunk)
+                except Exception as e:
+                    print(f"[reader {self.serial}] parse error: {e}", flush=True)
+                    continue
+                if packets:
+                    packets_seen += len(packets)
                 for packet in packets:
                     try:
                         frames = codec.decode(packet)
-                    except Exception:
+                    except Exception as e:
+                        if self._frame_count == 0:
+                            print(f"[reader {self.serial}] decode error: {e}", flush=True)
                         frames = []
                     for frame in frames:
                         try:
@@ -100,8 +114,13 @@ class ScreenrecordStream:
                             self._frame_count += 1
                             if self._first_frame_at is None:
                                 self._first_frame_at = time.time()
+            # 额外：读 stderr
+            err = self._proc.stderr.read() if self._proc.stderr else b""
+            if err:
+                print(f"[reader {self.serial}] stderr: {err[:300]}", flush=True)
+            print(f"[reader {self.serial}] DONE chunks={chunks_seen} bytes={total_bytes} packets={packets_seen} frames={self._frame_count}", flush=True)
         except Exception as e:
-            print(f"[reader] {self.serial} error: {e}")
+            print(f"[reader {self.serial}] fatal: {e}", flush=True)
 
     def get_frame(self) -> np.ndarray | None:
         with self._lock:
@@ -174,10 +193,10 @@ def main():
 
     stream.stop()
     if first_frame_t is not None:
-        print(f"\n✅ First frame latency: {first_frame_t:.2f}s")
-        print(f"✅ Total frames in {duration}s: {stream.stats()['frame_count']}")
+        print(f"\n[OK] First frame latency: {first_frame_t:.2f}s")
+        print(f"[OK] Total frames in {duration}s: {stream.stats()['frame_count']}")
     else:
-        print("\n❌ No frame received")
+        print("\n[FAIL] No frame received")
 
 
 if __name__ == "__main__":
