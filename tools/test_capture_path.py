@@ -25,8 +25,8 @@ OUT_DIR.mkdir(exist_ok=True)
 
 # LDPlayer 9 默认 5554/5556/5558/5560/5562/5564
 SERIALS = [f"emulator-{5554 + i*2}" for i in range(6)]
-DURATION = 12  # 秒（静态画面下 H.264 IDR 间隔可能很长，要给足时间）
-TARGET_FRAME = 5   # 取第 N 帧（早点拿，画面静态时编码器懒）
+DURATION = 6  # 秒（静态 UE4 通常只产 1 帧 = IDR，6s 足够）
+TARGET_FRAME = 1   # 取第 1 帧（静态场景 mp4 经常只有 1 帧）
 
 
 def adb_path() -> str:
@@ -84,8 +84,8 @@ def capture_one(adb: str, serial: str, idx: int) -> tuple[bool, str]:
         captured = None
         for frame in container.decode(stream):
             frame_n += 1
+            captured = frame.to_ndarray(format="bgr24")
             if frame_n >= TARGET_FRAME:
-                captured = frame.to_ndarray(format="bgr24")
                 break
 
         container.close()
