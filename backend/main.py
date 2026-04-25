@@ -171,12 +171,14 @@ def main():
     setup_logging(args.debug)
 
     # Windows 默认启用 DXHook 截图后端（注入 LDPlayer Ld9BoxHeadless 抓 GPU 帧）
-    # 用户可设 GAMEBOT_CAPTURE 显式覆盖，比如:
-    #   GAMEBOT_CAPTURE=screencap (回退慢但稳定路径)
-    #   GAMEBOT_CAPTURE=wgc       (Windows Graphics Capture)
+    # 用户可设 GAMEBOT_CAPTURE 显式覆盖（screencap / wgc）
     import os as _os, platform as _platform
     if _platform.system() == "Windows" and not _os.environ.get("GAMEBOT_CAPTURE"):
         _os.environ["GAMEBOT_CAPTURE"] = "dxhook"
+    # OCR pool 默认 6 worker（匹配 6 实例并发；NV 5070 Ti 约 3 GB VRAM 占用）
+    # 低显存机器可设 GAMEBOT_OCR_WORKERS=2/3 降低
+    if not _os.environ.get("GAMEBOT_OCR_WORKERS"):
+        _os.environ["GAMEBOT_OCR_WORKERS"] = "6"
 
     port = args.port or find_free_port()
     host = args.host  # 传给 run_dev_mode / run_desktop_mode
