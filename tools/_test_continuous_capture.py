@@ -71,57 +71,68 @@ class ScreenrecordStream:
         self._reader_thread.start()
 
     def _read_loop(self):
+        """方案：累积 bytes 到 BytesIO + av.open() 周期性解码新数据"""
         import av
-        codec = av.codec.CodecContext.create("h264", "r")
-        codec.thread_type = "AUTO"
+        from io import BytesIO
 
+        buf = BytesIO()
+        last_decode_pos = 0  # 上次 av.open 时 buf 大小（字节）
         total_bytes = 0
         chunks_seen = 0
-        packets_seen = 0
+        decode_attempts = 0
         try:
             while not self._stop.is_set():
                 if self._proc.stdout is None:
                     break
-                chunk = self._proc.stdout.read(65536)
+                chunk = self._proc.stdout.read(8192)
                 if not chunk:
                     print(f"[reader {self.serial}] stdout EOF after {total_bytes} bytes / {chunks_seen} chunks", flush=True)
                     break
                 total_bytes += len(chunk)
                 chunks_seen += 1
-                if chunks_seen == 1:
-                    head = chunk[:32].hex()
-                    print(f"[reader {self.serial}] chunk #1 first32hex={head}", flush=True)
-                if chunks_seen <= 3 or chunks_seen % 50 == 0:
-                    print(f"[reader {self.serial}] chunk #{chunks_seen} bytes={len(chunk)} total={total_bytes}", flush=True)
-                try:
-                    packets = codec.parse(chunk)
-                except Exception as e:
-                    print(f"[reader {self.serial}] parse error: {e}", flush=True)
+                buf.write(chunk)
+
+                # 累积超过 16KB 后尝试解码一次
+                if buf.tell() - last_decode_pos < 16384:
                     continue
-                if packets:
-                    packets_seen += len(packets)
-                for packet in packets:
-                    try:
-                        frames = codec.decode(packet)
-                    except Exception as e:
-                        if self._frame_count == 0:
-                            print(f"[reader {self.serial}] decode error: {e}", flush=True)
-                        frames = []
-                    for frame in frames:
-                        try:
-                            arr = frame.to_ndarray(format="bgr24")
-                        except Exception:
-                            continue
+                last_decode_pos = buf.tell()
+                decode_attempts += 1
+
+                # 拷贝 buf 内容到新 BytesIO（av.open 会消费/seek 它）
+                buf.seek(0)
+                copy = BytesIO(buf.read())
+                copy.seek(0)
+                # 把 buf 文件指针留在 end，方便后续继续 write
+                buf.seek(0, 2)
+
+                if chunks_seen == 1:
+                    print(f"[reader {self.serial}] chunk #1 first32hex={chunk[:32].hex()}", flush=True)
+
+                try:
+                    container = av.open(copy, format="h264", mode="r")
+                    stream = container.streams.video[0]
+                    n = 0
+                    last_arr = None
+                    for frame in container.decode(stream):
+                        n += 1
+                        last_arr = frame.to_ndarray(format="bgr24")
+                    container.close()
+                    if last_arr is not None:
                         with self._lock:
-                            self._latest_frame = arr
-                            self._frame_count += 1
+                            self._latest_frame = last_arr
+                            self._frame_count += n
                             if self._first_frame_at is None:
                                 self._first_frame_at = time.time()
-            # 额外：读 stderr
+                        if decode_attempts <= 3 or decode_attempts % 10 == 0:
+                            print(f"[reader {self.serial}] decode#{decode_attempts}: {n} frames extracted, total={self._frame_count}", flush=True)
+                except Exception as e:
+                    if decode_attempts <= 3:
+                        print(f"[reader {self.serial}] decode#{decode_attempts} err: {e}", flush=True)
+
             err = self._proc.stderr.read() if self._proc.stderr else b""
             if err:
                 print(f"[reader {self.serial}] stderr: {err[:300]}", flush=True)
-            print(f"[reader {self.serial}] DONE chunks={chunks_seen} bytes={total_bytes} packets={packets_seen} frames={self._frame_count}", flush=True)
+            print(f"[reader {self.serial}] DONE chunks={chunks_seen} bytes={total_bytes} frames={self._frame_count}", flush=True)
         except Exception as e:
             print(f"[reader {self.serial}] fatal: {e}", flush=True)
 
