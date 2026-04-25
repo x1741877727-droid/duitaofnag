@@ -537,10 +537,28 @@ class DXHookStream:
             logger.warning(f"[dxhook] {self.serial}: 找不到 leidian{self.ld_idx} Ld9BoxHeadless 进程")
             return False
 
+        # 关键：把 DLL 复制到 temp 后再注入
+        # 否则 Ld9BoxHeadless 加载后会锁住 DLL 文件，下次 build / 升级时
+        # PyInstaller 无法覆写打包路径下的同名 DLL（PermissionError WinError 5）
+        import tempfile
+        import shutil
+        import hashlib
+        try:
+            dll_hash = hashlib.md5(open(dll_path, 'rb').read()).hexdigest()[:8]
+            tmp_dir = os.path.join(tempfile.gettempdir(), "gamebot_dxhook")
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_dll = os.path.join(tmp_dir, f"gamebot_hook_{dll_hash}.dll")
+            if not os.path.isfile(tmp_dll):
+                shutil.copyfile(dll_path, tmp_dll)
+            inject_dll_path = tmp_dll
+        except Exception as e:
+            logger.warning(f"[dxhook] {self.serial}: temp 复制 DLL 失败 ({e})，用原路径")
+            inject_dll_path = dll_path
+
         # 运行注入器
         try:
             r = subprocess.run(
-                [injector_path, str(self.box_pid), dll_path],
+                [injector_path, str(self.box_pid), inject_dll_path],
                 capture_output=True, timeout=10,
                 creationflags=_SUBPROCESS_FLAGS,
             )
