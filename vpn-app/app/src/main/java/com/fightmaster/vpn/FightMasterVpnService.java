@@ -37,7 +37,7 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
     public static final String EXTRA_PROXY_PORT = "proxy_port";
 
     // 代理服务器默认配置
-    private static final String DEFAULT_PROXY_HOST = "38.22.234.228";
+    private static final String DEFAULT_PROXY_HOST = "171.80.4.221";
     private static final int DEFAULT_PROXY_PORT = 9900;
     private String proxyHost = DEFAULT_PROXY_HOST;
     private int proxyPort = DEFAULT_PROXY_PORT;
@@ -82,35 +82,86 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
             JSONArray detour = new JSONArray();
             detour.put(new JSONObject().put("protocol", "freedom").put("settings", new JSONObject()).put("tag", "direct"));
             detour.put(new JSONObject().put("protocol", "dns").put("settings", new JSONObject()).put("tag", "dns-out"));
+            detour.put(new JSONObject().put("protocol", "blackhole").put("settings", new JSONObject()).put("tag", "reject"));
             config.put("outboundDetour", detour);
 
-            // routing rules
+            // routing rules — 六花模型：默认 DIRECT，只把封号相关 + 游戏协议端口送进代理
+            // 2026-04-19 根因修复：上一版 FINAL→PROXY 导致 qq.com OAuth 在 QUIC/sniff 失败时被路由到代理，
+            // 腾讯 OAuth 端点从代理来源被拒 → ERR_EMPTY_RESPONSE，且 Chromium BrokenAlternativeServices 缓存留后遗症
             JSONArray rules = new JSONArray();
+
+            // 1) DNS
             rules.put(new JSONObject()
                 .put("type", "field").put("port", "53").put("outboundTag", "dns-out"));
-            rules.put(new JSONObject()
-                .put("type", "field")
-                .put("domain", new JSONArray()
-                    .put("domain:qq.com").put("domain:tencent.com")
-                    .put("domain:wechat.com").put("domain:weixin.qq.com")
-                    .put("domain:gtimg.cn").put("domain:qpic.cn")
-                    .put("domain:idqqimg.com").put("domain:qlogo.cn")
-                    .put("domain:myqcloud.com"))
-                .put("outboundTag", "direct"));
+
+            // 2) HIT IP → PROXY（2026-04-19 回滚：REJECT 导致秒封，改回 PROXY 让 gameproxy 做 pos21 改字节）
             rules.put(new JSONObject()
                 .put("type", "field")
                 .put("ip", new JSONArray()
-                    .put("120.204.207.84").put("101.226.94.67").put("101.226.96.203")
-                    .put("116.128.169.94").put("58.246.163.95").put("221.181.98.213")
-                    .put("183.192.196.121").put("116.128.169.68").put("101.226.101.163"))
-                .put("outboundTag", "direct"));
+                    // 原 HIT 抓包段
+                    .put("222.189.172.0/24").put("27.155.112.0/24")
+                    // 六花"免白"规则 IP（2026-04-18 gitee liuhuaduankou/six-flower-port）
+                    .put("211.154.24.135/32")
+                    .put("122.96.96.179/32").put("122.96.96.206/32").put("122.96.96.211/32")
+                    .put("122.96.96.217/32").put("122.96.96.251/32")
+                    .put("59.83.207.176/32")
+                    .put("182.50.10.74/32")
+                    .put("180.109.171.23/32")
+                    .put("180.102.211.18/32").put("180.102.211.42/32")
+                    .put("180.102.211.93/32").put("180.102.211.116/32")
+                    .put("36.155.186.200/32").put("36.155.202.52/32").put("36.155.202.73/32")
+                    .put("36.155.202.119/32").put("36.155.228.118/32").put("36.155.249.82/32")
+                    .put("36.155.251.15/32")
+                    .put("117.89.177.167/32")
+                    .put("222.94.109.22/32")
+                    .put("43.135.105.28/32")
+                    .put("43.159.233.114/32").put("43.159.233.119/32").put("43.159.233.137/32")
+                    .put("43.159.233.192/32").put("43.159.233.204/32")
+                    .put("129.226.102.0/24")  // 扩展到 /24 覆盖 HIT 同段其他 IP
+                    .put("129.226.103.0/24")  // 同上
+                    .put("129.226.107.0/24")) // 实测也有 HIT 443
+                .put("outboundTag", "proxy"));
+
+            // 3) ACE 反作弊域名 → PROXY（game_proxy 侧 ace_block）
             rules.put(new JSONObject()
                 .put("type", "field")
                 .put("domain", new JSONArray()
-                    .put("domain:googleapis.com").put("domain:google.com").put("domain:gstatic.com"))
-                .put("outboundTag", "direct"));
+                    .put("anticheatexpert").put("crashsight"))
+                .put("outboundTag", "proxy"));
+
+            // 3b) 六花官方反作弊/检测关键词 → PROXY（gitee liuhuaduankou/six-flower-port 对齐）
+            //     DOMAIN-KEYWORD,anti / baidu / jd / yqdk / aliyun + cn.bing.com
             rules.put(new JSONObject()
-                .put("type", "field").put("outboundTag", "proxy").put("port", "0-65535"));
+                .put("type", "field")
+                .put("domain", new JSONArray()
+                    .put("keyword:anti").put("keyword:baidu").put("keyword:jd")
+                    .put("keyword:yqdk").put("keyword:aliyun")
+                    .put("cn.bing.com"))
+                .put("outboundTag", "proxy"));
+
+            // 4) FAKE-BEACON 8081 → PROXY（game_proxy 假 HTTP 200 响应，六花官方不含游戏端口转发）
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("port", "8081")
+                .put("outboundTag", "proxy"));
+
+            // 4b) 5692/7889/3013 → PROXY（2026-04-19 抓 JSON 分析 cmd_id，server 端不改包只转发+capture）
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("port", "5692,7889,3013")
+                .put("outboundTag", "proxy"));
+
+            // 5) 验证页域名 → PROXY（brand_page / verify）
+            rules.put(new JSONObject()
+                .put("type", "field")
+                .put("domain", new JSONArray()
+                    .put("gameproxy-verify").put("gameproxy-verify-json")
+                    .put("m.baidu.com"))
+                .put("outboundTag", "proxy"));
+
+            // 6) FINAL → DIRECT（除 HIT IP 外其他 443 和所有其他端口正常直连，登录/CDN/游戏主服务器全放行）
+            rules.put(new JSONObject()
+                .put("type", "field").put("outboundTag", "direct").put("port", "0-65535"));
 
             config.put("routing", new JSONObject()
                 .put("settings", new JSONObject()

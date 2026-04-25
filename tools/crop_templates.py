@@ -7,8 +7,9 @@
 import os
 from PIL import Image
 
-SCREENSHOTS_DIR = "/Users/Zhuanz/Vexa/game-automation/fixtures/screenshots"
-TEMPLATES_DIR = "/Users/Zhuanz/Vexa/game-automation/fixtures/templates"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCREENSHOTS_DIR = os.path.join(PROJECT_ROOT, "fixtures", "screenshots")
+TEMPLATES_DIR = os.path.join(PROJECT_ROOT, "fixtures", "templates")
 
 # 基准分辨率
 BASE_W, BASE_H = 1280, 720

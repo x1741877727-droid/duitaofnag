@@ -7,7 +7,7 @@
 ```
 macOS (开发)                  GitHub                    Windows (运行)
 ┌────────────────┐    push    ┌──────────┐    pull    ┌────────────────┐
-│  Claude 改代码  │ ─────────→ │  代码仓   │ ────────→ │ update.bat     │
+│  Claude 改代码  │ ─────────→ │  代码仓   │ ────────→ │ deploy/windows/update.bat │
 │       ↑        │            └──────────┘            │  自动重启服务  │
 │  我的指挥      │                                    │       ↓        │
 └────────────────┘            ←─── HTTPS ───          │ 后端 + LDPlayer│
@@ -21,7 +21,7 @@ macOS (开发)                  GitHub                    Windows (运行)
 ### 步骤 1：在 macOS 上把代码 push 到 GitHub
 
 ```bash
-cd /Users/Zhuanz/Vexa/game-automation
+cd /Users/Zhuanz/ProjectHub/game-automation
 
 # 初始化 git
 git init
@@ -51,7 +51,7 @@ cd game-automation
 
 ```bash
 # 双击运行
-first-setup.bat
+deploy\windows\first-setup.bat
 ```
 
 这个脚本会自动：
@@ -66,7 +66,7 @@ pip install -r backend\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/sim
 
 ### 步骤 4：配置文件
 
-编辑 `settings.json`：
+编辑 `config\settings.json`：
 ```json
 {
   "ldplayer_path": "C:\\leidian\\LDPlayer9",   ← 改成你的雷电路径
@@ -77,7 +77,7 @@ pip install -r backend\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/sim
 }
 ```
 
-编辑 `accounts.json` 配置 6 个账号（QQ 号、游戏 ID、分组、角色）。
+编辑 `config\accounts.json` 配置 6 个账号（QQ 号、游戏 ID、分组、角色）。
 
 ### 步骤 5：下载 cloudflared（远程调试用）
 
@@ -90,7 +90,7 @@ pip install -r backend\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/sim
 
 ```bash
 # 远程调试模式（让我能看到）
-start-with-tunnel.bat
+deploy\windows\start-with-tunnel.bat
 
 # 或本地模式（自己用）
 python backend\main.py --dev --port 8900
@@ -103,7 +103,7 @@ python backend\main.py --dev --port 8900
 ### macOS 端（我或你）
 
 ```bash
-cd /Users/Zhuanz/Vexa/game-automation
+cd /Users/Zhuanz/ProjectHub/game-automation
 
 # 改代码后
 git add .
@@ -115,10 +115,10 @@ git push
 
 ```bash
 # 双击运行
-update.bat
+deploy\windows\update.bat
 ```
 
-`update.bat` 会自动：
+`deploy\windows\update.bat` 会自动：
 1. 停止正在运行的后端和 cloudflared
 2. `git pull` 拉取最新代码
 3. 如果 `requirements.txt` 有变化，自动 `pip install`
@@ -137,8 +137,8 @@ update.bat
 ```
 game-automation/
 ├── backend/                    ★ 所有 Python 代码
-│   ├── *.py
-│   ├── adb/, recognition/, handlers/, tools/
+│   ├── *.py                    （runner_service / api / main 为主控；handlers 归档）
+│   ├── adb/, automation/, recognition/
 │   └── requirements.txt
 ├── web/                        ★ 前端源码
 │   ├── src/
@@ -146,17 +146,22 @@ game-automation/
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── index.html
-├── settings.json               ★ 配置模板
-├── accounts.json               ★ 账号模板
+├── config/
+│   ├── settings.json           ★ 配置模板
+│   └── accounts.json           ★ 账号模板
+├── gameproxy-go/               ★ Go 防封代理（线上 171.80.4.221:9900）
+├── tools/                      ★ host_*.py 逆向脚本 + yolo 训练工具
+├── agents/remote_agent.py      ★ 远程运维入口
 ├── README.md
 ├── REMOTE_DEBUG.md
 ├── DEPLOYMENT.md
+├── MASTER_PLAN.md
 ├── .gitignore
-├── first-setup.bat             ★ Windows 首次部署
-├── update.bat                  ★ Windows 一键更新
-├── start-with-tunnel.bat       ★ Windows 启动 + 隧道
-├── build.py                    ★ Nuitka 打包脚本
-└── test_*.py                   ★ 测试脚本
+├── deploy/windows/first-setup.bat   ★ Windows 首次部署
+├── deploy/windows/update.bat        ★ Windows 一键更新
+├── deploy/windows/start-with-tunnel.bat ★ Windows 启动 + 隧道
+├── build.py                    ★ PyInstaller 打包脚本
+└── tests/                      ★ phase1-7 测试脚本
 ```
 
 **不需要传输的**（已在 .gitignore 中排除）：
@@ -171,7 +176,7 @@ game-automation/
 
 ## 四、常见问题
 
-### Q: 如果 settings.json / accounts.json 里有敏感信息怎么办？
+### Q: 如果 config/settings.json / config/accounts.json 里有敏感信息怎么办？
 
 两种方式：
 
@@ -179,19 +184,19 @@ game-automation/
 
 ```bash
 # 在 .gitignore 中取消注释:
-settings.json
-accounts.json
+config/settings.json
+config/accounts.json
 ```
 
 提交模板版本：
 ```bash
-cp settings.json settings.example.json
+cp config/settings.json config/settings.example.json
 git add settings.example.json
 ```
 
 Windows 上首次启动时复制一份：
 ```bash
-copy settings.example.json settings.json
+copy config\settings.example.json config\settings.json
 ```
 
 **方式 B：私有仓库**
@@ -201,7 +206,7 @@ GitHub 私有仓库直接提交，只要你不分享给别人就行。
 ### Q: Git push 之前 macOS 上要不要构建前端？
 
 **不需要**。前端构建产物 `web/dist/` 已被 .gitignore 排除，
-Windows 上 `update.bat` / `first-setup.bat` 会自动运行 `npm run build`。
+Windows 上 `deploy\windows\update.bat` / `deploy\windows\first-setup.bat` 会自动运行 `npm run build`。
 
 ### Q: 我想直接用 SCP/SFTP 不用 git 行不行？
 
@@ -253,14 +258,15 @@ cloudflared 的优势是**无需注册、零配置**，启动就能用。
 
 ```
 早上:
-  Windows: 双击 update.bat → 选 [1] 远程调试模式
+  Windows: 双击 deploy\windows\update.bat → 选 [1] 远程调试模式
   Windows: 复制 cloudflared 输出的 URL，发给 Claude
   → 现在我可以远程操作你的环境了
 
 调试中:
-  我: curl /api/diagnostic/snapshot → 看现场
-  我: 发现 popup_handler 有问题 → 改代码 → push
-  你: 双击 update.bat → 选 [1]
+  我: curl /api/screenshot/0 / /api/status → 看现场
+  我: 通过 9100 Remote Agent 直接读日志、跑命令
+  我: 发现自动化逻辑有问题 → 改代码 → push
+  你: 双击 deploy\windows\update.bat → 选 [1]
   → 30 秒后新代码已运行
 
 晚上:
@@ -273,7 +279,7 @@ cloudflared 的优势是**无需注册、零配置**，启动就能用。
 ## 六、安全建议
 
 如果你的 GitHub 仓库是公开的：
-- **不要**把 `settings.json` 和 `accounts.json` 提交（在 .gitignore 中加上）
+- **不要**把 `config/settings.json` 和 `config/accounts.json` 提交（在 .gitignore 中加上）
 - **不要**把 LLM API key 写在代码里
 - 用环境变量或单独的 `.env` 文件管理密钥
 

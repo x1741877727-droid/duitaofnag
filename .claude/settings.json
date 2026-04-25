@@ -1,0 +1,52 @@
+{
+  "skills": [
+    ".claude/skills/security-research"
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(python*:*)",
+      "Bash(python3*:*)",
+      "Bash(nmap:*)",
+      "Bash(gdb*:*)",
+      "Bash(r2*:*)",
+      "Bash(radare2*:*)",
+      "Bash(objdump*:*)",
+      "Bash(readelf*:*)",
+      "Bash(strings*:*)",
+      "Bash(binwalk*:*)",
+      "Bash(file*:*)",
+      "Bash(xxd*:*)",
+      "Bash(hexdump*:*)",
+      "Bash(nc*:*)",
+      "Bash(netcat*:*)",
+      "Bash(curl*:*)",
+      "Bash(wget*:*)",
+      "Bash(sqlmap*:*)",
+      "Bash(ffuf*:*)",
+      "Bash(gobuster*:*)",
+      "Bash(hashcat*:*)",
+      "Bash(john*:*)",
+      "Bash(hydra*:*)",
+      "Bash(nuclei*:*)",
+      "Bash(frida*:*)",
+      "Bash(ROPgadget*:*)",
+      "Bash(one_gadget*:*)",
+      "Bash(yara*:*)",
+      "Bash(volatility*:*)",
+      "Bash(tshark*:*)",
+      "Bash(tcpdump*:*)",
+      "Bash(wireshark*:*)",
+      "Bash(strace*:*)",
+      "Bash(ltrace*:*)",
+      "Bash(socat*:*)",
+      "Bash(ssh*:*)",
+      "Bash(msfconsole*:*)",
+      "Bash(msfvenom*:*)",
+      "Bash(go build*:*)",
+      "Bash(gcc*:*)",
+      "Bash(x86_64-w64-mingw32-gcc*:*)",
+      "Bash(pip*:*)",
+      "Bash(pip3*:*)"
+    ]
+  }
+}

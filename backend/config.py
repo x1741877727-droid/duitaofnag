@@ -1,6 +1,7 @@
 """
 配置管理模块
-读写 accounts.json / settings.json，提供全局配置访问
+读写 config/accounts.json / config/settings.json，提供全局配置访问。
+兼容旧结构：若根目录仍存在同名文件，也会优先回退读取。
 """
 
 import json
@@ -8,17 +9,31 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+import sys as _sys
+
+
+def _resolve_config_path(filename: str) -> str:
+    """Resolve config files from config/ first, then fall back to the old root layout."""
+    primary = os.path.join(BASE_DIR, "config", filename)
+    legacy = os.path.join(BASE_DIR, filename)
+    if os.path.exists(primary):
+        return primary
+    if os.path.exists(legacy):
+        return legacy
+    return primary
+
+
 # 配置文件路径
 # 打包后: %APPDATA%\GameBot（可写，与只读的程序目录分离）
-# 开发模式: 项目根目录
-import sys as _sys
+# 开发模式: 项目根目录下的 config/
 if getattr(_sys, 'frozen', False):
     BASE_DIR = os.path.join(os.environ.get('APPDATA', '.'), 'GameBot')
     os.makedirs(BASE_DIR, exist_ok=True)
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ACCOUNTS_PATH = os.path.join(BASE_DIR, "accounts.json")
-SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
+    os.makedirs(os.path.join(BASE_DIR, "config"), exist_ok=True)
+ACCOUNTS_PATH = _resolve_config_path("accounts.json")
+SETTINGS_PATH = _resolve_config_path("settings.json")
 
 
 @dataclass

@@ -200,6 +200,19 @@ func StartAPIServer(addr string, server *Socks5Server) {
 		}
 	})
 
+	// Packet viewer API (Phase A)
+	getCaptureDir := func() string {
+		if server.capture == nil {
+			return ""
+		}
+		return server.capture.CaptureDir()
+	}
+	mux.HandleFunc("/api/conns", handleConns(getCaptureDir))
+	mux.HandleFunc("/api/timeline", handleTimeline(getCaptureDir))
+	mux.HandleFunc("/api/frame", handleFrame(getCaptureDir))
+	mux.HandleFunc("/api/label", handleLabelPost(getCaptureDir))
+	mux.HandleFunc("/api/labels", handleLabelsGet(getCaptureDir))
+
 	logInfo("HTTP API 启动: %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		logWarn("HTTP API 启动失败: %v", err)

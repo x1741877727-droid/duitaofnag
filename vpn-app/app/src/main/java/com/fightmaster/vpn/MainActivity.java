@@ -43,6 +43,13 @@ public class MainActivity extends Activity {
         statusText = findViewById(R.id.status_text);
         engineStatus = findViewById(R.id.engine_status);
 
+        // 显示当前配置的代理地址
+        TextView proxyHostText = findViewById(R.id.proxy_host_text);
+        android.content.SharedPreferences prefs = getSharedPreferences("fightmaster_config", MODE_PRIVATE);
+        String host = prefs.getString("proxy_host", HostObfuscate.getHost());
+        int port = prefs.getInt("proxy_port", HostObfuscate.getPort());
+        proxyHostText.setText(host + ":" + port);
+
         connectBtn.setOnClickListener(v -> onConnectClick());
 
         // 应用选择按钮

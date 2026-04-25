@@ -114,6 +114,21 @@ case "$( uname )" in                #(
   NONSTOP* )        nonstop=true ;;
 esac
 
+# This project currently uses AGP 7.4.2 + Gradle 7.5.1.
+# On macOS, running with JDK > 17 can trigger D8 crashes during dexing.
+# If JAVA_HOME is not set, prefer a local JDK 17 automatically.
+if [ -z "$JAVA_HOME" ] && "$darwin" && [ -x /usr/libexec/java_home ] && command -v java >/dev/null 2>&1 ; then
+    java_major=$(java -version 2>&1 | awk -F '[\".]' '/version/ {print $2; exit}')
+    if [ -n "$java_major" ] && [ "$java_major" -gt 17 ] 2>/dev/null ; then
+        java17_home=$(/usr/libexec/java_home -v 17 2>/dev/null)
+        if [ -n "$java17_home" ] ; then
+            JAVA_HOME=$java17_home
+            export JAVA_HOME
+            warn "Using JDK 17 for Android build compatibility: $JAVA_HOME"
+        fi
+    fi
+fi
+
 CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
 
 

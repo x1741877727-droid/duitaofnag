@@ -54,7 +54,7 @@ powershell "Start-Process cmd -ArgumentList '/c python C:/game_proxy/server/game
 ## FightMaster APK 构建
 
 ```bash
-cd /Users/Zhuanz/Vexa/game-automation/vpn-app
+cd /Users/Zhuanz/ProjectHub/game-automation/vpn-app
 ./gradlew assembleDebug
 # 输出: app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -127,7 +127,7 @@ capture mode 代码已从 game_proxy 和 FightMaster 中移除。保留 `proxy/t
 
 ## 相关记忆文件
 
-Claude 的 memory 文件在 `/Users/Zhuanz/.claude/projects/-Users-Zhuanz-Vexa/memory/`，包含：
+Claude 的 memory 文件当前仍在 legacy 路径 `/Users/Zhuanz/.claude/projects/-Users-Zhuanz-Vexa/memory/`，包含：
 - `no_mitm_breakthrough.md` — 去掉 MITM 不封号的完整记录
 - `fightmaster_breakthrough.md` — FightMaster 链路打通记录
 - `memscan_findings.md` — 宿主机内存扫描方案

@@ -73,6 +73,23 @@ export interface AccountAssignment {
   gameId: string
 }
 
+export interface AcceleratorStatus {
+  running: boolean
+  level1_proxy: boolean
+  level2_mitm: boolean
+  level3_rules: boolean
+  proxy_ip?: string
+  proxy_detail?: Record<string, unknown>
+  pid?: number
+  message?: string
+}
+
+export interface AccelInstanceState {
+  loading: boolean
+  status: AcceleratorStatus | null
+  error: string | null
+}
+
 interface AppState {
   isRunning: boolean
   setIsRunning: (running: boolean) => void
@@ -91,6 +108,9 @@ interface AppState {
 
   emulators: Emulator[]
   setEmulators: (emulators: Emulator[]) => void
+
+  accelStates: Record<number, AccelInstanceState>
+  setAccelState: (index: number, patch: Partial<AccelInstanceState>) => void
 
   logs: LogEntry[]
   addLog: (log: Omit<LogEntry, 'id'>) => void
@@ -138,6 +158,17 @@ export const useAppStore = create<AppState>((set) => ({
 
   emulators: [],
   setEmulators: (emulators) => set({ emulators }),
+
+  accelStates: {},
+  setAccelState: (index, patch) => set((state) => {
+    const prev = state.accelStates[index] ?? { loading: false, status: null, error: null }
+    return {
+      accelStates: {
+        ...state.accelStates,
+        [index]: { ...prev, ...patch },
+      },
+    }
+  }),
 
   logs: [],
   addLog: (log) => set((state) => ({

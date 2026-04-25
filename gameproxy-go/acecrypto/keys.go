@@ -1,0 +1,58 @@
+package acecrypto
+
+// 本文件常量来自 libtersafe.so dump (SHA256=b0a528a6732c02e23d2feb135e1966d556834212a7998d59461c2f63d7ce5ab4).
+// 生成脚本：/tmp/dump_ace_constants.py  原始 JSON：/tmp/ace_constants.json
+
+// KeyTable 为 ACE 上报包 keyIdx (0..9) 对应的 10 条 seed 字节串。
+//
+// 来源：libtersafe.so 内 RVA 0x518280 的 10 个指针槽。
+// 观察：KeyTable[5] = {0x5b,0x54,0x4b} == "[TK"（与反编译/Ghidra 交叉验证一致）；
+// 其他条目字符串打印看起来不像 ASCII，疑似 XOR 0x17 混淆（下面 KeyTableDeobf 提供）。
+//
+// 解密时先用原串试；失败再试 KeyTableDeobf。
+var KeyTable = [10][]byte{
+	{0x43, 0x48, 0x41, 0x47, 0x51, 0x58},                   // 0
+	{0x51, 0x5f, 0x56, 0x41, 0x5b, 0x5c, 0x52},             // 1
+	{0x53, 0x59, 0x53, 0x5a, 0x5a},                         // 2
+	{0x5d, 0x50, 0x40, 0x58, 0x51, 0x41},                   // 3
+	{0x43, 0x45, 0x5d, 0x41, 0x51},                         // 4
+	{0x5b, 0x54, 0x4b},                                     // 5 == "[TK"
+	{0x51, 0x44, 0x46, 0x5c},                               // 6
+	{0x44, 0x5e, 0x47, 0x50, 0x5c},                         // 7
+	{0x43, 0x41, 0x40, 0x5a, 0x40, 0x50},                   // 8
+	{0x57, 0x49, 0x58, 0x5f, 0x38, 0x33, 0x71, 0x70, 0x74}, // 9
+}
+
+// Mode0PadA / Mode0PadB: 32B init constant at RVA 0x9a160 (Mode 0 用，Mode 0 目前未实现但常量先就位)。
+var Mode0PadA = [16]byte{
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+}
+
+var Mode0PadB = [16]byte{
+	0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+}
+
+// KeyTableDeobf 把 KeyTable 每条 seed 每个字节 XOR 0x17 返回。
+// 观察：KeyTable[0]={0x43,0x48,0x41,0x47,0x51,0x58} XOR 0x17 = "TO_VFO_"（不完全可读）,
+// KeyTable[5]={0x5b,0x54,0x4b} XOR 0x17 = {0x4c,0x43,0x5c} = "LC\\"（非 ASCII）。
+// 哪种形式才是 RC6 真正的 seed，需要用真实抓包验证。
+func KeyTableDeobf() [10][]byte {
+	var out [10][]byte
+	for i, s := range KeyTable {
+		b := make([]byte, len(s))
+		for j := 0; j < len(s); j++ {
+			b[j] = s[j] ^ 0x17
+		}
+		out[i] = b
+	}
+	return out
+}
+
+// SeedBytes 返回 keyIdx 对应 seed 的原始字节。长度可能 < 8。
+// RC6 key schedule 会把它按需要填充 / 截断到目标长度。
+func SeedBytes(keyIdx int) ([]byte, bool) {
+	if keyIdx < 0 || keyIdx >= len(KeyTable) {
+		return nil, false
+	}
+	return KeyTable[keyIdx], true
+}

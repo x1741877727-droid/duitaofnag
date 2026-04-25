@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useAppStore, type TeamGroup, type TeamRole } from '@/lib/store'
-import { Header } from '@/components/header'
+import { Header } from '@/components/Header'
 import { Dashboard } from '@/components/dashboard'
 import { SettingsView } from '@/components/settings-view'
 import { LogDrawer } from '@/components/log-panel'

@@ -12,6 +12,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from . import metrics
+
 logger = logging.getLogger(__name__)
 
 # 归一化分辨率（所有截图统一缩放到这个尺寸再匹配）
@@ -141,6 +143,7 @@ class ScreenMatcher:
         if template_name not in self._templates:
             return None
 
+        _m_t0 = __import__('time').perf_counter()
         tmpl_gray, default_th = self._templates[template_name]
         th = threshold if threshold is not None else default_th
         screen_gray = self._normalize(screenshot)
@@ -181,15 +184,21 @@ class ScreenMatcher:
             if scale == 1.0 and best_val >= th:
                 break
 
+        _dur_ms = round((__import__('time').perf_counter() - _m_t0) * 1000, 2)
         if best_val >= th and best_loc is not None:
             cx = best_loc[0] + best_tw // 2
             cy = best_loc[1] + best_th_px // 2
+            metrics.record("template_match", dur_ms=_dur_ms, tpl=template_name,
+                           score=round(best_val, 3), hit=True,
+                           scale=best_scale, edge=use_edge)
             return MatchHit(
                 name=template_name,
                 confidence=best_val,
                 cx=cx, cy=cy,
                 w=best_tw, h=best_th_px,
             )
+        metrics.record("template_match", dur_ms=_dur_ms, tpl=template_name,
+                       score=round(best_val, 3), hit=False, edge=use_edge)
         return None
 
     def find_any(

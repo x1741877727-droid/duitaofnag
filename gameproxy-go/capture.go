@@ -42,7 +42,8 @@ func (c *PacketCapture) ShouldCapture(port int) bool {
 }
 
 // NewConnection 注册新连接，创建目录，写 meta.json
-func (c *PacketCapture) NewConnection(dstAddr string, dstPort int) (string, error) {
+// clientIP 来自 socks5 入口的 RemoteAddr；用于前端按"实例"分组
+func (c *PacketCapture) NewConnection(dstAddr string, dstPort int, clientIP string) (string, error) {
 	c.mu.Lock()
 	c.connCounter++
 	connID := fmt.Sprintf("conn_%06d", c.connCounter)
@@ -55,9 +56,10 @@ func (c *PacketCapture) NewConnection(dstAddr string, dstPort int) (string, erro
 
 	now := time.Now()
 	meta := map[string]interface{}{
-		"conn_id":   connID,
-		"dst_addr":  dstAddr,
-		"dst_port":  dstPort,
+		"conn_id":    connID,
+		"dst_addr":   dstAddr,
+		"dst_port":   dstPort,
+		"client_ip":  clientIP,
 		"start_time": float64(now.UnixNano()) / 1e9,
 		"start_iso":  now.Format("2006-01-02T15:04:05"),
 	}
@@ -80,6 +82,8 @@ func (c *PacketCapture) SavePacket(connID string, data []byte, direction string,
 		prefix = "s2c"
 	case "send_mod":
 		prefix = "c2s_mod"
+	case "recv_mod":
+		prefix = "s2c_mod"
 	}
 
 	base := fmt.Sprintf("%s_%06d", prefix, seq)
@@ -105,6 +109,11 @@ func (c *PacketCapture) SavePacket(connID string, data []byte, direction string,
 	}
 	metaData, _ := json.MarshalIndent(pktMeta, "", "  ")
 	return os.WriteFile(filepath.Join(connDir, base+".json"), metaData, 0644)
+}
+
+// CaptureDir 返回当前抓包目录
+func (c *PacketCapture) CaptureDir() string {
+	return c.captureDir
 }
 
 // ConnCount 连接计数

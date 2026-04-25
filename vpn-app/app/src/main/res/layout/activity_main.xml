@@ -103,10 +103,11 @@
                     android:textColor="@color/fm_text_dim"
                     android:textSize="14sp" />
                 <TextView
+                    android:id="@+id/proxy_host_text"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:fontFamily="sans-serif-medium"
-                    android:text="38.22.234.228:9900"
+                    android:text="171.80.4.221:9900"
                     android:textColor="@color/fm_text"
                     android:textSize="14sp" />
             </LinearLayout>
@@ -130,7 +131,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:fontFamily="sans-serif-medium"
-                    android:text="SOCKS5 + TLS MITM"
+                    android:text="SOCKS5 (Go)"
                     android:textColor="@color/fm_text"
                     android:textSize="14sp" />
             </LinearLayout>
