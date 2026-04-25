@@ -201,6 +201,14 @@ class MultiRunnerService:
         logging.getLogger("backend.automation").addHandler(self._file_handler)
         logger.info(f"会话日志: {self._session_dir}")
 
+        # 结构化性能指标（Task 0.1）
+        from .automation import metrics
+        metrics.configure(os.path.join(self._session_dir, "metrics.jsonl"))
+        metrics.start_system_sampler(interval=2.0)  # 每 2s 记 CPU/内存/线程
+        # 事件循环延迟监控：async task 每 0.5s 打点，OCR 卡 loop 时能看到
+        asyncio.create_task(metrics.event_loop_lag_monitor(interval=0.5, threshold_ms=50))
+        logger.info(f"metrics.jsonl → {self._session_dir}/metrics.jsonl (sys sampler + loop lag 已启动)")
+
         # 解析 ADB 路径
         adb_path = settings.adb_path
         if not adb_path:
@@ -656,13 +664,16 @@ class MultiRunnerService:
             auto_logger.removeHandler(handler)
         self._log_handlers.clear()
 
-        # 停止所有 minicap 流
+        # 停止所有截图流（screenrecord / 兼容旧 minicap 字段）
         for runner in self._runners.values():
             adb = getattr(runner, 'adb', None)
             raw = getattr(adb, '_adb', adb) if adb else None
-            mc = getattr(raw, '_minicap', None) if raw else None
-            if mc:
-                mc.stop()
+            stream = getattr(raw, '_stream', None) if raw else None
+            if stream:
+                try:
+                    stream.stop()
+                except Exception:
+                    pass
 
         # 关闭会话文件日志
         if self._file_handler:

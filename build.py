@@ -157,15 +157,18 @@ import os, importlib
 ROOT = {repr(ROOT)}
 
 # 自动收集 rapidocr 的数据文件（yaml 配置 + ONNX 模型）
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 rapidocr_datas = collect_data_files('rapidocr', include_py_files=False)
 # onnxruntime DLLs（含 DirectML provider/dlls，使 GPU 加速生效）
 onnx_binaries = collect_dynamic_libs('onnxruntime')
+# PyAV libavcodec/libavformat 等 .pyd / DLL — UE4 截图依赖
+av_binaries = collect_dynamic_libs('av')
+av_hidden = collect_submodules('av')
 
 a = Analysis(
     [os.path.join(ROOT, 'backend', 'main.py')],
     pathex=[ROOT],
-    binaries=onnx_binaries,
+    binaries=onnx_binaries + av_binaries,
     datas=[
         (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
@@ -189,7 +192,7 @@ a = Analysis(
         'backend.automation.yolo_detector', 'backend.automation.ocr_pool',
         'backend.automation.screenshot_collector',
         'yaml', 'psutil', 'multiprocessing',
-    ],
+    ] + av_hidden,
 )
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], name='GameBot', debug=False, console=True)

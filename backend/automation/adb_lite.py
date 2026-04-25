@@ -2,18 +2,17 @@
 ADB 控制器 — 基于 subprocess 直接调用 adb 命令
 专门为雷电模拟器优化，已在实机测试中验证通过。
 
-截图策略：
-  1. 优先用 minicap 流式截图（~30ms，6个模拟器完全并行）
-  2. minicap 不可用时回退到 screencap（信号量限流防排队）
+截图策略（2026-04-25 重构，UE4 兼容）：
+  1. 优先用 ScreenrecordStream（adb shell screenrecord raw H.264 + PyAV，UE4 OK）
+  2. 不可用时回退到 screencap（信号量限流防排队）
+  - minicap 抓 UE4 黑帧（HWC overlay + secure flag），已弃用
 """
 
 import asyncio
+import io
 import logging
 import os
 import platform
-import re
-import socket
-import struct
 import subprocess
 import threading
 import time
@@ -22,12 +21,14 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from . import metrics
+
 logger = logging.getLogger(__name__)
 
 # Windows 下隐藏 subprocess 的 cmd 窗口
 _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 
-# screencap 回退用信号量（minicap 不可用时）
+# screencap 回退用信号量
 _screenshot_semaphore: Optional[asyncio.Semaphore] = None
 
 
@@ -39,184 +40,187 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 
 # ====================================================================
-# Minicap 流式截图
+# ScreenrecordStream — UE4 兼容截图（adb shell screenrecord + PyAV 解 H.264）
 # ====================================================================
 
-def _find_minicap_dir() -> str:
-    """查找 minicap 二进制目录"""
-    import sys as _sys
-    if getattr(_sys, 'frozen', False):
-        root = os.path.dirname(_sys.executable)
-    else:
-        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    candidates = [
-        os.path.join(root, "tools", "minicap"),
-        os.path.join(root, "_internal", "tools", "minicap"),
-    ]
-    for d in candidates:
-        if os.path.isfile(os.path.join(d, "minicap")):
-            return d
-    return candidates[0]
+class ScreenrecordStream:
+    """长流 screenrecord raw H.264 + PyAV 解码 → 后台线程持续刷新最新帧
 
+    工作原理：
+      1. subprocess.Popen(adb -s <serial> exec-out screenrecord
+            --time-limit=170 --output-format=h264 --bit-rate=4M -)
+      2. 后台 reader 线程把 stdout 字节累积到 BytesIO
+      3. 累积 ≥16KB 后 av.open(BytesIO, format='h264') 解最新帧
+      4. screenrecord 180s 上限，subprocess 退出后自动重启
+      5. BytesIO 超 1MB 自动 trim 到末尾 256KB（保留下一个 IDR 重启解码）
 
-class MinicapStream:
-    """Minicap 流式截图 — 后台线程持续读帧，screenshot() 直接取最新帧
-
-    比 screencap 快 10-20x，且各实例完全并行无阻塞。
+    UE4 验证：6/6 LDPlayer 9 实例 + 和平精英非黑帧（2026-04-25 实测）。
+    与 minicap 不同：走 SurfaceFlinger 系统级 screenrecord 路径，不受 HWC overlay 影响。
     """
 
-    DEVICE_PATH = "/data/local/tmp/minicap"
-    DEVICE_SO = "/data/local/tmp/minicap.so"
+    # screenrecord 默认 --time-limit=180s 强制断流，此处留 10s 余量给重启
+    SCREENRECORD_TIME_LIMIT = 170
+    SCREENRECORD_BIT_RATE = 4_000_000
+    BUFFER_TRIM_THRESHOLD = 1_000_000  # 1MB 累积后 trim
+    BUFFER_TRIM_KEEP = 256_000          # 保留末尾 256KB 等下一个 IDR
+    DECODE_INTERVAL_BYTES = 16384       # 每累积 16KB 触发一次 decode
 
-    def __init__(self, adb_path: str, serial: str, port: int):
+    def __init__(self, adb_path: str, serial: str):
         self._adb_path = adb_path
         self._serial = serial
-        self._port = port
-        self._sock: Optional[socket.socket] = None
-        self._running = False
-        self._latest_frame: Optional[np.ndarray] = None
-        self._frame_lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
-        self._frame_time: float = 0  # 最新帧的时间戳
-
-    def _adb(self, *args) -> str:
-        cmd = [self._adb_path, "-s", self._serial] + list(args)
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=15,
-                               creationflags=_SUBPROCESS_FLAGS)
-            return r.stdout.decode("utf-8", errors="replace")
-        except Exception:
-            return ""
+        self._stop_event = threading.Event()
+        self._latest_frame: Optional[np.ndarray] = None
+        self._frame_time: float = 0
+        self._frame_lock = threading.Lock()
+        self._frame_count = 0
+        self._restart_count = 0
+        self._available = False
 
     def setup(self) -> bool:
-        """推送 minicap → 启动进程 → 端口转发 → 连接读帧"""
+        """启动后台 reader 线程（subprocess 由 reader 自己管理）。"""
         try:
-            return self._do_setup()
-        except Exception as e:
-            logger.warning(f"[minicap] {self._serial} 初始化失败: {e}")
+            import av  # noqa: F401  — 校验依赖
+        except ImportError:
+            logger.warning("[screenrecord] PyAV 未安装，无法用 UE4 截图")
             return False
 
-    def _do_setup(self) -> bool:
-        # 1. 检查是否已推送
-        check = self._adb("shell", f"ls {self.DEVICE_PATH} 2>/dev/null")
-        if "minicap" not in check:
-            minicap_dir = _find_minicap_dir()
-            bin_path = os.path.join(minicap_dir, "minicap")
-            so_path = os.path.join(minicap_dir, "minicap.so")
-            if not os.path.isfile(bin_path):
-                logger.warning(f"[minicap] 二进制不存在: {bin_path}")
-                return False
-            logger.info(f"[minicap] {self._serial} 推送二进制...")
-            self._adb("push", bin_path, self.DEVICE_PATH)
-            self._adb("push", so_path, self.DEVICE_SO)
-            self._adb("shell", f"chmod 755 {self.DEVICE_PATH}")
-
-        # 2. 获取分辨率
-        wm = self._adb("shell", "wm size")
-        m = re.search(r'(\d+)x(\d+)', wm)
-        if not m:
-            logger.warning(f"[minicap] {self._serial} 无法获取分辨率")
-            return False
-        w, h = m.group(1), m.group(2)
-
-        # 3. 杀旧进程 + 启动新进程
-        self._adb("shell", "pkill -f minicap 2>/dev/null")
-        time.sleep(0.3)
-        # 后台启动，-S = skip frames（只保留最新帧，低延迟）
-        self._adb("shell",
-                   f"LD_LIBRARY_PATH=/data/local/tmp "
-                   f"nohup /data/local/tmp/minicap "
-                   f"-P {w}x{h}@{w}x{h}/0 -S "
-                   f"> /dev/null 2>&1 &")
-        time.sleep(1)
-
-        # 4. 端口转发
-        self._adb("forward", f"tcp:{self._port}", "localabstract:minicap")
-        time.sleep(0.3)
-
-        # 5. 连接 socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        try:
-            sock.connect(("127.0.0.1", self._port))
-        except (ConnectionRefusedError, socket.timeout) as e:
-            logger.warning(f"[minicap] {self._serial} 连接失败: {e}")
-            sock.close()
-            return False
-
-        # 6. 读 banner（24字节）
-        banner = self._read_exact(sock, 24)
-        vw = struct.unpack_from("<I", banner, 14)[0]
-        vh = struct.unpack_from("<I", banner, 18)[0]
-        logger.info(f"[minicap] {self._serial} 已连接 {vw}x{vh}")
-
-        # 7. 启动后台读帧线程
-        self._sock = sock
-        self._sock.settimeout(5)
-        self._running = True
+        self._stop_event.clear()
+        self._available = True
         self._reader_thread = threading.Thread(
-            target=self._frame_reader, daemon=True,
-            name=f"minicap-{self._serial}"
+            target=self._reader_loop, daemon=True,
+            name=f"screenrecord-{self._serial}",
         )
         self._reader_thread.start()
+        # 等待最多 2 秒拿到首帧
+        for _ in range(20):
+            if self._latest_frame is not None:
+                return True
+            time.sleep(0.1)
+        # 没拿到首帧也认为可用（等业务调用时再 retry）
+        logger.info(f"[screenrecord] {self._serial} reader 已启动（首帧暂未到）")
         return True
 
+    def _spawn_subprocess(self) -> Optional[subprocess.Popen]:
+        cmd = [
+            self._adb_path, "-s", self._serial, "exec-out",
+            "screenrecord",
+            f"--time-limit={self.SCREENRECORD_TIME_LIMIT}",
+            "--output-format=h264",
+            "--bit-rate", str(self.SCREENRECORD_BIT_RATE),
+            "-",
+        ]
+        try:
+            return subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+        except Exception as e:
+            logger.warning(f"[screenrecord] {self._serial} subprocess 启动失败: {e}")
+            return None
+
+    def _reader_loop(self):
+        """主循环：subprocess EOF 后自动重启，累积字节周期解码。"""
+        import av
+
+        while not self._stop_event.is_set():
+            self._proc = self._spawn_subprocess()
+            if self._proc is None:
+                time.sleep(2)
+                continue
+
+            buf = io.BytesIO()
+            last_decode_pos = 0
+            session_frames = 0
+            try:
+                while not self._stop_event.is_set():
+                    if self._proc.stdout is None:
+                        break
+                    chunk = self._proc.stdout.read(8192)
+                    if not chunk:
+                        break  # EOF — 出循环重启
+                    buf.write(chunk)
+
+                    if buf.tell() - last_decode_pos < self.DECODE_INTERVAL_BYTES:
+                        continue
+                    last_decode_pos = buf.tell()
+
+                    # 拷贝到独立 BytesIO 给 av.open 用
+                    buf.seek(0)
+                    snapshot = io.BytesIO(buf.read())
+                    snapshot.seek(0)
+                    buf.seek(0, 2)
+
+                    try:
+                        container = av.open(snapshot, format="h264", mode="r")
+                        if container.streams.video:
+                            stream = container.streams.video[0]
+                            stream.thread_type = "AUTO"
+                            last_arr = None
+                            decoded_n = 0
+                            for frame in container.decode(stream):
+                                last_arr = frame.to_ndarray(format="bgr24")
+                                decoded_n += 1
+                            if last_arr is not None:
+                                with self._frame_lock:
+                                    self._latest_frame = last_arr
+                                    self._frame_time = time.time()
+                                    self._frame_count += decoded_n
+                                session_frames += decoded_n
+                        container.close()
+                    except Exception as e:
+                        # decode 失败常见情况：没拿到完整 SPS/PPS，等下次累积
+                        if session_frames == 0 and last_decode_pos > 100_000:
+                            logger.debug(f"[screenrecord] {self._serial} 等首帧 decode_err={e}")
+
+                    # 内存控制：超过 1MB 时 trim 末尾 256KB
+                    if buf.tell() > self.BUFFER_TRIM_THRESHOLD:
+                        buf.seek(0)
+                        all_bytes = buf.read()
+                        buf = io.BytesIO(all_bytes[-self.BUFFER_TRIM_KEEP:])
+                        buf.seek(0, 2)
+                        last_decode_pos = buf.tell()
+
+            except Exception as e:
+                logger.warning(f"[screenrecord] {self._serial} reader 异常: {e}")
+
+            # subprocess 退出 → 重启（除非被 stop）
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+            self._proc = None
+
+            if self._stop_event.is_set():
+                break
+            self._restart_count += 1
+            logger.info(f"[screenrecord] {self._serial} 重启 #{self._restart_count} (本轮 {session_frames} 帧)")
+            time.sleep(0.2)
+
+        self._available = False
+
     def get_frame(self) -> Optional[np.ndarray]:
-        """获取最新帧（~0ms，直接从内存读）"""
         with self._frame_lock:
             return self._latest_frame
 
     @property
     def available(self) -> bool:
-        return self._running
-
-    def _frame_reader(self):
-        """后台线程：持续从 socket 读取 JPEG 帧并解码"""
-        while self._running:
-            try:
-                # 4 字节帧长度（小端 uint32）
-                length_data = self._read_exact(self._sock, 4)
-                frame_len = struct.unpack("<I", length_data)[0]
-                if frame_len == 0:
-                    continue
-
-                # 读 JPEG 数据
-                jpeg_data = self._read_exact(self._sock, frame_len)
-                if len(jpeg_data) < 2 or jpeg_data[:2] != b"\xff\xd8":
-                    continue
-
-                # 解码
-                arr = np.frombuffer(jpeg_data, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    with self._frame_lock:
-                        self._latest_frame = frame
-                        self._frame_time = time.time()
-            except Exception:
-                logger.debug(f"[minicap] {self._serial} 读帧断开")
-                self._running = False
-                break
+        return self._available and self._latest_frame is not None
 
     def stop(self):
-        """停止流"""
-        self._running = False
-        if self._sock:
+        self._stop_event.set()
+        self._available = False
+        if self._proc:
             try:
-                self._sock.close()
+                self._proc.kill()
             except Exception:
                 pass
-        self._adb("shell", "pkill -f minicap 2>/dev/null")
-        self._adb("forward", "--remove", f"tcp:{self._port}")
-
-    @staticmethod
-    def _read_exact(sock: socket.socket, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("minicap socket closed")
-            buf += chunk
-        return buf
+        if self._reader_thread:
+            self._reader_thread.join(timeout=2)
 
 
 # ====================================================================
@@ -229,31 +233,22 @@ class ADBController:
     专门为雷电模拟器优化
     """
 
-    # minicap 端口基数（每个模拟器 +1）
-    _MINICAP_BASE_PORT = 1313
-
     def __init__(self, serial: str, adb_path: str = "adb"):
         self.serial = serial
         self.adb_path = adb_path
         self._proc_timeout = 10
-        self._minicap: Optional[MinicapStream] = None
+        self._stream: Optional[ScreenrecordStream] = None
 
     def setup_minicap(self) -> bool:
-        """初始化 minicap 流式截图（启动时调用一次）
+        """[向后兼容名] 初始化 ScreenrecordStream UE4 流式截图。
 
-        返回 True 表示 minicap 可用，False 则回退到 screencap。
+        旧名 setup_minicap 保留是因为外部调用点很多。实际启动的是
+        screenrecord raw H.264 流（UE4 兼容），不是 minicap。
+        返回 True 表示 stream 可用，False 则回退到 screencap。
         """
-        # 从 serial 推算端口：emulator-5554 → 5554 → port 1313+0
-        try:
-            emu_port = int(self.serial.split("-")[1])
-            offset = (emu_port - 5554) // 2
-        except (IndexError, ValueError):
-            offset = 0
-        port = self._MINICAP_BASE_PORT + offset
-
-        stream = MinicapStream(self.adb_path, self.serial, port)
+        stream = ScreenrecordStream(self.adb_path, self.serial)
         if stream.setup():
-            self._minicap = stream
+            self._stream = stream
             return True
         return False
 
@@ -279,26 +274,36 @@ class ADBController:
             return ""
 
     async def screenshot(self) -> Optional[np.ndarray]:
-        """截图 — minicap 优先（~0ms），screencap 回退（信号量限流）"""
-        # minicap 路径：直接从内存取最新帧
-        if self._minicap and self._minicap.available:
-            frame = self._minicap.get_frame()
-            if frame is not None:
-                return frame
-            # 帧为空（可能刚启动），短暂等待
-            await asyncio.sleep(0.1)
-            frame = self._minicap.get_frame()
-            if frame is not None:
-                return frame
+        """截图 — screenrecord 优先（UE4 兼容，~50ms），screencap 回退（信号量限流）"""
+        with metrics.timed("screenshot") as tags:
+            # ScreenrecordStream 路径
+            if self._stream is not None:
+                frame = self._stream.get_frame()
+                if frame is not None:
+                    tags["backend"] = "screenrecord"
+                    tags["h"], tags["w"] = frame.shape[:2]
+                    return frame
+                # 帧为空（可能刚启动 / IDR 间隔长），短暂等待
+                await asyncio.sleep(0.2)
+                frame = self._stream.get_frame()
+                if frame is not None:
+                    tags["backend"] = "screenrecord_retry"
+                    tags["h"], tags["w"] = frame.shape[:2]
+                    return frame
 
-        # screencap 回退
-        async with _get_semaphore():
-            loop = asyncio.get_event_loop()
-            try:
-                return await loop.run_in_executor(None, self._screenshot_sync)
-            except Exception as e:
-                logger.error(f"截图失败: {e}")
-                return None
+            # screencap 回退（适用于 stream 未启动 / 永久死掉）
+            async with _get_semaphore():
+                loop = asyncio.get_event_loop()
+                try:
+                    frame = await loop.run_in_executor(None, self._screenshot_sync)
+                    tags["backend"] = "screencap"
+                    if frame is not None:
+                        tags["h"], tags["w"] = frame.shape[:2]
+                    return frame
+                except Exception as e:
+                    logger.error(f"截图失败: {e}")
+                    tags["backend"] = "error"
+                    return None
 
     def _screenshot_sync(self) -> Optional[np.ndarray]:
         """同步截图（screencap 回退）"""
@@ -329,10 +334,11 @@ class ADBController:
         import random
         jx = x + random.randint(-3, 3)
         jy = y + random.randint(-3, 3)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, self._cmd, "shell", f"input tap {jx} {jy}"
-        )
+        with metrics.timed("tap", x=jx, y=jy):
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, self._cmd, "shell", f"input tap {jx} {jy}"
+            )
 
     async def key_event(self, key: str):
         """按键事件"""
