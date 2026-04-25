@@ -175,53 +175,58 @@ class SingleInstanceRunner:
         return False
 
     async def _check_vpn_connected(self) -> bool:
-        """检查 VPN 是否已连接且隧道通畅（~100ms）
+        """4 信号联合判定 VPN 真实连接状态（无 OCR，~200-400ms）
 
-        两层检测：
-        1. VpnService 是否在运行（APP 层面连接）
-        2. tun0 RX > 0（隧道层面有数据回来）
+        全部必须通过：
+        1. FightMaster 进程在跑（pgrep / ps）
+        2. VpnService 在 dumpsys 里
+        3. tun0 接口存在且 UP
+        4. 默认路由经过 tun0（流量真的走加速器）
 
-        假连接状态：VpnService 在跑但 tun0 RX=0（发了数据收不到回复）
+        修掉旧版的两个鸡肋：
+          - 旧：只查 VpnService 不查进程 → 进程没了 dumpsys 还可能误报
+          - 旧：要求 RX > 0 → 新建连接合法地 RX=0 时被误判失败
         """
-        import re
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 
-        # 1. VpnService 是否在运行
-        output = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell",
-            f"dumpsys activity services {ACCELERATOR_PACKAGE}"
-        )
-        if "FightMasterVpnService" not in output:
-            self.dbg.log_vpn(False, "FightMaster VpnService 未运行")
+        async def _shell(cmd: str) -> str:
+            return await loop.run_in_executor(None, raw_adb._cmd, "shell", cmd)
+
+        # 信号 1: FightMaster 进程在跑
+        # pgrep 在某些 Android 版本可能 missing → ps + grep 兜底
+        proc_out = await _shell(f"pgrep -f {ACCELERATOR_PACKAGE} 2>/dev/null")
+        if not proc_out.strip():
+            ps_out = await _shell(f"ps -A 2>/dev/null | grep {ACCELERATOR_PACKAGE}")
+            if ACCELERATOR_PACKAGE not in ps_out:
+                self.dbg.log_vpn(False, f"{ACCELERATOR_PACKAGE} 进程不存在")
+                return False
+
+        # 信号 2: VpnService 在 dumpsys 里
+        svc_out = await _shell(f"dumpsys activity services {ACCELERATOR_PACKAGE}")
+        if "FightMasterVpnService" not in svc_out:
+            self.dbg.log_vpn(False, "VpnService 未运行")
             return False
 
-        # 2. tun0 是否有收到数据（RX > 0）
-        tun_output = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
-        )
-        if "UP" not in tun_output:
-            self.dbg.log_vpn(False, "tun0 不存在")
+        # 信号 3: tun0 UP（ip addr 优先，ifconfig 兜底）
+        tun_out = await _shell("ip addr show tun0 2>/dev/null")
+        tun_up = "tun0" in tun_out and ("state UP" in tun_out or "UP," in tun_out)
+        if not tun_up:
+            tun_out2 = await _shell("ifconfig tun0 2>/dev/null")
+            if "UP" not in tun_out2:
+                self.dbg.log_vpn(False, "tun0 不存在或未 UP")
+                return False
+
+        # 信号 4: 默认路由经过 tun0（确保流量真的走加速器）
+        route_out = await _shell("ip route 2>/dev/null")
+        # 默认路由形如 "default via 10.0.0.1 dev tun0" 或 "0.0.0.0/0 dev tun0"
+        default_lines = [ln for ln in route_out.splitlines() if "default" in ln or "0.0.0.0/0" in ln]
+        if default_lines and not any("tun0" in ln for ln in default_lines):
+            self.dbg.log_vpn(False, f"默认路由不经过 tun0：{default_lines[0][:80]}")
             return False
 
-        rx_match = re.search(r'RX bytes:(\d+)', tun_output)
-        rx_val = int(rx_match.group(1)) if rx_match else 0
-        if rx_val > 0:
-            self.dbg.log_vpn(True, f"tun0 RX={rx_val}")
-            return True
-
-        # RX=0：可能是刚连上还没流量，等 2 秒重试
-        logger.debug("[VPN] tun0 RX=0，等待 2s 重试...")
-        await asyncio.sleep(2)
-        tun_output2 = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "ifconfig tun0 2>/dev/null"
-        )
-        rx_match2 = re.search(r'RX bytes:(\d+)', tun_output2)
-        if rx_match2 and int(rx_match2.group(1)) > 0:
-            return True
-
-        logger.warning("[VPN] VpnService 运行但 tun0 RX 持续为 0 → 隧道未通（假连接）")
-        return False
+        self.dbg.log_vpn(True, "4 信号全过 ✓")
+        return True
 
     async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
         """轮询等待 VPN 连接建立并验证通过"""

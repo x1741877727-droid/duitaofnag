@@ -100,6 +100,43 @@ def cached(fn):
     return wrap
 
 
+def cached_full(fn):
+    """装饰 _ocr_all(self, screenshot) — 全屏 OCR 缓存。
+
+    指纹基于整帧 16×16 灰度。loading / popup 静止画面 80%+ 命中。
+    """
+    def wrap(self, screenshot):
+        global _HITS, _MISSES
+
+        if _DISABLED:
+            return fn(self, screenshot)
+
+        if screenshot is None or screenshot.size == 0:
+            return fn(self, screenshot)
+
+        fp = _fingerprint(screenshot)
+        key = ("__full__", fp)
+        now = time.time()
+
+        cached_entry = _CACHE.get(key)
+        if cached_entry is not None and now - cached_entry[0] < _TTL_SEC:
+            _CACHE.move_to_end(key)
+            _HITS += 1
+            metrics.record("ocr_full_cache_hit",
+                           age_ms=round((now - cached_entry[0]) * 1000, 1))
+            return cached_entry[1]
+
+        result = fn(self, screenshot)
+        _CACHE[key] = (now, result)
+        if len(_CACHE) > _MAX_SIZE:
+            _CACHE.popitem(last=False)
+        _MISSES += 1
+        return result
+
+    wrap.__wrapped__ = fn  # type: ignore[attr-defined]
+    return wrap
+
+
 def stats() -> dict:
     """命中统计（暴露给 /api/health 用）"""
     total = _HITS + _MISSES

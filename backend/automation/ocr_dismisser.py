@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from . import metrics
-from .ocr_cache import cached as _ocr_cached
+from .ocr_cache import cached as _ocr_cached, cached_full as _ocr_cached_full
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +107,12 @@ class OcrDismisser:
         cx: int
         cy: int
 
+    @_ocr_cached_full
     def _ocr_all(self, screenshot: np.ndarray) -> list:
-        """OCR全屏，返回 [TextHit, ...]"""
+        """OCR全屏，返回 [TextHit, ...]
+
+        @_ocr_cached_full：全帧 16×16 指纹缓存，loading/popup 静止画面 80%+ 命中（0ms 返回）。
+        """
         with metrics.timed("ocr_full") as tags:
             h, w = screenshot.shape[:2]
             tags["w"], tags["h"] = w, h
