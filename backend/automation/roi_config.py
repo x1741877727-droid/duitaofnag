@@ -13,37 +13,69 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional, Tuple
+import sys
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# 与 backend/config.py 同步的项目根
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_YAML_PATH = os.path.join(_BASE_DIR, "config", "roi.yaml")
+
+def _candidate_yaml_paths() -> List[str]:
+    """按优先级返回 roi.yaml 可能的位置，覆盖三种部署形态：
+
+    1. PyInstaller frozen one-file/one-folder：sys._MEIPASS/config/roi.yaml
+    2. 打包后 exe 同级：<exe_dir>/config/roi.yaml（用 --add-data 时也可能在这）
+    3. 开发模式：<source_root>/config/roi.yaml
+    4. 当前工作目录：./config/roi.yaml（最后兜底）
+    """
+    cands: List[str] = []
+    # 1) PyInstaller _MEIPASS（frozen 模式）
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        cands.append(os.path.join(meipass, "config", "roi.yaml"))
+    # 2) exe 同级（适合 --add-data 把 config 摆 exe 旁边）
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        cands.append(os.path.join(exe_dir, "config", "roi.yaml"))
+    # 3) 开发模式（<src>/config/roi.yaml，从 backend/automation/ 往上 2 层）
+    src_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    cands.append(os.path.join(src_root, "config", "roi.yaml"))
+    # 4) cwd
+    cands.append(os.path.join(os.getcwd(), "config", "roi.yaml"))
+    return cands
+
 
 _cache: Optional[Dict[str, dict]] = None
+_resolved_path: Optional[str] = None
 
 
 def _load() -> Dict[str, dict]:
-    global _cache
+    global _cache, _resolved_path
     if _cache is not None:
         return _cache
-    if not os.path.exists(_YAML_PATH):
-        logger.warning(f"roi.yaml 不存在：{_YAML_PATH}，所有 ROI 查询将失败")
+    yaml_path = None
+    for cand in _candidate_yaml_paths():
+        if os.path.exists(cand):
+            yaml_path = cand
+            break
+    if yaml_path is None:
+        logger.warning(
+            f"roi.yaml 不存在。已尝试：{_candidate_yaml_paths()}，所有 ROI 查询将失败"
+        )
         _cache = {}
         return _cache
+    _resolved_path = yaml_path
     try:
         import yaml  # type: ignore
     except ImportError:
         raise RuntimeError(
             "PyYAML 未安装。pip install PyYAML（已加到 requirements.txt）"
         )
-    with open(_YAML_PATH, "r", encoding="utf-8") as f:
+    with open(yaml_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise ValueError(f"roi.yaml 顶层必须是 dict，实际：{type(data).__name__}")
     _cache = data
-    logger.info(f"roi.yaml 加载完成：{len(_cache)} 个 ROI ({_YAML_PATH})")
+    logger.info(f"roi.yaml 加载完成：{len(_cache)} 个 ROI ({yaml_path})")
     return _cache
 
 

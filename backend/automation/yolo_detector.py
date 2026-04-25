@@ -39,10 +39,30 @@ from . import metrics
 
 logger = logging.getLogger(__name__)
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PROJ_ROOT = os.path.dirname(_BACKEND_DIR)
-_DEFAULT_MODEL = os.path.join(_BACKEND_DIR, "automation", "models", "ui_yolo.onnx")
-_DEFAULT_CLASSES = os.path.join(_PROJ_ROOT, "config", "yolo_classes.yaml")
+import sys as _sys
+
+# 跨部署形态找资源（frozen / dev / cwd），与 roi_config 同一约定
+def _find_first(*relative_subpaths: str) -> str:
+    bases = []
+    meipass = getattr(_sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(meipass)
+    if getattr(_sys, "frozen", False):
+        bases.append(os.path.dirname(os.path.abspath(_sys.executable)))
+    bases.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    bases.append(os.getcwd())
+    for base in bases:
+        for sub in relative_subpaths:
+            p = os.path.join(base, sub)
+            if os.path.exists(p):
+                return p
+    # 都不存在，返回开发模式的默认路径（用于错误提示）
+    src_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(src_root, *(relative_subpaths[0].split("/")))
+
+
+_DEFAULT_MODEL = _find_first("backend/automation/models/ui_yolo.onnx")
+_DEFAULT_CLASSES = _find_first("config/yolo_classes.yaml")
 
 _session = None
 _session_lock = threading.Lock()

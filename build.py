@@ -166,6 +166,8 @@ a = Analysis(
     datas=[
         (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
+        (os.path.join(ROOT, 'config'), 'config'),
+        (os.path.join(ROOT, 'fixtures', 'golden_set'), 'fixtures/golden_set'),
     ] + rapidocr_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
@@ -179,7 +181,10 @@ a = Analysis(
         'backend.automation', 'backend.automation.adb_lite',
         'backend.automation.guarded_adb', 'backend.automation.single_runner',
         'backend.automation.screen_matcher', 'backend.automation.ocr_dismisser',
-        'backend.automation.popup_dismisser',
+        'backend.automation.popup_dismisser', 'backend.automation.metrics',
+        'backend.automation.ocr_cache', 'backend.automation.roi_config',
+        'backend.automation.yolo_detector',
+        'yaml', 'psutil',
     ],
 )
 pyz = PYZ(a.pure)
