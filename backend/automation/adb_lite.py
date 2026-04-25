@@ -2,10 +2,11 @@
 ADB 控制器 — 基于 subprocess 直接调用 adb 命令
 专门为雷电模拟器优化，已在实机测试中验证通过。
 
-截图策略（2026-04-25 重构，UE4 兼容）：
-  1. 优先用 ScreenrecordStream（adb shell screenrecord raw H.264 + PyAV，UE4 OK）
-  2. 不可用时回退到 screencap（信号量限流防排队）
-  - minicap 抓 UE4 黑帧（HWC overlay + secure flag），已弃用
+截图策略（GAMEBOT_CAPTURE 环境变量）：
+  - wgc (推荐): Windows Graphics Capture 抓 LDPlayer 窗口，~50ms/帧，
+    在 Windows 端走 DXGI 完全绕开 Android，无 ACE 接触面
+  - screenrecord: adb shell screenrecord（已知 6 实例并发崩游戏）
+  - 默认: adb screencap（慢但稳）
 """
 
 import asyncio
@@ -224,6 +225,188 @@ class ScreenrecordStream:
 
 
 # ====================================================================
+# WGCStream — Windows Graphics Capture 抓 LDPlayer 窗口（生产推荐）
+# ====================================================================
+
+# LDPlayer serial → 窗口标题映射
+#   emulator-5554 → 雷电模拟器        (实例 0)
+#   emulator-5556 → 雷电模拟器-1      (实例 1)
+#   ...
+#   emulator-5564 → 雷电模拟器-5      (实例 5)
+def _ldplayer_window_title(serial: str) -> str:
+    try:
+        emu_port = int(serial.split("-")[1])
+        idx = (emu_port - 5554) // 2
+    except (IndexError, ValueError):
+        idx = 0
+    return "雷电模拟器" if idx == 0 else f"雷电模拟器-{idx}"
+
+
+def _find_window_by_title(title: str) -> int:
+    """EnumWindows 查 LDPlayer 主窗口 HWND（class=LDPlayerMainFrame）"""
+    try:
+        import win32gui
+    except ImportError:
+        logger.warning("[wgc] pywin32 未安装，无法找窗口")
+        return 0
+    target = [0]
+
+    def cb(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd):
+            return True
+        if win32gui.GetWindowText(hwnd) == title:
+            target[0] = hwnd
+            return False
+        return True
+
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception as e:
+        logger.warning(f"[wgc] EnumWindows 失败: {e}")
+    return target[0]
+
+
+class WGCStream:
+    """Windows Graphics Capture 抓 LDPlayer 窗口 → BGR ndarray
+
+    架构：
+      windows-capture (PyPI 包，Rust + WGC API)
+        → on_frame_arrived 回调（free-threaded）
+        → BGRA frame_buffer
+        → BGRA → BGR 转换（cv2）
+        → 存 _latest_frame
+      screenshot() 调 get_frame() 直接拿内存中的最新帧
+
+    优势 vs 其他方案:
+      - 在 Windows 端 DXGI 层抓帧，**完全绕开 Android**
+      - 无 ACE 接触面（capture 不进游戏进程也不进 Android）
+      - 6 实例独立 capture session，无 SurfaceFlinger 资源竞争
+      - 窗口被遮挡仍能抓（OBS Game Capture 同款 API）
+    """
+
+    def __init__(self, serial: str):
+        self.serial = serial
+        self.window_title = _ldplayer_window_title(serial)
+        self._capture = None  # WindowsCapture 实例
+        self._capture_control = None
+        self._latest_frame: Optional[np.ndarray] = None  # BGR
+        self._frame_time: float = 0
+        self._frame_lock = threading.Lock()
+        self._frame_count = 0
+        self._available = False
+        self._hwnd = 0
+        # client area 在 WGC 帧里的偏移（去标题栏 + 边框）
+        # 由 _compute_client_offset() 在 setup 时算出
+        self._client_x = 0
+        self._client_y = 0
+        self._client_w = 0
+        self._client_h = 0
+        # 业务侧期望 720 高度（跟 Android 屏幕一致）
+        self._target_h = 720
+
+    def setup(self) -> bool:
+        try:
+            from windows_capture import WindowsCapture
+        except ImportError:
+            logger.warning("[wgc] windows-capture 未安装（pip install windows-capture）")
+            return False
+
+        self._hwnd = _find_window_by_title(self.window_title)
+        if not self._hwnd:
+            logger.warning(f"[wgc] {self.serial}: 找不到窗口 {self.window_title!r}")
+            return False
+
+        # 算 client area 在 WGC 帧里的偏移（去标题栏 + 边框）
+        try:
+            import win32gui
+            cl = win32gui.GetClientRect(self._hwnd)            # (0, 0, cw, ch)
+            cw, ch = cl[2] - cl[0], cl[3] - cl[1]
+            cl_pt = win32gui.ClientToScreen(self._hwnd, (0, 0))  # client 左上 screen 坐标
+            wr = win32gui.GetWindowRect(self._hwnd)              # 窗口 screen 矩形
+            self._client_x = cl_pt[0] - wr[0]
+            self._client_y = cl_pt[1] - wr[1]
+            self._client_w = cw
+            self._client_h = ch
+            logger.info(f"[wgc] {self.serial}: client offset=({self._client_x},{self._client_y}) size={cw}x{ch} window={wr[2]-wr[0]}x{wr[3]-wr[1]}")
+        except Exception as e:
+            logger.warning(f"[wgc] {self.serial}: 算 client rect 失败: {e}（不 crop）")
+
+        try:
+            self._capture = WindowsCapture(
+                cursor_capture=False,
+                draw_border=False,
+                window_hwnd=self._hwnd,
+            )
+        except Exception as e:
+            logger.warning(f"[wgc] {self.serial}: WindowsCapture 创建失败: {e}")
+            return False
+
+        @self._capture.event
+        def on_frame_arrived(frame, capture_control):
+            try:
+                buf = frame.frame_buffer  # BGRA ndarray, shape=(window_h, window_w, 4)
+                # 1. crop 到 client area（去标题栏 + 边框）
+                if self._client_w > 0 and self._client_h > 0:
+                    x, y, w, h = self._client_x, self._client_y, self._client_w, self._client_h
+                    if y + h <= buf.shape[0] and x + w <= buf.shape[1]:
+                        buf = buf[y:y+h, x:x+w]
+                # 2. BGRA → BGR
+                bgr = cv2.cvtColor(buf, cv2.COLOR_BGRA2BGR)
+                # 3. resize 到目标高度（保持比例），跟 Android 1280x720 一致
+                if bgr.shape[0] != self._target_h:
+                    h, w = bgr.shape[:2]
+                    new_w = int(w * self._target_h / h)
+                    bgr = cv2.resize(bgr, (new_w, self._target_h))
+                with self._frame_lock:
+                    self._latest_frame = bgr
+                    self._frame_time = time.time()
+                    self._frame_count += 1
+                    self._capture_control = capture_control
+            except Exception as e:
+                logger.debug(f"[wgc] {self.serial} on_frame err: {e}")
+
+        @self._capture.event
+        def on_closed():
+            logger.info(f"[wgc] {self.serial} capture closed")
+            self._available = False
+
+        try:
+            self._capture.start_free_threaded()
+        except Exception as e:
+            logger.warning(f"[wgc] {self.serial}: start 失败: {e}")
+            return False
+
+        self._available = True
+        logger.info(f"[wgc] {self.serial}: 启动 (window={self.window_title!r} hwnd=0x{self._hwnd:08x})")
+
+        # 等首帧最多 2s
+        for _ in range(20):
+            if self._latest_frame is not None:
+                return True
+            time.sleep(0.1)
+        # 没拿到首帧也认为可用，下游 retry
+        return True
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        with self._frame_lock:
+            return self._latest_frame
+
+    @property
+    def available(self) -> bool:
+        return self._available and self._latest_frame is not None
+
+    def stop(self):
+        self._available = False
+        if self._capture_control is not None:
+            try:
+                self._capture_control.stop()
+            except Exception:
+                pass
+        self._capture = None
+        self._capture_control = None
+
+
+# ====================================================================
 # ADB 控制器
 # ====================================================================
 
@@ -242,30 +425,34 @@ class ADBController:
     def setup_minicap(self) -> bool:
         """[向后兼容名] 初始化截图流。
 
-        - 默认：不启动流式截图，screenshot() 走 screencap（慢但稳定）
-        - GAMEBOT_CAPTURE=screenrecord：启用 ScreenrecordStream（UE4 验证过但
-          6 实例并发会压垮 SurfaceFlinger 导致游戏闪退，已知不稳定）
-        - GAMEBOT_CAPTURE=mediaprojection：启用 vpn-app CaptureService（待实装）
+        backend = GAMEBOT_CAPTURE 环境变量：
+        - wgc (生产推荐): Windows Graphics Capture，~50ms/帧，绕开 Android
+        - screenrecord (已知 6 实例并发崩游戏): adb shell screenrecord
+        - 默认 (空): screencap（慢但稳）
 
         旧名 setup_minicap 保留是因为外部调用点很多。
         """
         backend = os.environ.get("GAMEBOT_CAPTURE", "").lower()
 
+        if backend == "wgc":
+            stream = WGCStream(self.serial)
+            if stream.setup():
+                self._stream = stream
+                logger.info(f"[capture] {self.serial} 启用 WGC")
+                return True
+            logger.warning(f"[capture] {self.serial} WGC 启动失败，回退 screencap")
+            return False
+
         if backend == "screenrecord":
-            logger.warning("[capture] GAMEBOT_CAPTURE=screenrecord: 6 实例并发可能导致游戏闪退")
+            logger.warning(f"[capture] {self.serial} screenrecord: 6 实例并发可能崩游戏")
             stream = ScreenrecordStream(self.adb_path, self.serial)
             if stream.setup():
                 self._stream = stream
                 return True
             return False
 
-        if backend == "mediaprojection":
-            logger.warning("[capture] GAMEBOT_CAPTURE=mediaprojection: 待实装")
-            # TODO: Phase D — vpn-app CaptureService 集成
-            return False
-
         # 默认：直接回退 screencap
-        logger.info("[capture] 使用 adb screencap（默认稳定方案）")
+        logger.info(f"[capture] {self.serial} 使用 adb screencap（默认稳定方案）")
         return False
 
     def _cmd(self, *args) -> str:
@@ -290,20 +477,21 @@ class ADBController:
             return ""
 
     async def screenshot(self) -> Optional[np.ndarray]:
-        """截图 — screenrecord 优先（UE4 兼容，~50ms），screencap 回退（信号量限流）"""
+        """截图 — stream 优先（WGC/screenrecord，~50ms），screencap 回退（信号量限流）"""
         with metrics.timed("screenshot") as tags:
-            # ScreenrecordStream 路径
             if self._stream is not None:
                 frame = self._stream.get_frame()
+                # 根据 stream 类型记 backend tag
+                stream_name = type(self._stream).__name__.replace("Stream", "").lower()
                 if frame is not None:
-                    tags["backend"] = "screenrecord"
+                    tags["backend"] = stream_name  # wgc / screenrecord
                     tags["h"], tags["w"] = frame.shape[:2]
                     return frame
-                # 帧为空（可能刚启动 / IDR 间隔长），短暂等待
+                # 帧为空（刚启动 / IDR 间隔长），短暂等待
                 await asyncio.sleep(0.2)
                 frame = self._stream.get_frame()
                 if frame is not None:
-                    tags["backend"] = "screenrecord_retry"
+                    tags["backend"] = f"{stream_name}_retry"
                     tags["h"], tags["w"] = frame.shape[:2]
                     return frame
 
