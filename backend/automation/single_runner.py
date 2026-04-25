@@ -21,8 +21,33 @@ from .screen_matcher import MatchHit, ScreenMatcher
 from .popup_dismisser import PopupDismisser
 from .ocr_dismisser import OcrDismisser
 from .debug_logger import DebugLogger
+from . import metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _timed_phase(name: str):
+    """phase 方法装饰器：记录进入/离开 + 结果 + 总耗时到 metrics.jsonl"""
+    def wrap(fn):
+        import functools
+        @functools.wraps(fn)
+        async def aw(self, *args, **kwargs):
+            t0 = time.perf_counter()
+            result = None
+            ok = False
+            try:
+                result = await fn(self, *args, **kwargs)
+                ok = bool(result) if not isinstance(result, str) else bool(result)
+                return result
+            finally:
+                metrics.record(
+                    "phase",
+                    name=name,
+                    result="ok" if ok else "fail",
+                    dur_ms=round((time.perf_counter() - t0) * 1000, 2),
+                )
+        return aw
+    return wrap
 
 
 class Phase(str, Enum):
@@ -103,6 +128,7 @@ class SingleInstanceRunner:
     # 阶段 0: 加速器
     # ================================================================
 
+    @_timed_phase("accelerator")
     async def phase_accelerator(self) -> bool:
         """启动 FightMaster VPN 并确认连接
 
@@ -340,6 +366,7 @@ class SingleInstanceRunner:
     # 阶段 1: 启动游戏
     # ================================================================
 
+    @_timed_phase("launch_game")
     async def phase_launch_game(self) -> bool:
         """启动游戏并等待到大厅或弹窗阶段"""
         self.phase = Phase.LAUNCH_GAME
@@ -396,6 +423,7 @@ class SingleInstanceRunner:
     # 阶段 2: 登录检测
     # ================================================================
 
+    @_timed_phase("wait_login")
     async def phase_wait_login(self, timeout: int = 20) -> bool:
         """等待自动登录完成"""
         self.phase = Phase.WAIT_LOGIN
@@ -424,6 +452,7 @@ class SingleInstanceRunner:
     # 阶段 3: 弹窗清理
     # ================================================================
 
+    @_timed_phase("dismiss_popups")
     async def phase_dismiss_popups(self) -> bool:
         """清理所有弹窗直到大厅（OCR驱动）"""
         self.phase = Phase.DISMISS_POPUPS
@@ -452,6 +481,7 @@ class SingleInstanceRunner:
     # 阶段 6: 地图设置 (队长)
     # ================================================================
 
+    @_timed_phase("map_setup")
     async def phase_map_setup(self) -> bool:
         """队长设置地图和模式（OCR驱动，单次扫描提取所有目标）"""
         self.phase = Phase.MAP_SETUP
@@ -636,6 +666,7 @@ class SingleInstanceRunner:
     # 阶段 4: 组队 — 队长创建
     # ================================================================
 
+    @_timed_phase("team_create")
     async def phase_team_create(self) -> Optional[str]:
         """队长创建队伍并获取 game scheme URL（通过二维码）
 
@@ -668,9 +699,9 @@ class SingleInstanceRunner:
                 await asyncio.sleep(0.5)
                 continue
             self.dbg.log_screenshot(shot, f"attempt{attempt}")
-            # ROI: 左侧栏 (0~10% 宽度, 40~80% 高度)
-            left_hits = ocr._ocr_roi(shot, 0, 0.4, 0.1, 0.8, scale=3)
-            self.dbg.log_ocr(left_hits, "左侧栏 ROI(0,0.4,0.1,0.8) scale=3")
+            # ROI: team_btn_left (config/roi.yaml)
+            left_hits = ocr._ocr_roi_named(shot, "team_btn_left")
+            self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队"):
                     self.dbg.log_match("组队", h, fuzzy=True)
@@ -710,8 +741,8 @@ class SingleInstanceRunner:
                 await asyncio.sleep(0.3)
                 continue
 
-            # 检查中部是否有"使用组队码加入"弹窗 — ROI 中部
-            mid_hits = ocr._ocr_roi(shot, 0.2, 0.45, 0.8, 0.7, scale=2)
+            # 检查中部是否有"使用组队码加入"弹窗 — team_code_popup_mid
+            mid_hits = ocr._ocr_roi_named(shot, "team_code_popup_mid")
             mid_text = " ".join(h.text for h in mid_hits)
             if any(OcrDismisser.fuzzy_match(mid_text, kw) for kw in ["加入队伍", "使用组队码"]):
                 for h in mid_hits:
@@ -722,8 +753,8 @@ class SingleInstanceRunner:
                         break
                 continue
 
-            # 找底部"组队码"tab — ROI 底部 10%
-            bottom_hits = ocr._ocr_roi(shot, 0.2, 0.9, 0.5, 1.0, scale=2)
+            # 找底部"组队码"tab — team_code_tab_bottom
+            bottom_hits = ocr._ocr_roi_named(shot, "team_code_tab_bottom")
             for h in bottom_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队码"):
                     logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
@@ -743,7 +774,7 @@ class SingleInstanceRunner:
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
-            left_hits = ocr._ocr_roi(shot, 0, 0.3, 0.25, 0.9, scale=2)
+            left_hits = ocr._ocr_roi_named(shot, "qr_team_btn_left")
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "二维码"):
                     logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
@@ -769,9 +800,12 @@ class SingleInstanceRunner:
                 continue
 
             # OpenCV QR 解码（放大3倍+二值化提高识别率）
+            # 裁剪区从 config/roi.yaml::qr_decode_crop 读
+            from .roi_config import get as _roi_get
+            _x1, _y1, _x2, _y2, _qr_scale = _roi_get("qr_decode_crop")
             h, w = shot.shape[:2]
-            crop = shot[int(h * 0.15):int(h * 0.85), int(w * 0.15):int(w * 0.8)]
-            big = cv2.resize(crop, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            crop = shot[int(h * _y1):int(h * _y2), int(w * _x1):int(w * _x2)]
+            big = cv2.resize(crop, (0, 0), fx=_qr_scale, fy=_qr_scale, interpolation=cv2.INTER_CUBIC)
             gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
 
@@ -883,6 +917,7 @@ class SingleInstanceRunner:
     # 阶段 5: 组队 — 队员加入
     # ================================================================
 
+    @_timed_phase("team_join")
     async def phase_team_join(self, game_scheme_url: str) -> bool:
         """队员通过 game scheme URL 直接加入队伍
 

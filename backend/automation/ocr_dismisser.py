@@ -21,6 +21,9 @@ from enum import Enum
 import cv2
 import numpy as np
 
+from . import metrics
+from .ocr_cache import cached as _ocr_cached
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,18 +109,33 @@ class OcrDismisser:
 
     def _ocr_all(self, screenshot: np.ndarray) -> list:
         """OCR全屏，返回 [TextHit, ...]"""
-        ocr = self._get_ocr()
-        result = ocr(screenshot)
-        hits = []
-        if result and result.boxes is not None:
-            for box, text, conf in zip(result.boxes, result.txts, result.scores):
-                xs = [p[0] for p in box]
-                ys = [p[1] for p in box]
-                cx = int(sum(xs) / 4)
-                cy = int(sum(ys) / 4)
-                hits.append(self.TextHit(text=text, cx=cx, cy=cy))
-        return hits
+        with metrics.timed("ocr_full") as tags:
+            h, w = screenshot.shape[:2]
+            tags["w"], tags["h"] = w, h
+            ocr = self._get_ocr()
+            result = ocr(screenshot)
+            hits = []
+            if result and result.boxes is not None:
+                for box, text, conf in zip(result.boxes, result.txts, result.scores):
+                    xs = [p[0] for p in box]
+                    ys = [p[1] for p in box]
+                    cx = int(sum(xs) / 4)
+                    cy = int(sum(ys) / 4)
+                    hits.append(self.TextHit(text=text, cx=cx, cy=cy))
+            tags["n_texts"] = len(hits)
+            return hits
 
+    def _ocr_roi_named(self, screenshot: np.ndarray, name: str) -> list:
+        """按 config/roi.yaml 的命名 ROI 裁剪 + OCR。
+        用法：
+            ocr._ocr_roi_named(shot, "team_btn_left")
+        新增 ROI 改 yaml 即可，不必碰 .py。
+        """
+        from .roi_config import get as _get
+        x1, y1, x2, y2, scale = _get(name)
+        return self._ocr_roi(screenshot, x1, y1, x2, y2, scale=scale)
+
+    @_ocr_cached
     def _ocr_roi(self, screenshot: np.ndarray, x1: float, y1: float,
                  x2: float, y2: float, scale: int = 2) -> list:
         """裁剪 ROI 区域 + 放大后 OCR，提高小文字准确率
@@ -125,35 +143,41 @@ class OcrDismisser:
         坐标为比例 (0.0~1.0)，自动转换为像素。
         放大 scale 倍后识别，坐标映射回原图。
 
-        用法：
+        用法（裸坐标）：
           _ocr_roi(shot, 0, 0, 0.1, 1.0)  # 左侧栏 (0~10% 宽度)
-          _ocr_roi(shot, 0, 0.9, 1.0, 1.0)  # 底部 tab (90~100% 高度)
+        命名 ROI（推荐，从 config/roi.yaml 读）：
+          _ocr_roi_named(shot, "team_btn_left")
+
+        缓存：被 @cached 装饰，TTL 内同一帧同一 ROI 结果直接命中（见 ocr_cache.py）。
         """
-        h, w = screenshot.shape[:2]
-        px1, py1 = int(w * x1), int(h * y1)
-        px2, py2 = int(w * x2), int(h * y2)
-        crop = screenshot[py1:py2, px1:px2]
+        with metrics.timed("ocr_roi", roi=f"{x1:.2f},{y1:.2f},{x2:.2f},{y2:.2f}", scale=scale) as tags:
+            h, w = screenshot.shape[:2]
+            px1, py1 = int(w * x1), int(h * y1)
+            px2, py2 = int(w * x2), int(h * y2)
+            crop = screenshot[py1:py2, px1:px2]
 
-        if crop.size == 0:
-            return []
+            if crop.size == 0:
+                tags["n_texts"] = 0
+                return []
 
-        # 放大提高小文字识别率
-        if scale > 1:
-            crop = cv2.resize(crop, (0, 0), fx=scale, fy=scale,
-                              interpolation=cv2.INTER_CUBIC)
+            # 放大提高小文字识别率
+            if scale > 1:
+                crop = cv2.resize(crop, (0, 0), fx=scale, fy=scale,
+                                  interpolation=cv2.INTER_CUBIC)
 
-        ocr = self._get_ocr()
-        result = ocr(crop)
-        hits = []
-        if result and result.boxes is not None:
-            for box, text, conf in zip(result.boxes, result.txts, result.scores):
-                xs = [p[0] for p in box]
-                ys = [p[1] for p in box]
-                # 映射回原图坐标
-                cx = int(sum(xs) / 4 / scale) + px1
-                cy = int(sum(ys) / 4 / scale) + py1
-                hits.append(self.TextHit(text=text, cx=cx, cy=cy))
-        return hits
+            ocr = self._get_ocr()
+            result = ocr(crop)
+            hits = []
+            if result and result.boxes is not None:
+                for box, text, conf in zip(result.boxes, result.txts, result.scores):
+                    xs = [p[0] for p in box]
+                    ys = [p[1] for p in box]
+                    # 映射回原图坐标
+                    cx = int(sum(xs) / 4 / scale) + px1
+                    cy = int(sum(ys) / 4 / scale) + py1
+                    hits.append(self.TextHit(text=text, cx=cx, cy=cy))
+            tags["n_texts"] = len(hits)
+            return hits
 
     @staticmethod
     def fuzzy_match(text: str, keyword: str, max_distance: int = 1) -> bool:

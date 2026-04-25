@@ -1,0 +1,15 @@
+{
+  "case_name": "lobby_smoke",
+  "description": "大厅截图回归基线：左侧栏必须识别到'组队'或'找队友'，其他 ROI 用烟雾测试避免误报。dating-8.png 来自 fixtures/screenshots，是已知的稳定大厅画面。",
+  "frame_path": "frame.png",
+  "checks": [
+    {
+      "type": "ocr_roi_match",
+      "roi": "team_btn_left",
+      "must_contain_any": ["组队", "找队友"]
+    },
+    {"type": "ocr_roi_smoke", "roi": "qr_team_btn_left",    "min_hits": 1},
+    {"type": "ocr_roi_smoke", "roi": "team_code_popup_mid", "min_hits": 0},
+    {"type": "ocr_roi_smoke", "roi": "team_code_tab_bottom","min_hits": 0}
+  ]
+}

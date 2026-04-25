@@ -1,0 +1,98 @@
+# YOLO UI 元素类定义 — 替代 OCR 的目标检测
+#
+# === 设计原则（重要） ===
+#
+# YOLO 只训练**稳定 UI 元素**：
+#   - 通用按钮（组队 / 找队友 / 确定 / 取消 / 同意 / X 关闭 / 开始匹配）
+#   - 加速器固定按钮
+#   - 组队面板基础结构（QR 入口 / tab / 弹窗）
+#
+# 不进 YOLO（用 OCR + cache 兜底）：
+#   - 公告内容（每个版本都变）
+#   - 模式名（团队竞技 / 歼灭模式 / 古墓迷途…赛季轮换）
+#   - 地图名（狙击团竞 / 轩辕禁地…新地图常加）
+#   - 玩家昵称、房间号、版本号、Variable 文本
+#
+# 原则：YOLO 一年最多重训 2-3 次。变化频繁的内容靠 OCR 灵活，文字命中率高。
+#
+# === 字段格式 ===
+#   id, name, desc, replaces_ocr (替代的 OCR 关键词), anchor_roi (autolabel 提示)
+#
+# 加新类 = 追加到底部（不要插中间，会废旧标签）。
+
+classes:
+  # ── 大厅左侧栏 ──────────────────────
+  - id: 0
+    name: team_btn
+    desc: 大厅"组队"按钮
+    replaces_ocr: ["组队"]
+    anchor_roi: team_btn_left
+
+  - id: 1
+    name: find_teammates_btn
+    desc: 大厅"找队友"按钮
+    replaces_ocr: ["找队友", "队友"]
+    anchor_roi: team_btn_left
+
+  # ── 组队面板 ────────────────────────
+  - id: 2
+    name: qr_team_btn
+    desc: '"二维码组队"入口（左侧栏）'
+    replaces_ocr: ["二维码"]
+    anchor_roi: qr_team_btn_left
+
+  - id: 3
+    name: team_code_tab
+    desc: 底部"组队码"tab
+    replaces_ocr: ["组队码"]
+    anchor_roi: team_code_tab_bottom
+
+  - id: 4
+    name: team_code_popup
+    desc: '"使用组队码加入"弹窗'
+    replaces_ocr: ["加入队伍", "使用组队码"]
+    anchor_roi: team_code_popup_mid
+
+  # ── 通用按钮（跨场景，频次高） ──────
+  - id: 5
+    name: btn_confirm
+    desc: 通用"确定"按钮
+    replaces_ocr: ["确定", "确认"]
+    anchor_roi: ""
+
+  - id: 6
+    name: btn_cancel
+    desc: 通用"取消"按钮
+    replaces_ocr: ["取消"]
+    anchor_roi: ""
+
+  - id: 7
+    name: btn_agree
+    desc: 隐私 / 协议"同意"按钮
+    replaces_ocr: ["同意"]
+    anchor_roi: ""
+
+  - id: 8
+    name: btn_close_x
+    desc: 弹窗右上角 X 关闭按钮（图标，OCR 抓不到）
+    replaces_ocr: []
+    anchor_roi: ""
+
+  - id: 9
+    name: btn_start_match
+    desc: '"开始匹配 / 开始战斗"按钮'
+    replaces_ocr: ["开始", "匹配"]
+    anchor_roi: ""
+
+  # ── 加速器 / VPN（固定 UI，跟具体游戏内容无关） ──
+  - id: 10
+    name: accel_connect
+    desc: 加速器"连接"按钮
+    replaces_ocr: ["连接", "加速"]
+    anchor_roi: ""
+
+  - id: 11
+    name: accel_connected
+    desc: 加速器"已连接"状态
+    replaces_ocr: ["已连接"]
+    anchor_roi: ""

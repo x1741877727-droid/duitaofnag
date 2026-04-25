@@ -1,0 +1,46 @@
+# ROI 配置 — Task 0.4 (MASTER_PLAN 阶段 0)
+#
+# 归一化坐标（0-1 浮点），运行时乘以截图宽高得真实像素裁剪框。
+# 调整这里 = 调整识别区域，不需要碰 .py 代码。
+#
+# 字段：
+#   rect:   [x1, y1, x2, y2]  归一化矩形（左上角→右下角）
+#   scale:  OCR 放大倍数（小文字必须放大才识别准）
+#   desc:   描述（仅供阅读）
+#   used_in: 哪些代码引用（grep 用）
+#
+# 加新 ROI 后，代码里直接 `roi_config.get("name")` 拿 (x1,y1,x2,y2,scale) 元组。
+
+# ───────────────────── 大厅左侧栏 ─────────────────────
+team_btn_left:
+  rect: [0.0, 0.4, 0.1, 0.8]
+  scale: 3
+  desc: 大厅左侧栏的"组队"按钮
+  used_in: single_runner.py:phase_team_create
+
+qr_team_btn_left:
+  rect: [0.0, 0.3, 0.25, 0.9]
+  scale: 2
+  desc: 组队菜单的"二维码组队"按钮（左侧栏）
+  used_in: single_runner.py:phase_team_join
+
+# ───────────────────── 弹窗 / 中部 ─────────────────────
+team_code_popup_mid:
+  rect: [0.2, 0.45, 0.8, 0.7]
+  scale: 2
+  desc: 中部"使用组队码加入"弹窗检测区
+  used_in: single_runner.py:phase_team_create
+
+# ───────────────────── 底部 tab 栏 ─────────────────────
+team_code_tab_bottom:
+  rect: [0.2, 0.9, 0.5, 1.0]
+  scale: 2
+  desc: 底部"组队码"tab 切换按钮
+  used_in: single_runner.py:phase_team_create
+
+# ───────────────────── QR 解码裁剪 ─────────────────────
+qr_decode_crop:
+  rect: [0.15, 0.15, 0.8, 0.85]
+  scale: 3
+  desc: 房主屏幕中央 QR 码解码裁剪区（cv2.QRCodeDetector）
+  used_in: single_runner.py:phase_team_create

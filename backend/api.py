@@ -350,12 +350,19 @@ def create_app(config: ConfigManager) -> FastAPI:
     # ── 健康 ──
 
     @app.get("/api/health")
-    async def health():
+    async def health(window: int = 300):
+        """健康度仪表盘。
+        ?window=N  指标聚合窗口（秒），默认最近 5 分钟；window=0 用全部 in-memory ring（最多 10000 条）。
+        包含：截图/OCR/template_match/tap/phase 各动作 P50/P95/P99 + phase 按名分组 + sys 快照。
+        """
+        from .automation import metrics
+        win: Optional[float] = None if window == 0 else float(window)
         return {
             "ok": True,
             "running": service.running,
             "instances": len(service._instances),
             "uptime": round(time.time() - service._start_time, 1) if service.running else 0,
+            "metrics": metrics.summary(window_seconds=win),
         }
 
     # ── WebSocket ──
