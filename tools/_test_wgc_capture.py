@@ -74,7 +74,11 @@ def main():
             if not state["saved"]:
                 # BGRA → BGR
                 bgr = cv2.cvtColor(buf, cv2.COLOR_BGRA2BGR)
-                out_png = OUT_DIR / f"wgc_{title}.png"
+                # 用 ASCII 文件名（中文 path 给 Remote Agent download endpoint 麻烦）
+                idx = title.replace("雷电模拟器", "0").replace("-", "")
+                if not idx:
+                    idx = "0"
+                out_png = OUT_DIR / f"wgc_inst_{idx}.png"
                 cv2.imwrite(str(out_png), bgr)
                 with state["lock"]:
                     state["saved"] = True
