@@ -240,16 +240,32 @@ class ADBController:
         self._stream: Optional[ScreenrecordStream] = None
 
     def setup_minicap(self) -> bool:
-        """[向后兼容名] 初始化 ScreenrecordStream UE4 流式截图。
+        """[向后兼容名] 初始化截图流。
 
-        旧名 setup_minicap 保留是因为外部调用点很多。实际启动的是
-        screenrecord raw H.264 流（UE4 兼容），不是 minicap。
-        返回 True 表示 stream 可用，False 则回退到 screencap。
+        - 默认：不启动流式截图，screenshot() 走 screencap（慢但稳定）
+        - GAMEBOT_CAPTURE=screenrecord：启用 ScreenrecordStream（UE4 验证过但
+          6 实例并发会压垮 SurfaceFlinger 导致游戏闪退，已知不稳定）
+        - GAMEBOT_CAPTURE=mediaprojection：启用 vpn-app CaptureService（待实装）
+
+        旧名 setup_minicap 保留是因为外部调用点很多。
         """
-        stream = ScreenrecordStream(self.adb_path, self.serial)
-        if stream.setup():
-            self._stream = stream
-            return True
+        backend = os.environ.get("GAMEBOT_CAPTURE", "").lower()
+
+        if backend == "screenrecord":
+            logger.warning("[capture] GAMEBOT_CAPTURE=screenrecord: 6 实例并发可能导致游戏闪退")
+            stream = ScreenrecordStream(self.adb_path, self.serial)
+            if stream.setup():
+                self._stream = stream
+                return True
+            return False
+
+        if backend == "mediaprojection":
+            logger.warning("[capture] GAMEBOT_CAPTURE=mediaprojection: 待实装")
+            # TODO: Phase D — vpn-app CaptureService 集成
+            return False
+
+        # 默认：直接回退 screencap
+        logger.info("[capture] 使用 adb screencap（默认稳定方案）")
         return False
 
     def _cmd(self, *args) -> str:
