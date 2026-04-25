@@ -367,24 +367,26 @@ def benchmark_ocr(spec: Dict[str, Any]) -> Tuple[float, str]:
 # 主入口
 # ════════════════════════════════════════
 
-def recommend_max_instances(avg_ms: float, cpu_count: int, ram_gb: float) -> int:
-    """按 OCR 速度 + 硬件资源给出推荐并发实例数"""
+def estimate_script_overhead(avg_ms: float) -> Dict[str, Any]:
+    """估算脚本本身（OCR/识别）的资源占用，方便用户决定加几个实例。
+
+    *不限制*用户多开数 —— 12 开你的机器跑得起来就跑得起来。
+    我们只汇报：每实例每分钟，脚本会消耗多少 GPU/CPU 时间。
+
+    估算前提：单实例平均每秒 1-2 次 OCR（实测的轮询频率）。
+    """
     if avg_ms < 0:
-        return 1
-    # OCR 速度档位
-    if avg_ms < 100:
-        cap = 8
-    elif avg_ms < 300:
-        cap = 6
-    elif avg_ms < 800:
-        cap = 4
-    elif avg_ms < 2000:
-        cap = 2
-    else:
-        cap = 1
-    # 硬件约束
-    cap = min(cap, max(1, cpu_count // 2), int(max(1, ram_gb // 2)))
-    return cap
+        return {"per_instance_per_sec_ms": -1, "note": "bench failed"}
+    # 单次 OCR avg_ms × 1-2 calls/sec ≈ avg_ms-2*avg_ms ms 推理时间/秒
+    per_sec_low = round(avg_ms * 1.0, 1)
+    per_sec_high = round(avg_ms * 2.0, 1)
+    # 假如 12 实例并发，GPU 占用估算（仅参考，真实值取决于 batch / 并发）
+    twelve_concurrent_gpu_pct = round(per_sec_high * 12 / 1000 * 100, 1)
+    return {
+        "per_instance_per_sec_ms": [per_sec_low, per_sec_high],
+        "if_12_instances_gpu_pct": twelve_concurrent_gpu_pct,
+        "note": "估算每实例每秒 1-2 次 OCR 调用，真实值看实际轮询",
+    }
 
 
 def main(argv=None) -> int:
@@ -433,8 +435,13 @@ def main(argv=None) -> int:
         print(f"  OCR avg:   {avg_ms} ms (5 次均值)")
         print(f"  providers: {actual_providers}")
 
-    max_inst = recommend_max_instances(avg_ms, hw["cpu_count"], hw["ram_gb"])
-    print(f"\n  推荐最大并发实例数: {max_inst}")
+    overhead = estimate_script_overhead(avg_ms)
+    print(f"\n  脚本开销估算（不限制实例数，由你决定开几个）:")
+    if overhead.get("per_instance_per_sec_ms", [0, 0])[0] >= 0:
+        lo, hi = overhead["per_instance_per_sec_ms"]
+        print(f"    每实例每秒 OCR 推理: {lo}-{hi} ms")
+        print(f"    若开 12 实例同时跑: GPU/CPU 占用约 {overhead['if_12_instances_gpu_pct']}%")
+        print(f"    （实际值取决于轮询频率 + 多 instance 并发模式）")
 
     config = {
         "schema": 1,
@@ -444,7 +451,7 @@ def main(argv=None) -> int:
         "install_source": install_source,
         "ocr_avg_ms": avg_ms,
         "ocr_providers": actual_providers,
-        "max_instances": max_inst,
+        "script_overhead_estimate": overhead,
     }
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
