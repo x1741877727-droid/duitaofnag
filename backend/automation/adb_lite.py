@@ -284,6 +284,12 @@ class WGCStream:
       - 窗口被遮挡仍能抓（OBS Game Capture 同款 API）
     """
 
+    # LDPlayer 9 自有 UI chrome 偏移（不是 Windows 标题栏，是 LDPlayer 在 client area 内画的）
+    #   - 顶部 toolbar 约 30 px（LDPlayer 标题 + 9.1.67.0 版本号）
+    #   - 右侧 sidebar 约 56 px（加速/截图/拍照 等快捷按钮）
+    LDPLAYER_TOP_TOOLBAR = 30
+    LDPLAYER_RIGHT_SIDEBAR = 56
+
     def __init__(self, serial: str):
         self.serial = serial
         self.window_title = _ldplayer_window_title(serial)
@@ -295,8 +301,7 @@ class WGCStream:
         self._frame_count = 0
         self._available = False
         self._hwnd = 0
-        # client area 在 WGC 帧里的偏移（去标题栏 + 边框）
-        # 由 _compute_client_offset() 在 setup 时算出
+        # client area 在 WGC 帧里的偏移（Windows 标准非客户区 — 标题栏 + 边框）
         self._client_x = 0
         self._client_y = 0
         self._client_w = 0
@@ -345,14 +350,19 @@ class WGCStream:
         def on_frame_arrived(frame, capture_control):
             try:
                 buf = frame.frame_buffer  # BGRA ndarray, shape=(window_h, window_w, 4)
-                # 1. crop 到 client area（去标题栏 + 边框）
+                # 1. crop 到 Windows client area（去标准标题栏 + 边框）
                 if self._client_w > 0 and self._client_h > 0:
                     x, y, w, h = self._client_x, self._client_y, self._client_w, self._client_h
                     if y + h <= buf.shape[0] and x + w <= buf.shape[1]:
                         buf = buf[y:y+h, x:x+w]
-                # 2. BGRA → BGR
+                # 2. crop LDPlayer 自有 chrome（顶部工具栏 + 右侧侧栏）
+                top = self.LDPLAYER_TOP_TOOLBAR
+                right = self.LDPLAYER_RIGHT_SIDEBAR
+                if buf.shape[0] > top + 100 and buf.shape[1] > right + 100:
+                    buf = buf[top:, :buf.shape[1] - right]
+                # 3. BGRA → BGR
                 bgr = cv2.cvtColor(buf, cv2.COLOR_BGRA2BGR)
-                # 3. resize 到目标高度（保持比例），跟 Android 1280x720 一致
+                # 4. resize 到目标高度（保持比例），跟 Android 1280x720 一致
                 if bgr.shape[0] != self._target_h:
                     h, w = bgr.shape[:2]
                     new_w = int(w * self._target_h / h)
