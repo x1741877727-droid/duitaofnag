@@ -81,35 +81,73 @@ class OcrDismisser:
 
     @classmethod
     def warmup(cls):
-        """预热 OCR 引擎（启动时调用一次，避免运行中等待）
+        """预热 OCR 引擎（启动时调用一次）
 
-        优先尝试 DirectML（Win 任意 GPU 加速 6-30x），不可用 → CPU。
-        实测 1280×720: CPU 1570ms → DirectML 250ms。
+        参数解析优先级：
+          1. config/runtime.json 里 ocr_backend.ocr_params（auto_configure 写的，跨硬件首选）
+          2. 自动检测 DirectML provider（Win 用户 pip install onnxruntime-directml 后自动启用）
+          3. 其他 fallback 到 CPU
+
+        实测：CPU 1570ms → DirectML 250ms (~6x)
         """
-        if cls._shared_ocr is None:
-            logger.info("预热 RapidOCR ...")
-            from rapidocr import RapidOCR
-            # 检测 DirectML 是否可用
+        if cls._shared_ocr is not None:
+            return
+
+        logger.info("预热 RapidOCR ...")
+        from rapidocr import RapidOCR
+
+        params = cls._load_ocr_params_from_config()
+        if not params:
+            # 兜底：直接探测
             try:
                 import onnxruntime as ort
-                providers = ort.get_available_providers()
-                use_dml = "DmlExecutionProvider" in providers
+                if "DmlExecutionProvider" in ort.get_available_providers():
+                    params = {"EngineConfig.onnxruntime.use_dml": True}
+                    logger.info("RapidOCR: 自动检测启用 DirectML GPU 加速")
             except Exception:
-                use_dml = False
+                pass
 
-            params = {}
-            if use_dml:
-                params["EngineConfig.onnxruntime.use_dml"] = True
-                logger.info("RapidOCR: 启用 DirectML GPU 加速")
-            else:
-                logger.info("RapidOCR: 走 CPU（pip install onnxruntime-directml 可启用 GPU）")
+        if not params:
+            logger.info("RapidOCR: 走 CPU（建议跑 python tools/auto_configure.py 启用 GPU 加速）")
 
-            try:
-                cls._shared_ocr = RapidOCR(params=params) if params else RapidOCR()
-            except TypeError:
-                # 旧版 RapidOCR 不支持 params
-                cls._shared_ocr = RapidOCR()
-            logger.info("RapidOCR 预热完成")
+        try:
+            cls._shared_ocr = RapidOCR(params=params) if params else RapidOCR()
+        except TypeError:
+            cls._shared_ocr = RapidOCR()
+        logger.info("RapidOCR 预热完成")
+
+    @staticmethod
+    def _load_ocr_params_from_config() -> dict:
+        """从 config/runtime.json 读 ocr_backend.ocr_params。失败返回空 dict。"""
+        import json as _json
+        import os as _os
+        import sys as _sys
+        # frozen-aware：与 roi_config 同款多路径
+        candidates = []
+        meipass = getattr(_sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(_os.path.join(meipass, "config", "runtime.json"))
+        if getattr(_sys, "frozen", False):
+            candidates.append(_os.path.join(
+                _os.path.dirname(_os.path.abspath(_sys.executable)),
+                "config", "runtime.json",
+            ))
+        candidates.append(_os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+            "config", "runtime.json",
+        ))
+        for p in candidates:
+            if _os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        cfg = _json.load(f)
+                    params = cfg.get("ocr_backend", {}).get("ocr_params", {})
+                    if params:
+                        logger.info(f"RapidOCR: 从 {p} 读到 ocr_params={params}")
+                    return params or {}
+                except Exception as e:
+                    logger.warning(f"读 {p} 失败：{e}")
+        return {}
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OCR引擎
