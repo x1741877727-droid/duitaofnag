@@ -2,10 +2,10 @@
 ADB 控制器 — 基于 subprocess 直接调用 adb 命令
 专门为雷电模拟器优化，已在实机测试中验证通过。
 
-截图策略（2026-04-26 Phase D 集成）：
-  - GAMEBOT_CAPTURE=mediaprojection (生产推荐): vpn-app CaptureService H.264 流
-  - GAMEBOT_CAPTURE=screenrecord: adb shell screenrecord（已知 6 实例并发崩游戏）
-  - 默认: adb screencap（慢但稳）
+截图策略（2026-04-25 重构，UE4 兼容）：
+  1. 优先用 ScreenrecordStream（adb shell screenrecord raw H.264 + PyAV，UE4 OK）
+  2. 不可用时回退到 screencap（信号量限流防排队）
+  - minicap 抓 UE4 黑帧（HWC overlay + secure flag），已弃用
 """
 
 import asyncio
@@ -13,8 +13,6 @@ import io
 import logging
 import os
 import platform
-import socket as _socket
-import struct
 import subprocess
 import threading
 import time
@@ -226,198 +224,6 @@ class ScreenrecordStream:
 
 
 # ====================================================================
-# CaptureServiceStream — vpn-app CaptureService H.264 流式截图（Phase D）
-# ====================================================================
-
-class CaptureServiceStream:
-    """通过 vpn-app FightMaster CaptureService 拉 H.264 流。
-
-    工作流程：
-      1. adb shell am broadcast -a com.fightmaster.vpn.CAPTURE_START
-         （触发 CapturePermissionActivity 申请 MediaProjection 授权）
-      2. adb forward tcp:<port> localabstract:fmcapture
-      3. socket connect → 协议 [4B BE length + N bytes payload]
-      4. 后台线程把 payload 当 H.264 packet 喂 PyAV codec → BGR ndarray
-
-    优势 vs screenrecord：
-      - 单进程常驻（screenrecord 每 170s 重启）
-      - bitrate 1.5 Mbps（screenrecord 默认 20 Mbps）
-      - foregroundService OOM 保护
-    """
-
-    SOCKET_NAME = "fmcapture"
-    BROADCAST_ACTION_START = "com.fightmaster.vpn.CAPTURE_START"
-    BROADCAST_ACTION_STOP = "com.fightmaster.vpn.CAPTURE_STOP"
-    RECEIVER_COMPONENT = "com.fightmaster.vpn/.CommandReceiver"
-
-    def __init__(self, adb_path: str, serial: str, port: int):
-        self._adb_path = adb_path
-        self._serial = serial
-        self._port = port
-        self._sock: Optional[_socket.socket] = None
-        self._stop_event = threading.Event()
-        self._reader_thread: Optional[threading.Thread] = None
-        self._latest_frame: Optional[np.ndarray] = None
-        self._frame_time: float = 0
-        self._frame_lock = threading.Lock()
-        self._frame_count = 0
-        self._available = False
-
-    def _adb(self, *args, timeout: int = 10) -> tuple[int, str]:
-        cmd = [self._adb_path, "-s", self._serial, *args]
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                               creationflags=_SUBPROCESS_FLAGS)
-            return r.returncode, r.stdout.decode("utf-8", errors="replace")
-        except Exception as e:
-            logger.warning(f"[capture] {self._serial} adb {' '.join(args[:3])} 失败: {e}")
-            return -1, ""
-
-    def setup(self) -> bool:
-        """启动 Android 端 CaptureService + adb forward + socket 连接 + reader 线程"""
-        try:
-            import av  # noqa: F401
-        except ImportError:
-            logger.warning("[capture] PyAV 未安装")
-            return False
-
-        # 1. 触发 CaptureService 启动（通过 CommandReceiver 广播）
-        rc, _ = self._adb(
-            "shell", "am", "broadcast",
-            "-a", self.BROADCAST_ACTION_START,
-            "-n", self.RECEIVER_COMPONENT,
-        )
-        if rc != 0:
-            logger.warning(f"[capture] {self._serial} 广播 CAPTURE_START 失败")
-            return False
-
-        # 2. 等 CaptureService 起来 + LocalServerSocket 绑定
-        time.sleep(2.0)
-
-        # 3. adb forward
-        rc, _ = self._adb("forward", f"tcp:{self._port}",
-                          f"localabstract:{self.SOCKET_NAME}")
-        if rc != 0:
-            logger.warning(f"[capture] {self._serial} adb forward 失败")
-            return False
-
-        # 4. 连接 socket
-        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        sock.settimeout(5)
-        for attempt in range(3):
-            try:
-                sock.connect(("127.0.0.1", self._port))
-                break
-            except (ConnectionRefusedError, _socket.timeout) as e:
-                if attempt == 2:
-                    logger.warning(f"[capture] {self._serial} socket connect 失败: {e}")
-                    sock.close()
-                    return False
-                time.sleep(1.0)
-
-        sock.settimeout(10)
-        self._sock = sock
-
-        # 5. 启 reader 线程
-        self._stop_event.clear()
-        self._available = True
-        self._reader_thread = threading.Thread(
-            target=self._reader_loop, daemon=True,
-            name=f"capture-{self._serial}",
-        )
-        self._reader_thread.start()
-
-        # 等首帧最多 3 秒
-        for _ in range(30):
-            if self._latest_frame is not None:
-                logger.info(f"[capture] {self._serial} 首帧已到")
-                return True
-            time.sleep(0.1)
-        logger.info(f"[capture] {self._serial} reader 已启动（首帧暂未到）")
-        return True
-
-    def _read_exact(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self._sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("socket closed")
-            buf += chunk
-        return buf
-
-    def _reader_loop(self):
-        """循环读 [4B BE length + payload] → 喂 PyAV codec → 解出 BGR 帧"""
-        import av
-        codec = av.codec.CodecContext.create("h264", "r")
-        codec.thread_type = "AUTO"
-
-        while not self._stop_event.is_set():
-            try:
-                hdr = self._read_exact(4)
-                length = struct.unpack(">I", hdr)[0]
-                if length == 0 or length > 5_000_000:
-                    logger.warning(f"[capture] {self._serial} 异常 payload length={length}")
-                    break
-                payload = self._read_exact(length)
-            except (ConnectionError, _socket.timeout, OSError) as e:
-                if not self._stop_event.is_set():
-                    logger.info(f"[capture] {self._serial} socket 断开: {e}")
-                break
-            except Exception as e:
-                logger.warning(f"[capture] {self._serial} 读帧异常: {e}")
-                break
-
-            # 用 PyAV 解 H.264 packet
-            try:
-                packet = av.Packet(payload)
-                frames = codec.decode(packet)
-            except Exception as e:
-                logger.debug(f"[capture] {self._serial} decode err: {e}")
-                continue
-
-            for frame in frames:
-                try:
-                    arr = frame.to_ndarray(format="bgr24")
-                except Exception:
-                    continue
-                with self._frame_lock:
-                    self._latest_frame = arr
-                    self._frame_time = time.time()
-                    self._frame_count += 1
-
-        self._available = False
-
-    def get_frame(self) -> Optional[np.ndarray]:
-        with self._frame_lock:
-            return self._latest_frame
-
-    @property
-    def available(self) -> bool:
-        return self._available and self._latest_frame is not None
-
-    def stop(self):
-        self._stop_event.set()
-        self._available = False
-        if self._sock:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
-            self._sock = None
-        # 通知 Android 侧停止 CaptureService
-        self._adb(
-            "shell", "am", "broadcast",
-            "-a", self.BROADCAST_ACTION_STOP,
-            "-n", self.RECEIVER_COMPONENT,
-            timeout=5,
-        )
-        # 移除 forward
-        self._adb("forward", "--remove", f"tcp:{self._port}", timeout=5)
-        if self._reader_thread:
-            self._reader_thread.join(timeout=2)
-
-
-# ====================================================================
 # ADB 控制器
 # ====================================================================
 
@@ -427,54 +233,39 @@ class ADBController:
     专门为雷电模拟器优化
     """
 
-    # CaptureServiceStream 端口基数（每个模拟器 +1）
-    _CAPTURE_BASE_PORT = 1413
-
     def __init__(self, serial: str, adb_path: str = "adb"):
         self.serial = serial
         self.adb_path = adb_path
         self._proc_timeout = 10
-        self._stream = None  # ScreenrecordStream | CaptureServiceStream | None
-
-    def _capture_port(self) -> int:
-        try:
-            emu_port = int(self.serial.split("-")[1])
-            offset = (emu_port - 5554) // 2
-        except (IndexError, ValueError):
-            offset = 0
-        return self._CAPTURE_BASE_PORT + offset
+        self._stream: Optional[ScreenrecordStream] = None
 
     def setup_minicap(self) -> bool:
         """[向后兼容名] 初始化截图流。
 
-        backend = GAMEBOT_CAPTURE 环境变量：
-        - mediaprojection (Phase D 推荐) → CaptureServiceStream（vpn-app FightMaster.apk）
-        - screenrecord (已知 6 实例并发崩游戏) → ScreenrecordStream
-        - 默认 (空)                            → 不启用流，screenshot() 走 screencap
+        - 默认：不启动流式截图，screenshot() 走 screencap（慢但稳定）
+        - GAMEBOT_CAPTURE=screenrecord：启用 ScreenrecordStream（UE4 验证过但
+          6 实例并发会压垮 SurfaceFlinger 导致游戏闪退，已知不稳定）
+        - GAMEBOT_CAPTURE=mediaprojection：启用 vpn-app CaptureService（待实装）
 
         旧名 setup_minicap 保留是因为外部调用点很多。
         """
         backend = os.environ.get("GAMEBOT_CAPTURE", "").lower()
 
-        if backend == "mediaprojection":
-            stream = CaptureServiceStream(self.adb_path, self.serial, self._capture_port())
-            if stream.setup():
-                self._stream = stream
-                logger.info(f"[capture] {self.serial} 启用 CaptureService (port={self._capture_port()})")
-                return True
-            logger.warning(f"[capture] {self.serial} CaptureService 启动失败，回退 screencap")
-            return False
-
         if backend == "screenrecord":
-            logger.warning(f"[capture] {self.serial} screenrecord: 6 实例并发可能导致游戏闪退")
+            logger.warning("[capture] GAMEBOT_CAPTURE=screenrecord: 6 实例并发可能导致游戏闪退")
             stream = ScreenrecordStream(self.adb_path, self.serial)
             if stream.setup():
                 self._stream = stream
                 return True
             return False
 
-        # 默认：不启用流，走 screencap
-        logger.info(f"[capture] {self.serial} 使用 adb screencap（默认稳定方案）")
+        if backend == "mediaprojection":
+            logger.warning("[capture] GAMEBOT_CAPTURE=mediaprojection: 待实装")
+            # TODO: Phase D — vpn-app CaptureService 集成
+            return False
+
+        # 默认：直接回退 screencap
+        logger.info("[capture] 使用 adb screencap（默认稳定方案）")
         return False
 
     def _cmd(self, *args) -> str:
