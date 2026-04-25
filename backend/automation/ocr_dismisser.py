@@ -510,13 +510,28 @@ class OcrDismisser:
                 await asyncio.sleep(0.3)  # 短等，快速二次确认
                 continue
 
-            # ━━ 慢速路径: 需要OCR分析（帧差跳过）━━
+            # ━━ 慢速路径: 需要OCR分析 ━━
             from .adb_lite import phash, phash_distance
+
+            # 1) 稳定性检测：动画期间画面剧烈变化时不 OCR（OCR 结果会半成品 + 浪费 worker）
+            #    再截一帧 150ms 后比对。差异大 → 在动画中，等下一轮再判
+            await asyncio.sleep(0.15)
+            shot2 = await device.screenshot()
+            if shot2 is not None:
+                ANIM_DIFF_THRESHOLD = 8
+                diff = phash_distance(phash(shot), phash(shot2))
+                if diff > ANIM_DIFF_THRESHOLD:
+                    logger.debug(f"[R{rnd+1}] 帧动画中 (diff={diff} > {ANIM_DIFF_THRESHOLD})，等稳定")
+                    await asyncio.sleep(0.4)
+                    continue
+                shot = shot2  # 用最新稳定帧
+
+            # 2) 重复帧跳过：跟上一轮已 OCR 过的帧太相似 → 复用决策
             h = phash(shot)
             if not hasattr(self, '_last_ph'):
                 self._last_ph = 0
             if phash_distance(h, self._last_ph) < 4:
-                logger.debug(f"[R{rnd+1}] 帧差跳过 OCR")
+                logger.debug(f"[R{rnd+1}] 帧差跳过 OCR (跟上轮相似)")
                 await asyncio.sleep(0.5)
                 continue
             self._last_ph = h
@@ -580,6 +595,18 @@ class OcrDismisser:
                             await device.tap(target2[0], target2[1])
 
                 await asyncio.sleep(0.5)
+
+                # 点击效果验证：动画期间按钮 visible 但未激活 → 点击无效，重试一次
+                #   tap 后等 600ms（含上面 0.5s + 0.1 截图），跟点击前对比
+                #   pHash 距离 < 3 = 几乎没变 = 点击没生效（按钮未激活）
+                verify_shot = await device.screenshot()
+                if verify_shot is not None:
+                    diff_after = phash_distance(phash(shot), phash(verify_shot))
+                    if diff_after < 3:
+                        logger.info(f"[R{rnd+1}] 点击无效果（diff={diff_after}，按钮可能未激活），重试")
+                        await asyncio.sleep(0.6)  # 等动画再多一点
+                        await device.tap(x, y)
+                        await asyncio.sleep(0.4)
                 continue
 
             # ━━ 什么都没找到 ━━
