@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ────────────── 配置 ──────────────
 _DISABLED = bool(os.environ.get("GAMEBOT_YOLO_COLLECT_DISABLE"))
 _MAX_FILES = int(os.environ.get("GAMEBOT_YOLO_COLLECT_MAX", "5000"))
-_DEDUP_DISTANCE = 5  # pHash Hamming 距离 < 此值视为重复
+_DEDUP_DISTANCE = 3  # pHash Hamming 距离 < 此值视为重复（3 = 更松，捕捉细微变化）
 _DEDUP_RING_SIZE = 2000  # 内存里保留多少近期 hash 做 dedup
 
 # ────────────── 状态 ──────────────

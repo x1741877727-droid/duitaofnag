@@ -527,9 +527,10 @@ class OcrDismisser:
             logger.info(f"[R{rnd+1}] 状态: {state.value}")
 
             # 顺手为 YOLO 训练采集这帧（pHash dedup 保证不重复）
+            # tag 格式 phase__OCRclaim：dismiss_popups__detect_lobby —— phase 准，OCR 端待 verify 验证
             try:
                 from .screenshot_collector import collect as _yolo_collect
-                _yolo_collect(shot, tag=f"popup_{state.value}")
+                _yolo_collect(shot, tag=f"dismiss_popups__detect_{state.value}")
             except Exception:
                 pass
 

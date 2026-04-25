@@ -61,6 +61,17 @@ class DebugLogger:
         name += f"_{self._screenshot_count}.jpg"
         path = os.path.join(self._run_dir, name)
         cv2.imwrite(path, shot, [cv2.IMWRITE_JPEG_QUALITY, 50])
+
+        # 副作用：把同一帧也喂给 YOLO 收集器（dedup 在 collector 内部，phase 名当 tag = 100% 准）
+        try:
+            from .screenshot_collector import collect as _yolo_collect
+            yolo_tag = self._current_phase or "unknown"
+            if tag:
+                yolo_tag = f"{yolo_tag}__{tag}"
+            _yolo_collect(shot, tag=yolo_tag)
+        except Exception:
+            pass
+
         return path
 
     def log_ocr(self, hits: list, roi_desc: str = "全图"):
