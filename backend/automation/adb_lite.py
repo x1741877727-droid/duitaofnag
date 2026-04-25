@@ -507,7 +507,9 @@ class DXHookStream:
         self.serial = serial
         self.ld_idx = _serial_to_ldidx(serial)
         self.box_pid: Optional[int] = None
-        self._mmap: Optional["mmap.mmap"] = None
+        self._shm_buf = None
+        self._shm_handle = None
+        self._shm_view_addr = None
         self._latest_arr: Optional[np.ndarray] = None
         self._latest_frame_n = -1
         self._available = False
@@ -549,63 +551,80 @@ class DXHookStream:
             logger.warning(f"[dxhook] {self.serial}: 跑 inject.exe 失败: {e}")
             return False
 
-        # 打开共享内存（DLL 用 "Local\\GameBotCap_<PID>" 命名）
-        import mmap
-        # 试两种 tagname：带 Local\ 前缀（DLL 实际用的）和不带（兼容 Python 默认）
+        # 打开共享内存（用 ctypes OpenFileMappingW 显式打开 DLL 创的 "Local\\GameBotCap_<PID>"）
+        import ctypes
+        import ctypes.wintypes as wt
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        OpenFileMappingW = kernel32.OpenFileMappingW
+        OpenFileMappingW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+        OpenFileMappingW.restype = wt.HANDLE
+        MapViewOfFile = kernel32.MapViewOfFile
+        MapViewOfFile.argtypes = [wt.HANDLE, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.c_size_t]
+        MapViewOfFile.restype = ctypes.c_void_p
+
+        FILE_MAP_READ = 0x0004
         candidate_names = [
             f"Local\\GameBotCap_{self.box_pid}",
             f"GameBotCap_{self.box_pid}",
         ]
+
+        h = None
         for _ in range(50):
             for name in candidate_names:
-                try:
-                    m = mmap.mmap(-1, _DXHOOK_SHM_TOTAL,
-                                   tagname=name,
-                                   access=mmap.ACCESS_READ)
-                    hdr = m[:_DXHOOK_SHM_HEADER_BYTES]
-                    magic, *_ = struct.unpack("<IIIIIIII", hdr)
-                    if magic == _DXHOOK_SHM_MAGIC:
-                        self._mmap = m
-                        logger.info(f"[dxhook] {self.serial} 共享内存连上 {name}")
-                        break
-                    m.close()
-                except Exception:
-                    pass
-            if self._mmap is not None:
+                hh = OpenFileMappingW(FILE_MAP_READ, False, name)
+                if hh:
+                    h = hh
+                    used_name = name
+                    break
+            if h:
                 break
             time.sleep(0.1)
-        else:
-            logger.warning(f"[dxhook] {self.serial}: 共享内存未就绪 "
-                           f"(tried: {candidate_names})")
+        if not h:
+            logger.warning(f"[dxhook] {self.serial}: OpenFileMappingW 失败 "
+                           f"err={ctypes.get_last_error()} (tried: {candidate_names})")
             return False
+
+        view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, _DXHOOK_SHM_TOTAL)
+        if not view:
+            logger.warning(f"[dxhook] {self.serial}: MapViewOfFile 失败 err={ctypes.get_last_error()}")
+            kernel32.CloseHandle(h)
+            return False
+
+        # 用 ctypes 把指针包成 Python buffer
+        self._shm_buf = (ctypes.c_uint8 * _DXHOOK_SHM_TOTAL).from_address(view)
+        self._shm_handle = h
+        self._shm_view_addr = view
+
+        # 校验 magic
+        magic = struct.unpack("<I", bytes(self._shm_buf[:4]))[0]
+        if magic != _DXHOOK_SHM_MAGIC:
+            logger.warning(f"[dxhook] {self.serial}: magic 不对 0x{magic:08X} ≠ 0x{_DXHOOK_SHM_MAGIC:08X}")
+            return False
+        logger.info(f"[dxhook] {self.serial} 共享内存连上 {used_name}")
 
         self._available = True
         logger.info(f"[dxhook] {self.serial} 启用 (box_pid={self.box_pid} shm={shm_name})")
         return True
 
     def get_frame(self) -> Optional[np.ndarray]:
-        if not self._available or self._mmap is None:
+        if not self._available or self._shm_buf is None:
             return None
-        hdr = self._mmap[:_DXHOOK_SHM_HEADER_BYTES]
+        hdr = bytes(self._shm_buf[:_DXHOOK_SHM_HEADER_BYTES])
         magic, frame_n, w, h, _ts, _stride, _r0, _r1 = struct.unpack("<IIIIIIII", hdr)
         if magic != _DXHOOK_SHM_MAGIC or w == 0 or h == 0:
-            return self._latest_arr  # 返回缓存的最后一帧
+            return self._latest_arr
         if frame_n & 0x80000000:
-            # 写入中，返回上一帧
             return self._latest_arr
         if frame_n == self._latest_frame_n and self._latest_arr is not None:
-            return self._latest_arr  # 没新帧
+            return self._latest_arr
 
-        # 读新帧
         if w > _DXHOOK_SHM_MAX_W or h > _DXHOOK_SHM_MAX_H:
             return self._latest_arr
         nbytes = w * h * 4
-        raw = bytes(self._mmap[_DXHOOK_SHM_HEADER_BYTES:_DXHOOK_SHM_HEADER_BYTES + nbytes])
+        raw = bytes(self._shm_buf[_DXHOOK_SHM_HEADER_BYTES:_DXHOOK_SHM_HEADER_BYTES + nbytes])
         rgba = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 4))
-        # OpenGL 原点左下，图像左上 → 上下翻转
         rgba = np.flipud(rgba)
         bgr = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-        # ascontiguousarray 防 numpy view 问题
         self._latest_arr = np.ascontiguousarray(bgr)
         self._latest_frame_n = frame_n
         return self._latest_arr
@@ -616,12 +635,21 @@ class DXHookStream:
 
     def stop(self):
         self._available = False
-        if self._mmap is not None:
+        if hasattr(self, '_shm_view_addr') and self._shm_view_addr:
             try:
-                self._mmap.close()
+                import ctypes
+                ctypes.WinDLL("kernel32").UnmapViewOfFile(self._shm_view_addr)
             except Exception:
                 pass
-            self._mmap = None
+            self._shm_view_addr = None
+        if hasattr(self, '_shm_handle') and self._shm_handle:
+            try:
+                import ctypes
+                ctypes.WinDLL("kernel32").CloseHandle(self._shm_handle)
+            except Exception:
+                pass
+            self._shm_handle = None
+        self._shm_buf = None
 
 
 # ====================================================================
