@@ -24,46 +24,66 @@
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 from collections import OrderedDict
-from typing import Any, Tuple
+from typing import Any, List, Tuple
 
 import cv2
 import numpy as np
 
 from . import metrics
+from .adb_lite import phash, phash_distance
 
 # ────────────── 配置 ──────────────
 _TTL_SEC: float = float(os.environ.get("OCR_CACHE_TTL_SEC", "2.0"))
 _MAX_SIZE: int = int(os.environ.get("OCR_CACHE_MAX_SIZE", "256"))
 _DISABLED: bool = bool(os.environ.get("OCR_CACHE_DISABLE"))
+# pHash Hamming 距离阈值：<= 此值 = 视为"同一帧"。游戏背景小动画通常 1-3 bit
+_PHASH_THRESHOLD: int = int(os.environ.get("OCR_CACHE_PHASH_THRESHOLD", "4"))
 
 # ────────────── 状态 ──────────────
-_CACHE: "OrderedDict[Tuple[Any, ...], Tuple[float, Any]]" = OrderedDict()
+# CACHE 结构：list of (key_extra, phash, timestamp, result)
+# key_extra: ROI 用 (x1,y1,x2,y2,scale)；full-frame 用 "__full__"
+_CACHE: "List[Tuple[Any, int, float, Any]]" = []
 _HITS: int = 0
 _MISSES: int = 0
 
 
-def _fingerprint(crop: np.ndarray) -> bytes:
-    """16×16 灰度指纹，约 0.3ms。
+def _fingerprint_phash(img: np.ndarray) -> int:
+    """64-bit pHash（DCT-based），抗背景小动画 + 抗压缩噪声"""
+    if img.size == 0:
+        return 0
+    return phash(img)
 
-    抗压缩噪声（已 INTER_AREA 降采样），但对真实内容变化敏感。
+
+def _lookup(key_extra: Any, fp: int, now: float) -> Any:
+    """在 _CACHE 里找 key_extra 相同 + phash 距离 <= 阈值 + 未过期 的项。
+    LRU：命中后挪到末尾。
     """
-    if crop.size == 0:
-        return b""
-    small = cv2.resize(crop, (16, 16), interpolation=cv2.INTER_AREA)
-    if small.ndim == 3:
-        small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    return hashlib.blake2b(small.tobytes(), digest_size=8).digest()
+    for idx in range(len(_CACHE) - 1, -1, -1):
+        ke, fp_old, ts, result = _CACHE[idx]
+        if now - ts >= _TTL_SEC:
+            continue
+        if ke != key_extra:
+            continue
+        if phash_distance(fp, fp_old) <= _PHASH_THRESHOLD:
+            # 移到末尾（LRU）
+            _CACHE.append(_CACHE.pop(idx))
+            return result, ts
+    return None
+
+
+def _store(key_extra: Any, fp: int, now: float, result: Any) -> None:
+    _CACHE.append((key_extra, fp, now, result))
+    # 简单容量限制
+    if len(_CACHE) > _MAX_SIZE:
+        _CACHE.pop(0)
 
 
 def cached(fn):
     """装饰 _ocr_roi(self, screenshot, x1, y1, x2, y2, scale=2)。
-
-    被装饰函数的签名必须保持上面这个形状，
-    因为缓存 key = (x1, y1, x2, y2, scale, fingerprint(crop))。
+    用 ROI crop 的 pHash 做 fuzzy 匹配（Hamming <= _PHASH_THRESHOLD）。
     """
     def wrap(self, screenshot, x1, y1, x2, y2, scale: int = 2):
         global _HITS, _MISSES
@@ -76,23 +96,21 @@ def cached(fn):
         if crop.size == 0:
             return []
 
-        fp = _fingerprint(crop)
-        key = (round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4), int(scale), fp)
+        fp = _fingerprint_phash(crop)
+        key_extra = (round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4), int(scale))
         now = time.time()
 
-        cached_entry = _CACHE.get(key)
-        if cached_entry is not None and now - cached_entry[0] < _TTL_SEC:
-            _CACHE.move_to_end(key)
+        hit = _lookup(key_extra, fp, now)
+        if hit is not None:
+            result, ts = hit
             _HITS += 1
             metrics.record("ocr_roi_cache_hit",
                            roi=f"{x1:.2f},{y1:.2f},{x2:.2f},{y2:.2f}",
-                           scale=scale, age_ms=round((now - cached_entry[0]) * 1000, 1))
-            return cached_entry[1]
+                           scale=scale, age_ms=round((now - ts) * 1000, 1))
+            return result
 
         result = fn(self, screenshot, x1, y1, x2, y2, scale=scale)
-        _CACHE[key] = (now, result)
-        if len(_CACHE) > _MAX_SIZE:
-            _CACHE.popitem(last=False)
+        _store(key_extra, fp, now, result)
         _MISSES += 1
         return result
 
@@ -101,35 +119,31 @@ def cached(fn):
 
 
 def cached_full(fn):
-    """装饰 _ocr_all(self, screenshot) — 全屏 OCR 缓存。
-
-    指纹基于整帧 16×16 灰度。loading / popup 静止画面 80%+ 命中。
+    """装饰 _ocr_all(self, screenshot) — 全屏 OCR 缓存（pHash fuzzy）。
+    游戏 popup 时背景动画通常使 pHash 变 1-3 bit，<=4 阈值能命中。
     """
     def wrap(self, screenshot):
         global _HITS, _MISSES
 
         if _DISABLED:
             return fn(self, screenshot)
-
         if screenshot is None or screenshot.size == 0:
             return fn(self, screenshot)
 
-        fp = _fingerprint(screenshot)
-        key = ("__full__", fp)
+        fp = _fingerprint_phash(screenshot)
+        key_extra = "__full__"
         now = time.time()
 
-        cached_entry = _CACHE.get(key)
-        if cached_entry is not None and now - cached_entry[0] < _TTL_SEC:
-            _CACHE.move_to_end(key)
+        hit = _lookup(key_extra, fp, now)
+        if hit is not None:
+            result, ts = hit
             _HITS += 1
             metrics.record("ocr_full_cache_hit",
-                           age_ms=round((now - cached_entry[0]) * 1000, 1))
-            return cached_entry[1]
+                           age_ms=round((now - ts) * 1000, 1))
+            return result
 
         result = fn(self, screenshot)
-        _CACHE[key] = (now, result)
-        if len(_CACHE) > _MAX_SIZE:
-            _CACHE.popitem(last=False)
+        _store(key_extra, fp, now, result)
         _MISSES += 1
         return result
 
@@ -147,6 +161,7 @@ def stats() -> dict:
         "size": len(_CACHE),
         "ttl_sec": _TTL_SEC,
         "max_size": _MAX_SIZE,
+        "phash_threshold": _PHASH_THRESHOLD,
         "disabled": _DISABLED,
     }
 
