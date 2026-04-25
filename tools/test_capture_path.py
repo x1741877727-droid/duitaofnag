@@ -25,8 +25,8 @@ OUT_DIR.mkdir(exist_ok=True)
 
 # LDPlayer 9 默认 5554/5556/5558/5560/5562/5564
 SERIALS = [f"emulator-{5554 + i*2}" for i in range(6)]
-DURATION = 6  # 秒
-TARGET_FRAME = 30  # 取第 N 帧（避开 IDR 编码暖机）
+DURATION = 12  # 秒（静态画面下 H.264 IDR 间隔可能很长，要给足时间）
+TARGET_FRAME = 5   # 取第 N 帧（早点拿，画面静态时编码器懒）
 
 
 def adb_path() -> str:
