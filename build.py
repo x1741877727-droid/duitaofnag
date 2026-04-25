@@ -174,6 +174,8 @@ a = Analysis(
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
         (os.path.join(ROOT, 'config'), 'config'),
         (os.path.join(ROOT, 'fixtures', 'golden_set'), 'fixtures/golden_set'),
+        # DXHook 截图工具：64-bit DLL + 注入器（运行时由 DXHookStream 用）
+        (os.path.join(ROOT, 'tools', 'dxhook', 'build', 'x64'), 'tools/dxhook/build/x64'),
     ] + rapidocr_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
