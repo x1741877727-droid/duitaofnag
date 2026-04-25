@@ -604,7 +604,7 @@ class DXHookStream:
         logger.info(f"[dxhook] {self.serial} 共享内存连上 {used_name}")
 
         self._available = True
-        logger.info(f"[dxhook] {self.serial} 启用 (box_pid={self.box_pid} shm={shm_name})")
+        logger.info(f"[dxhook] {self.serial} 启用 (box_pid={self.box_pid} shm={used_name})")
         return True
 
     def get_frame(self) -> Optional[np.ndarray]:
