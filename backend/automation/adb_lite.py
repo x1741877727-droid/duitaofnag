@@ -15,6 +15,7 @@ import io
 import logging
 import os
 import platform
+import struct
 import subprocess
 import threading
 import time
