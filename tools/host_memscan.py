@@ -373,8 +373,8 @@ def _parse_tlv_names(blob: bytes,
     return names
 
 
-def _read_blob_at(handle, addr: int, size: int = 2048) -> bytes:
-    """ReadProcessMemory 读 addr 起 size 字节"""
+def _read_blob_at(handle, addr: int, size: int = 512) -> bytes:
+    """ReadProcessMemory 读 addr 起 size 字节（默认 512 避免溢出读到邻近结构）"""
     buf = ctypes.create_string_buffer(size)
     bytes_read = ctypes.c_size_t(0)
     if not ReadProcessMemory(handle, ctypes.c_void_p(addr), buf,
@@ -533,7 +533,7 @@ def get_team_members(instance_index: int = None, pid: int = None,
             return {"ok": False, "error": "OpenProcess 失败", "members": []}
         try:
             for f in anchors:
-                blob = _read_blob_at(handle, f["addr"], 2048)
+                blob = _read_blob_at(handle, f["addr"], 512)
                 if not blob:
                     continue
                 for name in _parse_tlv_names(blob):
