@@ -337,38 +337,44 @@ _NAME_STOP_WORDS = {
 
 
 def _parse_tlv_names(blob: bytes,
-                     field_names: tuple = (b"name", b"nickName", b"nick_name")) -> list[str]:
+                     field_names: tuple = (b"name", b"nickName", b"nick_name"),
+                     max_offset: int = 0) -> list[str]:
     """从二进制 blob 提取所有 TLV 格式的玩家昵称。
 
     扫描 \\x{len}{field_name}\\x03{value_len}{utf8_value} 模式。
     去 stop words / 控制字符。返回去重 list（保留出现顺序）。
+
+    max_offset > 0 时，只接受 blob[0:max_offset] 范围内的匹配（避免读到远处其他结构）
     """
     names = []
     seen = set()
+    scan_end = min(len(blob), max_offset) if max_offset > 0 else len(blob)
     for field in field_names:
-        # 字段名前的长度前缀字节就是字段名长度
         marker = bytes([len(field)]) + field + b"\x03"
         start = 0
         while True:
-            i = blob.find(marker, start)
+            i = blob.find(marker, start, scan_end)
             if i < 0:
                 break
             len_pos = i + len(marker)
+            # name_len + name 完整在 blob 内，不允许越界
             if len_pos >= len(blob):
                 break
             name_len = blob[len_pos]
-            if 2 <= name_len <= 30:
-                name_bytes = blob[len_pos + 1: len_pos + 1 + name_len]
-                # 严格 UTF-8 解码，含控制字符则丢
-                try:
-                    name = name_bytes.decode("utf-8", errors="strict")
-                    if (name and name not in seen
-                            and not any(ord(c) < 0x20 for c in name)
-                            and not any(w in name for w in _NAME_STOP_WORDS)):
-                        seen.add(name)
-                        names.append(name)
-                except UnicodeDecodeError:
-                    pass
+            name_end = len_pos + 1 + name_len
+            if not (2 <= name_len <= 30) or name_end > len(blob):
+                start = i + len(marker)
+                continue
+            name_bytes = blob[len_pos + 1: name_end]
+            try:
+                name = name_bytes.decode("utf-8", errors="strict")
+                if (name and name not in seen
+                        and not any(ord(c) < 0x20 for c in name)
+                        and not any(w in name for w in _NAME_STOP_WORDS)):
+                    seen.add(name)
+                    names.append(name)
+            except UnicodeDecodeError:
+                pass
             start = i + len(marker)
     return names
 
@@ -533,10 +539,12 @@ def get_team_members(instance_index: int = None, pid: int = None,
             return {"ok": False, "error": "OpenProcess 失败", "members": []}
         try:
             for f in anchors:
-                blob = _read_blob_at(handle, f["addr"], 512)
+                # 读 1024 字节 blob，但只在 anchor 后 200 字节内找 name
+                # 因为 notify_update_carteam_member 推送的 name 字段紧跟在锚点后
+                blob = _read_blob_at(handle, f["addr"], 1024)
                 if not blob:
                     continue
-                for name in _parse_tlv_names(blob):
+                for name in _parse_tlv_names(blob, max_offset=200):
                     if name not in seen:
                         seen.add(name)
                         members.append(name)
