@@ -30,7 +30,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -438,7 +438,7 @@ def main(argv=None) -> int:
 
     config = {
         "schema": 1,
-        "configured_at": datetime.utcnow().isoformat() + "Z",
+        "configured_at": datetime.now(timezone.utc).isoformat(),
         "hardware": hw,
         "ocr_backend": spec,
         "install_source": install_source,
@@ -451,7 +451,8 @@ def main(argv=None) -> int:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'=' * 60}")
-    print(f"✓ 配置已保存: {CONFIG_PATH}")
+    # 避开 Windows cp936 不支持的特殊字符
+    print(f"[OK] 配置已保存: {CONFIG_PATH}")
     print(f"{'=' * 60}")
     return 0
 
