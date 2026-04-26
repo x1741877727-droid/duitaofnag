@@ -210,8 +210,9 @@ async def api_add_keyword(req: AddKeywordReq):
 
 # ─────────── 标注器（YOLO 训练数据） ───────────
 
-# 类别定义（v1）
-LABEL_CLASSES = ["close_x", "action_btn", "dialog"]
+# 类别定义（v1）—— 简化为 2 类，dialog 不再要求标（人标不一致，对 bot 操作也没意义）
+# 兼容历史：之前标了 dialog 的 .txt 仍能读，训练时由训练脚本决定是否使用第 3 类
+LABEL_CLASSES = ["close_x", "action_btn"]
 
 
 def _yolo_paths():
@@ -235,7 +236,15 @@ def _label_path_for(image_filename: str):
 
 @app.get("/labeler", response_class=HTMLResponse)
 async def labeler_page():
-    return LABELER_HTML
+    # 禁用浏览器缓存，确保用户始终拿最新版（修 bug 后立刻生效）
+    return HTMLResponse(
+        content=LABELER_HTML,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/api/labeler/list")
@@ -1722,7 +1731,8 @@ async function loadImage(i) {
     syncCanvas();
     drawAll();   // 用当前 curBoxes 画（fetch 没回来就是空，回来了就有内容）
   };
-  img.src = '/api/labeler/image/' + encodeURIComponent(it.name);
+  // 加 ts 防浏览器缓存上一张图，强制每次都重新拉 + 触发 onload
+  img.src = '/api/labeler/image/' + encodeURIComponent(it.name) + '?t=' + Date.now();
 
   // 加载已存 labels（异步，可能比 img.onload 先回也可能后回）
   let myIdx = curIdx;
