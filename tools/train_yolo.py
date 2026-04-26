@@ -176,12 +176,17 @@ def train(yaml_path: Path, epochs: int, imgsz: int, batch: int) -> Path:
         pass
     print(f"     device={device}")
 
+    # Windows 上 DataLoader 多进程 (spawn) 经常挂 worker
+    # workers=0 单进程加载，慢一点但稳；non-Windows 用默认 8 worker
+    n_workers = 0 if os.name == "nt" else 8
+
     results = model.train(
         data=str(yaml_path),
         epochs=epochs,
         imgsz=imgsz,
         batch=batch,
         device=device,
+        workers=n_workers,
         patience=20,    # 20 epoch 无提升提前停
         project=str(yaml_path.parent / "runs"),
         name="yolo_dismiss",
