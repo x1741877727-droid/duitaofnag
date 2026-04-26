@@ -61,12 +61,25 @@ class ExpectationResult:
 
 
 def _verify_popup_dismissed(before, after, ctx) -> bool:
-    """tap close_x 后 close_x 数量应该减少"""
+    """tap close_x 后画面应有变化.
+
+    旧逻辑只看 close_x 计数减少 → 误判: 实际游戏里点了一个 close_x
+    紧接着新弹窗冒出来(也有 close_x), 计数可能不变, 但 *画面已变*.
+
+    新逻辑: 计数减少 OR phash 显著变化(> 5) 任一即算成功.
+    """
     yb = ctx.get("yolo_before", []) or []
     ya = ctx.get("yolo_after", []) or []
     cx_b = sum(1 for d in yb if getattr(d, "cls", "") == "close_x")
     cx_a = sum(1 for d in ya if getattr(d, "cls", "") == "close_x")
-    return cx_a < cx_b
+    if cx_a < cx_b:
+        return True
+    # fallback: 画面变了也算成功 (新弹窗替代旧弹窗)
+    from .adb_lite import phash, phash_distance
+    try:
+        return phash_distance(phash(before), phash(after)) > 5
+    except Exception:
+        return False
 
 
 def _verify_popup_next(before, after, ctx) -> bool:

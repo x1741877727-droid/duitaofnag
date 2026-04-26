@@ -66,18 +66,33 @@ def test_close_x_dismissed_yolo_count_decreased():
     print("  ✓ close_x_dismissed_yolo_count_decreased")
 
 
-def test_close_x_failed_count_unchanged():
-    """tap close_x 后数量没减 → 失败 (这就是修 '弹窗切到下一个' bug)"""
+def test_close_x_count_unchanged_but_phash_changed_ok():
+    """tap close_x 后数量没减但画面大变 → 成功 (新弹窗替代旧弹窗, 不算失败).
+
+    这是真实游戏跑出来后修的: 点 close_x → 新弹窗冒出来也有 close_x →
+    count 不变. 旧 verifier 误判失败导致 timeout. 现 phash fallback 救场.
+    """
     before = make_frame(1)
-    after = make_frame(2)
+    after = make_frame(99)  # 完全不同的画面
     ctx = {
         "yolo_before": [StubDet("close_x")],
-        "yolo_after": [StubDet("close_x")],  # 没减
+        "yolo_after": [StubDet("close_x")],  # 计数没减
     }
     r = verify("close_x", before, after, ctx)
-    assert not r.matched, "close_x 数没减应判失败"
-    assert "无效" in r.note or "误识" in r.note
-    print("  ✓ close_x_failed_count_unchanged")
+    assert r.matched, "count 没减但画面变了应算成功"
+    print("  ✓ close_x_count_unchanged_but_phash_changed_ok")
+
+
+def test_close_x_count_unchanged_and_phash_unchanged_fail():
+    """tap close_x 后数量没减且画面没变 → 失败 (真没响应)"""
+    f = make_frame(5)
+    ctx = {
+        "yolo_before": [StubDet("close_x")],
+        "yolo_after": [StubDet("close_x")],
+    }
+    r = verify("close_x", f, f, ctx)
+    assert not r.matched, "count 没减且画面没变应判失败"
+    print("  ✓ close_x_count_unchanged_and_phash_unchanged_fail")
 
 
 def test_popup_next_phash_changed():
@@ -154,7 +169,8 @@ def test_verifier_crash_returns_matched_true():
 def main():
     tests = [
         test_close_x_dismissed_yolo_count_decreased,
-        test_close_x_failed_count_unchanged,
+        test_close_x_count_unchanged_but_phash_changed_ok,
+        test_close_x_count_unchanged_and_phash_unchanged_fail,
         test_popup_next_phash_changed,
         test_popup_next_phash_unchanged,
         test_lobby_stayed_ok_when_lobby_btn_still_match,
