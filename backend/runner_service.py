@@ -22,6 +22,7 @@ from .automation.adb_lite import ADBController
 from .automation.guarded_adb import GuardedADB
 from .automation.screen_matcher import ScreenMatcher
 from .automation.single_runner import SingleInstanceRunner, Phase
+from .automation.watchdogs import WatchState, WatchdogManager
 from .config import AccountConfig, Settings
 
 logger = logging.getLogger(__name__)
@@ -427,9 +428,36 @@ class MultiRunnerService:
         game_restarts = 0       # 游戏重启计数
         current_phase = "accelerator"  # 当前要执行的阶段
 
+        # ── v2 横切 Watchdog: per-instance 后台任务 ──
+        # 只观察 + 写状态, 不主动打断 phase (打断逻辑留到第 4 刀做)
+        wd_state = WatchState(instance_idx=idx)
+        wd_mgr = WatchdogManager(wd_state)
+        try:
+            wd_mgr.start_vpn(runner._check_vpn_connected, interval_s=5.0)
+
+            async def _pidof_game() -> int:
+                try:
+                    raw_adb = getattr(runner.adb, '_adb', runner.adb)
+                    loop = asyncio.get_event_loop()
+                    out = await loop.run_in_executor(
+                        None, raw_adb._cmd, "shell",
+                        f"pidof {self._GAME_PACKAGE}",
+                    )
+                    out = (out or "").strip()
+                    return int(out) if out.isdigit() else -1
+                except Exception:
+                    return -1
+
+            wd_mgr.start_process(_pidof_game, interval_s=5.0)
+            logger.info(f"[实例{idx}] watchdogs 启动: vpn + process")
+        except Exception as e:
+            logger.warning(f"[实例{idx}] watchdog 启动失败 (非致命): {e}")
+
         try:
             while True:
                 try:
+                    # 同步当前 phase 到 watchdog state (PopupWatchdog 用)
+                    wd_state.current_phase = current_phase
                     if current_phase == "accelerator":
                         ok = await runner.phase_accelerator()
                         if ok:
@@ -603,6 +631,11 @@ class MultiRunnerService:
             inst.error = str(e)
             logger.error(f"[实例{idx}] 运行异常: {e}", exc_info=True)
         finally:
+            # 停 watchdog (它的 task 是 daemon-like, 不会自己退)
+            try:
+                await wd_mgr.stop_all()
+            except Exception:
+                pass
             inst._phase_start = time.time()
             self._broadcast_state_change(idx, "running", inst.state)
             # 写入运行摘要
@@ -614,6 +647,13 @@ class MultiRunnerService:
                     "error": inst.error,
                     "stage_times": inst.stage_times,
                     "game_restarts": game_restarts,
+                    "watchdog_stats": {
+                        "vpn_fail_count": wd_state.vpn_fail_count,
+                        "vpn_last_check_ts": wd_state.vpn_last_check_ts,
+                        "game_running_at_end": wd_state.game_running,
+                        "suspected_stall_at_end": wd_state.suspected_stall,
+                        "phash_unchanged_seconds": wd_state.phash_unchanged_seconds,
+                    },
                 }
                 summary_path = os.path.join(runner.dbg._run_dir, "summary.json")
                 with open(summary_path, "w", encoding="utf-8") as f:
