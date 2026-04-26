@@ -208,6 +208,147 @@ async def api_add_keyword(req: AddKeywordReq):
     return {"ok": True, "field": req.field, "text": text, "list_len": len(rules[req.field])}
 
 
+# ─────────── 标注器（YOLO 训练数据） ───────────
+
+# 类别定义（v1）
+LABEL_CLASSES = ["close_x", "action_btn", "dialog"]
+
+
+def _yolo_paths():
+    """返回 (raw_dir, labels_dir, classes_path)"""
+    from .automation.user_paths import user_yolo_dir
+    root = user_yolo_dir()
+    raw = root / "raw_screenshots"
+    labels = root / "labels"
+    classes_p = root / "classes.txt"
+    if not classes_p.exists():
+        classes_p.write_text("\n".join(LABEL_CLASSES) + "\n", encoding="utf-8")
+    return raw, labels, classes_p
+
+
+def _label_path_for(image_filename: str):
+    """对应图片的 .txt label 路径"""
+    _, labels_dir, _ = _yolo_paths()
+    stem = os.path.splitext(image_filename)[0]
+    return labels_dir / f"{stem}.txt"
+
+
+@app.get("/labeler", response_class=HTMLResponse)
+async def labeler_page():
+    return LABELER_HTML
+
+
+@app.get("/api/labeler/list")
+async def api_labeler_list():
+    """所有原始截图 + 标注状态"""
+    raw, labels_dir, _ = _yolo_paths()
+    items = []
+    for p in sorted(raw.glob("*.png")) + sorted(raw.glob("*.jpg")):
+        label_p = labels_dir / f"{p.stem}.txt"
+        labeled = label_p.is_file() and label_p.stat().st_size > 0
+        skipped = label_p.is_file() and label_p.stat().st_size == 0
+        items.append({
+            "name": p.name,
+            "size": p.stat().st_size,
+            "mtime": p.stat().st_mtime,
+            "labeled": labeled,
+            "skipped": skipped,
+        })
+    items.sort(key=lambda x: x["mtime"])
+    n_labeled = sum(1 for i in items if i["labeled"])
+    n_skipped = sum(1 for i in items if i["skipped"])
+    return {
+        "total": len(items),
+        "labeled": n_labeled,
+        "skipped": n_skipped,
+        "remaining": len(items) - n_labeled - n_skipped,
+        "classes": LABEL_CLASSES,
+        "items": items,
+    }
+
+
+@app.get("/api/labeler/image/{filename}")
+async def api_labeler_image(filename: str):
+    raw, _, _ = _yolo_paths()
+    p = raw / _safe_id(filename.replace(".png", ""))
+    # 重新拼回扩展名
+    for ext in (".png", ".jpg"):
+        full = raw / (os.path.splitext(filename)[0] + ext)
+        if full.is_file():
+            return FileResponse(full, media_type=f"image/{ext[1:]}")
+    raise HTTPException(404)
+
+
+@app.get("/api/labeler/labels/{filename}")
+async def api_labeler_get_labels(filename: str):
+    """返回 [{class_id, cx, cy, w, h}, ...]"""
+    label_p = _label_path_for(filename)
+    if not label_p.is_file():
+        return {"boxes": [], "exists": False}
+    boxes = []
+    for line in label_p.read_text(encoding="utf-8").splitlines():
+        parts = line.strip().split()
+        if len(parts) != 5:
+            continue
+        try:
+            boxes.append({
+                "class_id": int(parts[0]),
+                "cx": float(parts[1]),
+                "cy": float(parts[2]),
+                "w": float(parts[3]),
+                "h": float(parts[4]),
+            })
+        except ValueError:
+            continue
+    return {"boxes": boxes, "exists": True}
+
+
+class SaveLabelsReq(BaseModel):
+    boxes: list
+
+
+@app.post("/api/labeler/labels/{filename}")
+async def api_labeler_save_labels(filename: str, req: SaveLabelsReq):
+    """保存 YOLO 格式 .txt（boxes 为空 → 空文件，标记为已跳过）"""
+    label_p = _label_path_for(filename)
+    label_p.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for b in req.boxes:
+        try:
+            cid = int(b.get("class_id", -1))
+            cx = float(b.get("cx", 0))
+            cy = float(b.get("cy", 0))
+            w = float(b.get("w", 0))
+            h = float(b.get("h", 0))
+        except (TypeError, ValueError):
+            continue
+        if cid < 0 or cid >= len(LABEL_CLASSES):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        lines.append(f"{cid} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+    label_p.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return {"ok": True, "count": len(lines), "path": str(label_p)}
+
+
+@app.delete("/api/labeler/image/{filename}")
+async def api_labeler_delete_image(filename: str):
+    """废弃图片（移到 .trash/ 子目录）"""
+    raw, _, _ = _yolo_paths()
+    trash = raw.parent / ".trash"
+    trash.mkdir(exist_ok=True)
+    moved = []
+    for ext in (".png", ".jpg"):
+        full = raw / (os.path.splitext(filename)[0] + ext)
+        if full.is_file():
+            full.rename(trash / full.name)
+            moved.append(full.name)
+    label_p = _label_path_for(filename)
+    if label_p.is_file():
+        label_p.unlink()
+    return {"ok": True, "moved": moved}
+
+
 @app.get("/api/log/tail")
 async def api_log_tail(n: int = 100):
     """读当前 session 的 run.log 最后 N 行"""
@@ -665,6 +806,7 @@ HTML_PAGE = r"""<!doctype html>
   <h1>GameBot Debug</h1>
   <span class="meta" id="topbar-meta">session: -</span>
   <div class="right">
+    <button onclick="window.open('/labeler','_blank')">YOLO 标注</button>
     <button onclick="openRecords()">历史记录 <span id="rec-count">(0)</span></button>
     <button onclick="openKeywords()">添加关键字</button>
   </div>
@@ -1345,6 +1487,453 @@ function escapeHtml(s) {
 // 启动
 refreshStatus();
 setInterval(refreshStatus, 1500);
+</script>
+</body>
+</html>
+"""
+
+
+# ─────────── 标注器 HTML ───────────
+
+LABELER_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YOLO 标注</title>
+<style>
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body { margin:0; padding:0; height:100%;
+               font-family: -apple-system, "PingFang SC", sans-serif;
+               background:#0f1115; color:#e3e6eb; font-size:13px; }
+  .topbar {
+    background:#161a21; border-bottom:1px solid #252a33;
+    padding:10px 16px; display:flex; align-items:center; gap:16px;
+  }
+  .topbar h1 { margin:0; font-size:15px; color:#6fa8ff; }
+  .topbar .progress { color:#8b95a5; }
+  .topbar .progress strong { color:#4ade80; }
+  .topbar button {
+    background:#2a3140; color:#e3e6eb; border:1px solid #3a4252;
+    padding:5px 10px; border-radius:5px; cursor:pointer; font-size:12px;
+  }
+  .topbar button:hover { background:#3a4252; }
+
+  .layout { display:flex; height:calc(100% - 50px); }
+  .sidebar {
+    width:160px; background:#161a21; border-right:1px solid #252a33;
+    overflow-y:auto;
+  }
+  .sidebar .file {
+    padding:6px 10px; cursor:pointer; border-bottom:1px solid #1f2530;
+    display:flex; justify-content:space-between; font-size:11px;
+  }
+  .sidebar .file:hover { background:#1f2530; }
+  .sidebar .file.cur { background:#2a3a55; color:#fff; }
+  .sidebar .file.labeled { color:#4ade80; }
+  .sidebar .file.skipped { color:#888; }
+  .sidebar .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sidebar .tag { font-size:10px; opacity:0.6; }
+
+  .canvas-wrap {
+    flex:1; background:#000; position:relative; overflow:hidden;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .canvas-wrap img, .canvas-wrap canvas {
+    max-width:100%; max-height:100%; position:absolute;
+  }
+  .canvas-wrap img { z-index:1; }
+  .canvas-wrap canvas { z-index:2; cursor:crosshair; }
+
+  .right {
+    width:280px; background:#161a21; border-left:1px solid #252a33;
+    display:flex; flex-direction:column; min-height:0;
+  }
+  .right .section { padding:14px; border-bottom:1px solid #252a33; }
+  .right .section h3 {
+    margin:0 0 10px; font-size:11px; color:#8b95a5; font-weight:600;
+    text-transform:uppercase; letter-spacing:0.5px;
+  }
+  .class-btn {
+    display:block; width:100%; text-align:left; margin-bottom:6px;
+    padding:9px 12px; border:2px solid; border-radius:6px;
+    background:#1a1f28; color:#e3e6eb; cursor:pointer; font-size:13px;
+  }
+  .class-btn .key { float:right; opacity:0.5; font-size:11px; }
+  .box-list { font-size:12px; max-height:140px; overflow-y:auto; }
+  .box-list .box-item {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:5px 8px; background:#1a1f28; border-radius:4px;
+    margin-bottom:4px;
+  }
+  .box-list button {
+    background:#3d1d1d; color:#ef4444; border:none;
+    padding:2px 8px; border-radius:3px; cursor:pointer; font-size:11px;
+  }
+  .actions {
+    margin-top:auto; padding:14px; display:flex; gap:6px; flex-wrap:wrap;
+  }
+  .actions button {
+    flex:1; min-width:80px; padding:9px; border-radius:5px;
+    border:1px solid #3a4252; background:#2a3140; color:#e3e6eb;
+    cursor:pointer; font-size:12px;
+  }
+  .actions button.primary { background:#3b6fd1; border-color:#4a82e8; color:#fff; }
+  .actions button.primary:hover { background:#4a82e8; }
+  .actions button.danger { background:#3d1d1d; border-color:#9d3b3b; color:#ef4444; }
+  .actions button.danger:hover { background:#5a2828; }
+  .actions button:hover { background:#3a4252; }
+
+  .help {
+    padding:10px 14px; font-size:11px; color:#6e7685; line-height:1.6;
+    border-top:1px solid #252a33; background:#1a1f28;
+  }
+  .help kbd {
+    background:#2a3140; padding:1px 5px; border-radius:3px; font-size:10px;
+    border:1px solid #3a4252;
+  }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>YOLO 标注</h1>
+  <span class="progress">
+    已标 <strong id="prog-labeled">0</strong> /
+    跳过 <span id="prog-skipped">0</span> /
+    总计 <span id="prog-total">0</span>
+  </span>
+  <button onclick="reload()">刷新列表</button>
+  <span style="margin-left:auto; color:#8b95a5; font-size:11px;" id="cur-name">-</span>
+</div>
+
+<div class="layout">
+  <div class="sidebar" id="sidebar">loading…</div>
+
+  <div class="canvas-wrap" id="cw">
+    <img id="img" alt="">
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="right">
+    <div class="section">
+      <h3>类别（点选 / 数字键）</h3>
+      <div id="class-row"></div>
+    </div>
+    <div class="section">
+      <h3>已标 bbox（共 <span id="bbox-count">0</span> 个）</h3>
+      <div class="box-list" id="box-list">
+        <div style="color:#6e7685;">还没标。鼠标拖框开始。</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="saveAndNext()">保存下一张 <kbd style="opacity:.7">S</kbd></button>
+      <button onclick="skipImage()">跳过 <kbd style="opacity:.7">K</kbd></button>
+      <button class="danger" onclick="deleteImage()">删图 <kbd style="opacity:.7">D</kbd></button>
+      <button onclick="navImage(-1)">‹ 上张</button>
+      <button onclick="navImage(1)">下张 ›</button>
+    </div>
+    <div class="help">
+      拖鼠标 = 画框；<kbd>1/2/3</kbd> 选类；<kbd>S</kbd> 保存下一张；<kbd>K</kbd> 跳过；
+      <kbd>D</kbd> 删图（垃圾帧）；<kbd>←</kbd>/<kbd>→</kbd> 上下张；
+      <kbd>U</kbd> 撤销最后一个 box。
+    </div>
+  </div>
+</div>
+
+<script>
+const COLORS = ['#ef4444', '#fbbf24', '#6fa8ff'];   // close_x, action_btn, dialog
+let CLASSES = [];
+let items = [];
+let curIdx = -1;
+let curBoxes = [];     // {class_id, cx, cy, w, h}  归一化 [0,1]
+let curClass = 0;
+let drawing = false;
+let drawStart = null;
+let drawCur = null;
+let imgNatW = 0, imgNatH = 0;
+
+async function reload() {
+  const r = await fetch('/api/labeler/list');
+  const d = await r.json();
+  items = d.items;
+  CLASSES = d.classes;
+  document.getElementById('prog-labeled').textContent = d.labeled;
+  document.getElementById('prog-skipped').textContent = d.skipped;
+  document.getElementById('prog-total').textContent = d.total;
+  renderSidebar();
+  renderClassRow();
+  if (curIdx < 0 || curIdx >= items.length) {
+    // 跳到第一个未标的
+    const first = items.findIndex(i => !i.labeled && !i.skipped);
+    curIdx = first >= 0 ? first : 0;
+  }
+  if (items.length > 0) loadImage(curIdx);
+}
+
+function renderClassRow() {
+  const c = document.getElementById('class-row');
+  c.innerHTML = CLASSES.map((name, i) => `
+    <div class="class-btn" data-cid="${i}"
+         style="border-color:${COLORS[i]||'#888'};
+                ${i===curClass ? `background:${COLORS[i]}30;` : ''}"
+         onclick="setClass(${i})">
+      ${name}
+      <span class="key">${i+1}</span>
+    </div>
+  `).join('');
+}
+
+function setClass(i) {
+  curClass = i;
+  renderClassRow();
+}
+
+function renderSidebar() {
+  const s = document.getElementById('sidebar');
+  s.innerHTML = items.map((it, i) => {
+    const cls = it.labeled ? 'labeled' : (it.skipped ? 'skipped' : '');
+    const tag = it.labeled ? '✓' : (it.skipped ? '–' : '');
+    return `<div class="file ${cls} ${i===curIdx?'cur':''}" onclick="loadImage(${i})"
+                 data-idx="${i}">
+              <span class="name">${escapeHtml(it.name)}</span>
+              <span class="tag">${tag}</span>
+            </div>`;
+  }).join('');
+  // scroll cur into view
+  const cur = s.querySelector('.file.cur');
+  if (cur) cur.scrollIntoView({block:'nearest'});
+}
+
+async function loadImage(i) {
+  if (i < 0 || i >= items.length) return;
+  curIdx = i;
+  const it = items[i];
+  document.getElementById('cur-name').textContent = it.name + ' (' + (i+1) + '/' + items.length + ')';
+  const img = document.getElementById('img');
+  img.onload = () => {
+    imgNatW = img.naturalWidth;
+    imgNatH = img.naturalHeight;
+    syncCanvas();
+    drawAll();
+  };
+  img.src = '/api/labeler/image/' + encodeURIComponent(it.name);
+  // 加载已存 labels
+  try {
+    const r = await fetch('/api/labeler/labels/' + encodeURIComponent(it.name));
+    const d = await r.json();
+    curBoxes = (d.boxes || []).map(b => ({
+      class_id: b.class_id,
+      cx: b.cx, cy: b.cy, w: b.w, h: b.h
+    }));
+  } catch(e) { curBoxes = []; }
+  renderBoxList();
+  renderSidebar();
+}
+
+function syncCanvas() {
+  const canvas = document.getElementById('canvas');
+  const img = document.getElementById('img');
+  const r = img.getBoundingClientRect();
+  canvas.width = imgNatW;
+  canvas.height = imgNatH;
+  canvas.style.width = r.width + 'px';
+  canvas.style.height = r.height + 'px';
+  canvas.style.left = (r.left - canvas.parentElement.getBoundingClientRect().left) + 'px';
+  canvas.style.top = (r.top - canvas.parentElement.getBoundingClientRect().top) + 'px';
+}
+
+window.addEventListener('resize', () => { syncCanvas(); drawAll(); });
+
+function canvasPoint(e) {
+  const c = document.getElementById('canvas');
+  const r = c.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (c.width / r.width),
+    y: (e.clientY - r.top) * (c.height / r.height),
+  };
+}
+
+document.getElementById('canvas').addEventListener('mousedown', (e) => {
+  drawing = true;
+  drawStart = canvasPoint(e);
+  drawCur = drawStart;
+});
+document.getElementById('canvas').addEventListener('mousemove', (e) => {
+  if (!drawing) return;
+  drawCur = canvasPoint(e);
+  drawAll();
+});
+const finishDraw = (e) => {
+  if (!drawing) return;
+  drawing = false;
+  if (!drawStart || !drawCur) return;
+  const x1 = Math.min(drawStart.x, drawCur.x);
+  const y1 = Math.min(drawStart.y, drawCur.y);
+  const x2 = Math.max(drawStart.x, drawCur.x);
+  const y2 = Math.max(drawStart.y, drawCur.y);
+  const w = x2 - x1, h = y2 - y1;
+  if (w >= 8 && h >= 8) {
+    curBoxes.push({
+      class_id: curClass,
+      cx: (x1 + w/2) / imgNatW,
+      cy: (y1 + h/2) / imgNatH,
+      w: w / imgNatW,
+      h: h / imgNatH,
+    });
+    renderBoxList();
+  }
+  drawStart = null; drawCur = null;
+  drawAll();
+};
+document.getElementById('canvas').addEventListener('mouseup', finishDraw);
+document.getElementById('canvas').addEventListener('mouseleave', finishDraw);
+
+function drawAll() {
+  const c = document.getElementById('canvas');
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.lineWidth = 3;
+  ctx.font = '16px sans-serif';
+  for (const b of curBoxes) {
+    const x = (b.cx - b.w/2) * c.width;
+    const y = (b.cy - b.h/2) * c.height;
+    const w = b.w * c.width;
+    const h = b.h * c.height;
+    ctx.strokeStyle = COLORS[b.class_id] || '#888';
+    ctx.strokeRect(x, y, w, h);
+    // 标签
+    ctx.fillStyle = COLORS[b.class_id] || '#888';
+    const label = CLASSES[b.class_id] || '?';
+    const tw = ctx.measureText(label).width + 10;
+    ctx.fillRect(x, y - 22, tw, 22);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + 5, y - 6);
+  }
+  // 正在拖的预览
+  if (drawing && drawStart && drawCur) {
+    const x1 = Math.min(drawStart.x, drawCur.x);
+    const y1 = Math.min(drawStart.y, drawCur.y);
+    const x2 = Math.max(drawStart.x, drawCur.x);
+    const y2 = Math.max(drawStart.y, drawCur.y);
+    ctx.strokeStyle = COLORS[curClass] || '#fff';
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+    ctx.setLineDash([]);
+  }
+}
+
+function renderBoxList() {
+  document.getElementById('bbox-count').textContent = curBoxes.length;
+  const c = document.getElementById('box-list');
+  if (curBoxes.length === 0) {
+    c.innerHTML = '<div style="color:#6e7685;">还没标。鼠标拖框开始。</div>';
+    return;
+  }
+  c.innerHTML = curBoxes.map((b, i) => `
+    <div class="box-item" style="border-left:3px solid ${COLORS[b.class_id]};">
+      <span>${CLASSES[b.class_id]} ${(b.w*100).toFixed(0)}×${(b.h*100).toFixed(0)}</span>
+      <button onclick="removeBox(${i})">删</button>
+    </div>
+  `).join('');
+}
+
+function removeBox(i) {
+  curBoxes.splice(i, 1);
+  renderBoxList();
+  drawAll();
+}
+
+async function saveAndNext() {
+  if (curIdx < 0 || curIdx >= items.length) return;
+  const name = items[curIdx].name;
+  await fetch('/api/labeler/labels/' + encodeURIComponent(name), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({boxes: curBoxes}),
+  });
+  // 刷一下列表（更新 labeled 状态）+ 跳下一个未标的
+  await reloadKeepCursor();
+  navToNextUnlabeled();
+}
+
+async function skipImage() {
+  if (curIdx < 0 || curIdx >= items.length) return;
+  // 空 boxes 数组 = 跳过（写空文件）
+  curBoxes = [];
+  await fetch('/api/labeler/labels/' + encodeURIComponent(items[curIdx].name), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({boxes: []}),
+  });
+  await reloadKeepCursor();
+  navToNextUnlabeled();
+}
+
+async function deleteImage() {
+  if (curIdx < 0 || curIdx >= items.length) return;
+  if (!confirm('删除这张图（移到 .trash/）？')) return;
+  await fetch('/api/labeler/image/' + encodeURIComponent(items[curIdx].name), {
+    method: 'DELETE',
+  });
+  await reloadKeepCursor();
+  if (curIdx >= items.length) curIdx = items.length - 1;
+  if (curIdx >= 0) loadImage(curIdx);
+}
+
+async function reloadKeepCursor() {
+  const r = await fetch('/api/labeler/list');
+  const d = await r.json();
+  items = d.items;
+  document.getElementById('prog-labeled').textContent = d.labeled;
+  document.getElementById('prog-skipped').textContent = d.skipped;
+  document.getElementById('prog-total').textContent = d.total;
+  renderSidebar();
+}
+
+function navToNextUnlabeled() {
+  // 从当前位置往后找第一个未标的
+  for (let j = curIdx + 1; j < items.length; j++) {
+    if (!items[j].labeled && !items[j].skipped) {
+      loadImage(j);
+      return;
+    }
+  }
+  // 都标完了 → 留在原位
+  alert('已经是最后一张未标的了');
+}
+
+function navImage(d) {
+  const next = curIdx + d;
+  if (next >= 0 && next < items.length) loadImage(next);
+}
+
+// 键盘
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  switch(e.key.toLowerCase()) {
+    case '1': case '2': case '3':
+      const i = parseInt(e.key) - 1;
+      if (i < CLASSES.length) setClass(i);
+      e.preventDefault();
+      break;
+    case 's': saveAndNext(); e.preventDefault(); break;
+    case 'k': skipImage(); e.preventDefault(); break;
+    case 'd': deleteImage(); e.preventDefault(); break;
+    case 'u':  // 撤销最后一个 box
+      if (curBoxes.length > 0) { curBoxes.pop(); renderBoxList(); drawAll(); }
+      e.preventDefault(); break;
+    case 'arrowleft': navImage(-1); e.preventDefault(); break;
+    case 'arrowright': navImage(1); e.preventDefault(); break;
+  }
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+
+reload();
 </script>
 </body>
 </html>

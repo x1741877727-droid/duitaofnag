@@ -396,6 +396,13 @@ class SingleInstanceRunner:
             if shot is None:
                 continue
 
+            # YOLO 训练数据采集：launch_game 阶段最容易遇到首次启动弹窗（公告/活动/周年）
+            try:
+                from .screenshot_collector import collect as _yolo_collect
+                _yolo_collect(shot, tag="launch_game")
+            except Exception:
+                pass
+
             # 模板快速检查大厅（~20ms，每轮都做）
             if self.matcher and self.matcher.is_at_lobby(shot):
                 logger.info("[阶段1] 游戏已在大厅（模板检测）")

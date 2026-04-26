@@ -44,19 +44,16 @@ DEFAULTS: dict = {
 }
 
 
-def _resolve_config_path() -> Optional[str]:
-    """frozen-aware：dev / PyInstaller 都能找到 config/popup_rules.json"""
+def _resolve_default_path() -> Optional[str]:
+    """frozen-aware：找 bundled / dev 模式的默认 popup_rules.json（只读）"""
     candidates = []
-    # PyInstaller _MEIPASS（onefile 模式）
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         candidates.append(os.path.join(meipass, "config", "popup_rules.json"))
-    # frozen exe 旁边的 _internal/config/
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidates.append(os.path.join(exe_dir, "_internal", "config", "popup_rules.json"))
         candidates.append(os.path.join(exe_dir, "config", "popup_rules.json"))
-    # dev 模式：从本文件向上找 game-automation/config/
     here = os.path.dirname(os.path.abspath(__file__))
     candidates.append(os.path.join(
         os.path.dirname(os.path.dirname(here)),
@@ -66,6 +63,15 @@ def _resolve_config_path() -> Optional[str]:
         if os.path.isfile(p):
             return p
     return None
+
+
+def _resolve_config_path() -> Optional[str]:
+    """优先用户目录（rebuild 不丢），首次运行从默认值 seed 一份"""
+    from .user_paths import user_config_dir, first_run_copy
+    user_path = user_config_dir() / "popup_rules.json"
+    default_path = _resolve_default_path()
+    final = first_run_copy(default_path, user_path)
+    return str(final) if final else None
 
 
 class RulesLoader:

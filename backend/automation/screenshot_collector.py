@@ -48,34 +48,19 @@ _warned_disk_full = False
 
 
 def _ensure_dump_dir() -> Optional[Path]:
+    """统一走 user_paths.user_yolo_dir() — 持久存储，rebuild 不丢"""
     global _dump_dir
     if _dump_dir is not None:
         return _dump_dir
-    # frozen-aware：与 roi_config 同款
-    bases = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        bases.append(meipass)
-    if getattr(sys, "frozen", False):
-        bases.append(os.path.dirname(os.path.abspath(sys.executable)))
-    bases.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-    # 选第一个可写的 bases
-    for base in bases:
-        target = Path(base) / "fixtures" / "yolo" / "raw_screenshots"
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-            # 测试可写
-            test = target / ".write_test"
-            test.write_text("x")
-            test.unlink()
-            _dump_dir = target
-            logger.info(f"YOLO 截图收集目录: {target}")
-            return _dump_dir
-        except Exception:
-            continue
-    logger.warning("YOLO 截图收集：找不到可写目录，禁用收集")
-    return None
+    try:
+        from .user_paths import user_yolo_dir
+        _dump_dir = user_yolo_dir() / "raw_screenshots"
+        _dump_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"YOLO 截图收集目录: {_dump_dir}")
+        return _dump_dir
+    except Exception as e:
+        logger.warning(f"YOLO 截图收集：用户目录不可用 ({e})，禁用收集")
+        return None
 
 
 def _seed_dedup_from_disk() -> None:
