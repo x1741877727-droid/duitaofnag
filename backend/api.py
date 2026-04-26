@@ -204,6 +204,15 @@ def create_app(config: ConfigManager) -> FastAPI:
 
     service = MultiRunnerService()
 
+    # 调试 web UI（独立 0.0.0.0:8901，Mac 浏览器可访问，不影响桌面 webview）
+    try:
+        from .debug_server import start_in_thread as _start_debug, set_service as _set_debug_service
+        _set_debug_service(service)
+        _start_debug(host="0.0.0.0", port=8901)
+    except Exception as _e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(f"debug server 启动失败（不影响主程序）: {_e}")
+
     @app.on_event("startup")
     async def startup():
         ws_manager.start_drain()

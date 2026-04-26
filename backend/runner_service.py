@@ -201,6 +201,13 @@ class MultiRunnerService:
         logging.getLogger("backend.automation").addHandler(self._file_handler)
         logger.info(f"会话日志: {self._session_dir}")
 
+        # 通知 debug_server 当前 session 路径（让 /api/log/tail 能找到 run.log）
+        try:
+            from .debug_server import set_session_dir as _set_debug_session
+            _set_debug_session(self._session_dir)
+        except Exception:
+            pass
+
         # 结构化性能指标（Task 0.1）
         from .automation import metrics
         metrics.configure(os.path.join(self._session_dir, "metrics.jsonl"))
