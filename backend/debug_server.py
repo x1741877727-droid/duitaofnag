@@ -1,28 +1,39 @@
 """
 独立调试 web 服务器 — 跑在 0.0.0.0:8901，Mac 浏览器可访问。
 
-跟主 dashboard (8900) 完全独立：
+跟主 dashboard 完全独立：
   - 不影响 GameBot.exe 桌面 webview
-  - 提供实时帧 + ROI overlay + 添加 keyword/template
+  - 提供实时帧 + 记录模态（前后 3 秒帧 + 画布批注 + 共享文本备注）
+  - 记录持久化到 session_dir/debug_records/<id>/
 
-用法：
-  Mac 浏览器打开 http://192.168.0.102:8901
+记录目录结构：
+  debug_records/<id>/
+    meta.json            点击瞬间状态 + 每帧时间戳/sys 指标
+    note.txt             用户输入的备注
+    frames/00.jpg ...    原始帧（前 1.5s + 后 1.5s 共约 4 张）
+    annotations/00.png   每帧的透明画布批注（PNG，可叠加在 frame 上）
+
+Mac 浏览器：http://192.168.0.102:8901
+Claude 拉记录：curl http://192.168.0.102:8901/api/records
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import logging
 import os
+import re
 import threading
 import time
-from typing import Optional
+from datetime import datetime
+from typing import Optional, List, Dict
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -45,6 +56,57 @@ def set_session_dir(path: str):
     _session_dir = path
 
 
+def _records_root() -> Optional[str]:
+    """记录持久化根目录。session 没启动时返回 None"""
+    if _session_dir is None:
+        return None
+    p = os.path.join(_session_dir, "debug_records")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _safe_id(s: str) -> str:
+    """文件名净化"""
+    return re.sub(r"[^A-Za-z0-9_\-]", "_", s)[:64]
+
+
+def _sys_snapshot() -> dict:
+    """整机 CPU/内存/进程数（不阻塞，psutil 在 Windows 上 ~1ms）"""
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        return {
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "mem_percent": vm.percent,
+            "mem_used_mb": round(vm.used / (1024 * 1024)),
+            "mem_total_mb": round(vm.total / (1024 * 1024)),
+            "process_count": len(psutil.pids()),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _instance_snapshot(idx: int) -> dict:
+    """某实例当前状态快照（点击记录时存到 meta.json）"""
+    if _service is None or idx not in _service._runners:
+        return {"idx": idx, "available": False}
+    runner = _service._runners[idx]
+    info = {
+        "idx": idx,
+        "role": getattr(runner, "role", None),
+        "group": getattr(runner, "group", None),
+        "phase": getattr(runner.phase, "value", str(runner.phase)) if hasattr(runner, "phase") else None,
+        "available": True,
+    }
+    st = _service._instance_status.get(idx) if hasattr(_service, "_instance_status") else None
+    if st:
+        info["state"] = getattr(st, "state", None)
+        info["error"] = getattr(st, "error", None)
+        info["stage_times"] = dict(getattr(st, "stage_times", {}) or {})
+        info["serial"] = getattr(st, "serial", None)
+    return info
+
+
 # ─────────── FastAPI app ───────────
 
 app = FastAPI(title="GameBot Debug")
@@ -57,42 +119,31 @@ async def index():
 
 @app.get("/api/status")
 async def api_status():
-    """返回每实例当前状态 + 阶段时长"""
+    """返回每实例当前状态 + 阶段时长 + 整机指标"""
     if _service is None:
-        return {"running": False, "instances": []}
+        return {"running": False, "instances": [], "sys": _sys_snapshot()}
     out = []
     for idx in sorted(_service._runners.keys()):
-        runner = _service._runners[idx]
-        info = {
-            "idx": idx,
-            "role": getattr(runner, "role", "?"),
-            "group": getattr(runner, "group", "?"),
-            "phase": getattr(runner.phase, "value", str(runner.phase)) if hasattr(runner, "phase") else "?",
-        }
-        # 状态信息（如果存在）
-        st = _service._instance_status.get(idx) if hasattr(_service, "_instance_status") else None
-        if st:
-            info["state"] = st.state
-            info["error"] = st.error
-            info["stage_times"] = dict(st.stage_times) if st.stage_times else {}
-        out.append(info)
+        out.append(_instance_snapshot(idx))
     return {
         "running": getattr(_service, "running", False),
         "session_dir": _session_dir,
         "instances": out,
+        "sys": _sys_snapshot(),
+        "ts": time.time(),
     }
 
 
 @app.get("/api/screenshot/{idx}.jpg")
-async def api_screenshot(idx: int, q: int = 75):
-    """实时截图 JPEG（默认 quality 75，~50KB）"""
+async def api_screenshot(idx: int, q: int = 70):
+    """实时截图 JPEG"""
     if _service is None or idx not in _service._runners:
         raise HTTPException(404, "instance not found")
     runner = _service._runners[idx]
     adb = getattr(runner, "adb", None)
     if adb is None:
         raise HTTPException(500, "adb not initialized")
-    raw_adb = getattr(adb, "_adb", adb)  # 解包 GuardedAdb → ADBController
+    raw_adb = getattr(adb, "_adb", adb)
     try:
         shot = await raw_adb.screenshot()
     except Exception as e:
@@ -103,6 +154,12 @@ async def api_screenshot(idx: int, q: int = 75):
     if not ok:
         raise HTTPException(500, "imencode failed")
     return Response(buf.tobytes(), media_type="image/jpeg")
+
+
+@app.get("/api/sysinfo")
+async def api_sysinfo():
+    """整机指标 + 时间戳，记录模态每帧附带"""
+    return {**_sys_snapshot(), "ts": time.time()}
 
 
 @app.get("/api/rules")
@@ -116,46 +173,38 @@ async def api_rules():
 
 
 class AddKeywordReq(BaseModel):
-    field: str          # close_text / confirm_text / checkbox_text / loading_keywords / lobby_keywords / ...
-    text: str           # 要加的关键字
+    field: str
+    text: str
 
 
 @app.post("/api/add_keyword")
 async def api_add_keyword(req: AddKeywordReq):
-    """把 text 加到 field 列表，写回 popup_rules.json，下一轮 dismiss_popups 自动生效"""
+    """追加关键字到指定 field，写盘 → 下一轮 dismiss_popups 自动 reload"""
     from .automation.rules_loader import RulesLoader, DEFAULTS
     path = RulesLoader.path()
     if path is None:
         raise HTTPException(500, "popup_rules.json 路径解析失败")
-
     if req.field not in DEFAULTS:
         raise HTTPException(400, f"未知 field {req.field}，可选: {list(DEFAULTS.keys())}")
-
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "text 不能为空")
-
     try:
         with open(path, "r", encoding="utf-8") as f:
             rules = json.load(f)
     except FileNotFoundError:
         rules = {}
-
     if req.field not in rules or not isinstance(rules[req.field], list):
         rules[req.field] = list(DEFAULTS[req.field])
-
     if text in rules[req.field]:
         return {"ok": True, "field": req.field, "text": text, "already_present": True}
-
     rules[req.field].append(text)
-
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(rules, f, ensure_ascii=False, indent=2)
     except Exception as e:
         raise HTTPException(500, f"写 {path} 失败: {e}")
-
-    logger.info(f"[debug] 加 keyword: {req.field}.append({text!r}) → {path}")
+    logger.info(f"[debug] add keyword: {req.field}.append({text!r}) -> {path}")
     return {"ok": True, "field": req.field, "text": text, "list_len": len(rules[req.field])}
 
 
@@ -166,7 +215,7 @@ async def api_log_tail(n: int = 100):
         return {"lines": [], "session_dir": None}
     log_path = os.path.join(_session_dir, "run.log")
     if not os.path.isfile(log_path):
-        return {"lines": [], "session_dir": _session_dir, "error": "run.log 不存在"}
+        return {"lines": [], "session_dir": _session_dir, "error": "run.log not found"}
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
@@ -175,138 +224,1127 @@ async def api_log_tail(n: int = 100):
         return {"lines": [], "error": str(e)}
 
 
-# ─────────── HTML page (single file, plain JS) ───────────
+# ─────────── 记录持久化 ───────────
+
+
+def _decode_data_url(s: str) -> Optional[bytes]:
+    """data:image/png;base64,xxx -> bytes"""
+    m = re.match(r"^data:image/[a-z]+;base64,(.+)$", s, re.I)
+    if not m:
+        return None
+    try:
+        return base64.b64decode(m.group(1))
+    except Exception:
+        return None
+
+
+@app.post("/api/records")
+async def api_create_record(payload: dict):
+    """
+    新建记录。payload:
+      {
+        "idx": 0,
+        "note": "用户文本备注",
+        "frames": [
+          {
+            "data_url": "data:image/jpeg;base64,...",   原始帧
+            "annotation_data_url": "data:image/png;base64,..." | None,  画布批注（透明）
+            "ts": 12345.678,                              帧时间戳
+            "sys": {...}                                  当时整机指标
+          },
+          ...
+        ]
+      }
+    返回 {"ok": True, "id": "20260426_162345_001"}
+    """
+    root = _records_root()
+    if root is None:
+        raise HTTPException(500, "no active session, start runners first")
+    idx = payload.get("idx")
+    if idx is None:
+        raise HTTPException(400, "idx required")
+    note = (payload.get("note") or "").strip()
+    frames = payload.get("frames") or []
+    if not frames:
+        raise HTTPException(400, "frames empty")
+
+    ts_now = datetime.now()
+    rec_id = ts_now.strftime("%Y%m%d_%H%M%S_") + _safe_id(f"i{idx}")
+    rec_dir = os.path.join(root, rec_id)
+    os.makedirs(os.path.join(rec_dir, "frames"), exist_ok=True)
+    os.makedirs(os.path.join(rec_dir, "annotations"), exist_ok=True)
+
+    # 写 note.txt
+    if note:
+        with open(os.path.join(rec_dir, "note.txt"), "w", encoding="utf-8") as f:
+            f.write(note)
+
+    frame_meta = []
+    for i, fr in enumerate(frames):
+        data_url = fr.get("data_url") or ""
+        raw = _decode_data_url(data_url)
+        if raw is None:
+            continue
+        with open(os.path.join(rec_dir, "frames", f"{i:02d}.jpg"), "wb") as f:
+            f.write(raw)
+        ann_url = fr.get("annotation_data_url")
+        ann_path = None
+        if ann_url:
+            ann_raw = _decode_data_url(ann_url)
+            if ann_raw:
+                ann_path = os.path.join(rec_dir, "annotations", f"{i:02d}.png")
+                with open(ann_path, "wb") as f:
+                    f.write(ann_raw)
+        frame_meta.append({
+            "i": i,
+            "ts": fr.get("ts"),
+            "sys": fr.get("sys") or {},
+            "annotated": ann_path is not None,
+        })
+
+    # 写 meta.json
+    meta = {
+        "id": rec_id,
+        "idx": idx,
+        "ts_clicked": ts_now.timestamp(),
+        "ts_clicked_human": ts_now.strftime("%Y-%m-%d %H:%M:%S"),
+        "instance": _instance_snapshot(idx),
+        "frames": frame_meta,
+        "note_len": len(note),
+    }
+    with open(os.path.join(rec_dir, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"[debug] new record {rec_id} idx={idx} frames={len(frame_meta)} note_len={len(note)}")
+    return {"ok": True, "id": rec_id, "frames": len(frame_meta)}
+
+
+@app.get("/api/records")
+async def api_list_records(limit: int = 50):
+    """列出所有记录（按时间倒序，最近在前）"""
+    root = _records_root()
+    if root is None:
+        return {"records": [], "session_dir": None}
+    out = []
+    try:
+        names = sorted(os.listdir(root), reverse=True)
+    except Exception:
+        names = []
+    for name in names[:limit]:
+        d = os.path.join(root, name)
+        meta_p = os.path.join(d, "meta.json")
+        if not os.path.isfile(meta_p):
+            continue
+        try:
+            with open(meta_p, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+        note = ""
+        note_p = os.path.join(d, "note.txt")
+        if os.path.isfile(note_p):
+            try:
+                with open(note_p, "r", encoding="utf-8") as f:
+                    note = f.read()
+            except Exception:
+                pass
+        out.append({
+            "id": meta.get("id", name),
+            "idx": meta.get("idx"),
+            "ts_clicked": meta.get("ts_clicked"),
+            "ts_clicked_human": meta.get("ts_clicked_human"),
+            "frame_count": len(meta.get("frames") or []),
+            "instance": meta.get("instance", {}),
+            "note": note,
+        })
+    return {"records": out, "session_dir": _session_dir, "count": len(out)}
+
+
+@app.get("/api/record/{rec_id}")
+async def api_get_record(rec_id: str):
+    """单条记录详情（meta + note，不含图片二进制）"""
+    root = _records_root()
+    if root is None:
+        raise HTTPException(404, "no active session")
+    rec_id = _safe_id(rec_id)
+    d = os.path.join(root, rec_id)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "record not found")
+    meta_p = os.path.join(d, "meta.json")
+    if not os.path.isfile(meta_p):
+        raise HTTPException(404, "meta.json missing")
+    with open(meta_p, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    note = ""
+    note_p = os.path.join(d, "note.txt")
+    if os.path.isfile(note_p):
+        with open(note_p, "r", encoding="utf-8") as f:
+            note = f.read()
+    return {**meta, "note": note}
+
+
+@app.get("/api/record/{rec_id}/frame/{i}.jpg")
+async def api_record_frame(rec_id: str, i: int):
+    root = _records_root()
+    if root is None:
+        raise HTTPException(404)
+    p = os.path.join(root, _safe_id(rec_id), "frames", f"{i:02d}.jpg")
+    if not os.path.isfile(p):
+        raise HTTPException(404)
+    return FileResponse(p, media_type="image/jpeg")
+
+
+@app.get("/api/record/{rec_id}/annotation/{i}.png")
+async def api_record_annot(rec_id: str, i: int):
+    root = _records_root()
+    if root is None:
+        raise HTTPException(404)
+    p = os.path.join(root, _safe_id(rec_id), "annotations", f"{i:02d}.png")
+    if not os.path.isfile(p):
+        raise HTTPException(404)
+    return FileResponse(p, media_type="image/png")
+
+
+# ─────────── HTML page ───────────
 
 HTML_PAGE = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GameBot Debug</title>
 <style>
-  * { box-sizing: border-box; }
-  body { margin:0; padding:12px; font-family: -apple-system, "PingFang SC", sans-serif;
-         background:#1a1a1f; color:#e0e0e8; }
-  h1 { margin:0 0 12px; font-size:18px; color:#7aa3ff; }
-  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap:12px; }
-  .card { background:#252530; border:1px solid #3a3a48; border-radius:6px; padding:8px; }
-  .card h3 { margin:0 0 6px; font-size:14px; color:#ffc66d; display:flex; justify-content:space-between; }
-  .badge { background:#444; padding:2px 8px; border-radius:4px; font-size:12px; color:#ddd; }
-  .badge.done { background:#2d6a4f; color:#fff; }
-  .badge.error { background:#9d3b3b; color:#fff; }
-  .badge.init { background:#5a4a8a; color:#fff; }
-  .shot { width:100%; height:auto; max-height:240px; object-fit:contain;
-          background:#000; cursor:zoom-in; }
-  .meta { font-size:12px; color:#aab; margin-top:4px; }
-  .controls { padding:10px; background:#252530; border:1px solid #3a3a48; border-radius:6px; margin-bottom:12px; }
-  .controls input, .controls select, .controls button {
-    background:#1a1a1f; color:#e0e0e8; border:1px solid #3a3a48; padding:6px 10px;
-    border-radius:4px; font-size:13px; }
-  .controls button { background:#3a5fbf; cursor:pointer; }
-  .controls button:hover { background:#4a6fd0; }
-  pre { background:#0e0e14; padding:6px; max-height:160px; overflow:auto; font-size:11px;
-        margin:6px 0 0; color:#9aa; border-radius:4px; }
-  .modal { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.85);
-           display:none; justify-content:center; align-items:center; z-index:99; }
-  .modal.show { display:flex; }
-  .modal img { max-width:95vw; max-height:95vh; }
-  .session { font-size:11px; color:#888; margin-bottom:8px; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0f1115; color: #e3e6eb;
+    font-size: 13px;
+  }
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: #161a21; border-bottom: 1px solid #252a33;
+    padding: 10px 16px; display: flex; align-items: center; gap: 16px;
+  }
+  .topbar h1 { margin: 0; font-size: 16px; font-weight: 600; color: #6fa8ff; }
+  .topbar .meta { color: #8b95a5; font-size: 12px; }
+  .topbar .right { margin-left: auto; display: flex; gap: 8px; }
+  .topbar button {
+    background: #2a3140; color: #e3e6eb; border: 1px solid #3a4252;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .topbar button:hover { background: #3a4252; }
+  .topbar button.primary { background: #3b6fd1; border-color: #4a82e8; }
+  .topbar button.primary:hover { background: #4a82e8; }
+
+  .sysbar {
+    background: #1a1f28; padding: 8px 16px; border-bottom: 1px solid #252a33;
+    display: flex; gap: 24px; font-size: 12px; color: #aab2bf;
+  }
+  .sysbar .stat { display: flex; gap: 6px; align-items: center; }
+  .sysbar .stat-label { color: #6e7685; }
+  .sysbar .stat-val { color: #e3e6eb; font-weight: 500; }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: #4ade80;
+           animation: pulse 1.4s infinite; }
+  .pulse.off { background: #6e7685; animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .grid {
+    display: grid; gap: 12px; padding: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  }
+  .card {
+    background: #1a1f28; border: 1px solid #252a33; border-radius: 8px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .card-head {
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid #252a33; background: #1f2530;
+  }
+  .card-title { font-weight: 600; color: #e3e6eb; font-size: 14px; }
+  .card-sub { color: #8b95a5; font-size: 12px; }
+  .badge {
+    padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
+    background: #2a3140; color: #aab2bf;
+  }
+  .badge.ok { background: #1e4034; color: #4ade80; }
+  .badge.warn { background: #3d2f1a; color: #fbbf24; }
+  .badge.err { background: #3d1d1d; color: #ef4444; }
+  .badge.run { background: #1f3550; color: #6fa8ff; }
+  .card-actions { margin-left: auto; display: flex; gap: 6px; }
+  .btn-icon {
+    background: #2a3140; border: 1px solid #3a4252; color: #e3e6eb;
+    padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px;
+  }
+  .btn-icon:hover { background: #3a4252; border-color: #4a5262; }
+  .btn-icon.record { background: #3b6fd1; border-color: #4a82e8; color: #fff; }
+  .btn-icon.record:hover { background: #4a82e8; }
+
+  .card-body { position: relative; background: #000; }
+  .card-body img {
+    width: 100%; display: block; max-height: 280px; object-fit: contain;
+    cursor: zoom-in;
+  }
+  .card-body .ph {
+    position: absolute; top: 8px; left: 8px;
+    background: rgba(15,17,21,0.7); padding: 3px 8px;
+    border-radius: 4px; font-size: 11px; color: #aab2bf; backdrop-filter: blur(4px);
+  }
+  .card-foot {
+    padding: 8px 12px; font-size: 11px; color: #8b95a5;
+    border-top: 1px solid #252a33; min-height: 28px;
+  }
+
+  /* keyword drawer */
+  .drawer-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; z-index: 50;
+  }
+  .drawer-bg.on { display: block; }
+  .drawer {
+    position: fixed; right: 0; top: 0; bottom: 0; width: 420px;
+    background: #161a21; border-left: 1px solid #252a33;
+    z-index: 51; transform: translateX(100%); transition: transform 0.2s;
+    display: flex; flex-direction: column;
+  }
+  .drawer.on { transform: translateX(0); }
+  .drawer-head {
+    padding: 14px 16px; border-bottom: 1px solid #252a33;
+    display: flex; align-items: center;
+  }
+  .drawer-head h2 { margin: 0; font-size: 15px; }
+  .drawer-head .close {
+    margin-left: auto; background: none; border: none; color: #8b95a5;
+    font-size: 20px; cursor: pointer;
+  }
+  .drawer-body { padding: 14px 16px; overflow-y: auto; flex: 1; }
+  .field-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .field-tab {
+    background: #2a3140; border: 1px solid #3a4252; color: #aab2bf;
+    padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 12px;
+  }
+  .field-tab.on { background: #3b6fd1; border-color: #4a82e8; color: #fff; }
+  .input-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .input-row input {
+    flex: 1; background: #0f1115; border: 1px solid #3a4252; color: #e3e6eb;
+    padding: 8px 10px; border-radius: 5px; font-size: 13px;
+  }
+  .input-row button {
+    background: #3b6fd1; color: #fff; border: none;
+    padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  .kw-status { color: #4ade80; font-size: 12px; min-height: 18px; }
+  .kw-list { font-size: 12px; color: #aab2bf; max-height: 260px; overflow-y: auto;
+             background: #0f1115; padding: 8px; border-radius: 5px; }
+  .kw-list .kw { display: inline-block; background: #2a3140; padding: 2px 8px;
+                 border-radius: 3px; margin: 2px; }
+
+  /* records drawer */
+  .rec-list { display: flex; flex-direction: column; gap: 8px; }
+  .rec-item { background: #1a1f28; border: 1px solid #252a33; border-radius: 6px;
+              padding: 10px; cursor: pointer; }
+  .rec-item:hover { border-color: #4a5262; }
+  .rec-item .head { display: flex; justify-content: space-between; align-items: center;
+                    margin-bottom: 6px; }
+  .rec-item .id { color: #8b95a5; font-size: 11px; font-family: monospace; }
+  .rec-item .badge { font-size: 10px; }
+  .rec-item .note { font-size: 12px; color: #d3d8df; line-height: 1.5;
+                    white-space: pre-wrap; word-break: break-word; }
+  .rec-item .empty-note { color: #6e7685; font-style: italic; }
+
+  /* record modal */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+    display: none; z-index: 100;
+    justify-content: center; align-items: center;
+  }
+  .modal-bg.on { display: flex; }
+  .modal {
+    background: #161a21; border: 1px solid #252a33; border-radius: 10px;
+    width: 95vw; height: 92vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-head {
+    padding: 12px 16px; border-bottom: 1px solid #252a33;
+    display: flex; align-items: center; gap: 12px; background: #1a1f28;
+  }
+  .modal-head h2 { margin: 0; font-size: 15px; }
+  .modal-head .close {
+    margin-left: auto; background: none; border: none; color: #8b95a5;
+    font-size: 22px; cursor: pointer; padding: 0 8px;
+  }
+  .modal-body { flex: 1; display: flex; min-height: 0; }
+  .modal-canvas-wrap {
+    flex: 1; background: #000; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-canvas-wrap img, .modal-canvas-wrap canvas {
+    max-width: 100%; max-height: 100%; display: block; position: absolute;
+  }
+  .modal-canvas-wrap img { z-index: 1; }
+  .modal-canvas-wrap canvas { z-index: 2; cursor: crosshair; }
+
+  .modal-side {
+    width: 320px; background: #1a1f28; border-left: 1px solid #252a33;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .modal-side .section { padding: 12px 14px; border-bottom: 1px solid #252a33; }
+  .modal-side .section h3 { margin: 0 0 8px; font-size: 12px;
+                            color: #8b95a5; font-weight: 600; text-transform: uppercase;
+                            letter-spacing: 0.5px; }
+  .modal-side .meta-row { display: flex; justify-content: space-between;
+                          padding: 3px 0; font-size: 12px; }
+  .modal-side .meta-row .k { color: #8b95a5; }
+  .modal-side .meta-row .v { color: #e3e6eb; font-family: monospace; }
+  .modal-side textarea {
+    width: 100%; background: #0f1115; border: 1px solid #3a4252; color: #e3e6eb;
+    padding: 10px; border-radius: 5px; font-size: 13px; min-height: 100px;
+    resize: vertical; font-family: inherit;
+  }
+  .modal-side .save-bar { padding: 12px 14px; margin-top: auto; display: flex; gap: 8px; }
+  .modal-side .save-bar button {
+    flex: 1; background: #3b6fd1; color: #fff; border: none;
+    padding: 10px; border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  .modal-side .save-bar button:hover { background: #4a82e8; }
+  .modal-side .save-bar button.cancel { background: #2a3140; }
+  .modal-side .save-bar button.cancel:hover { background: #3a4252; }
+
+  /* tools bar */
+  .tools-bar {
+    position: absolute; left: 12px; top: 12px; z-index: 5;
+    display: flex; flex-direction: column; gap: 4px;
+    background: rgba(22,26,33,0.92); padding: 6px; border-radius: 6px;
+    backdrop-filter: blur(8px);
+  }
+  .tools-bar button {
+    background: #2a3140; border: 1px solid #3a4252; color: #e3e6eb;
+    padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;
+    width: 60px; text-align: center;
+  }
+  .tools-bar button.on { background: #3b6fd1; border-color: #4a82e8; }
+  .tools-bar button:hover { background: #3a4252; }
+  .color-row { display: flex; gap: 3px; margin: 4px 0; }
+  .color-dot {
+    width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent;
+  }
+  .color-dot.on { border-color: #fff; }
+
+  .frame-nav {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(22,26,33,0.92); padding: 8px 16px; border-radius: 6px;
+    display: flex; gap: 16px; align-items: center; z-index: 5;
+    backdrop-filter: blur(8px);
+  }
+  .frame-nav button {
+    background: #2a3140; border: 1px solid #3a4252; color: #e3e6eb;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer;
+  }
+  .frame-nav button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .frame-nav .label { color: #aab2bf; font-size: 12px; min-width: 80px; text-align: center; }
+  .frame-nav .dots { display: flex; gap: 6px; }
+  .frame-nav .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #3a4252; cursor: pointer;
+  }
+  .frame-nav .dot.on { background: #6fa8ff; }
+
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; z-index: 200;
+    background: #1a1f28; border: 1px solid #4ade80; color: #4ade80;
+    padding: 10px 16px; border-radius: 6px; font-size: 13px;
+    animation: slideIn 0.2s;
+  }
+  @keyframes slideIn { from { transform: translateX(40px); opacity: 0; }
+                       to { transform: translateX(0); opacity: 1; } }
 </style>
 </head>
 <body>
-<h1>GameBot Debug · 实时调试</h1>
-<div class="session" id="session">session: -</div>
 
-<div class="controls">
-  <strong>加 keyword（写入 popup_rules.json，立刻生效）：</strong>&nbsp;
-  <select id="kw-field">
-    <option value="close_text">close_text (关闭按钮文字)</option>
-    <option value="confirm_text">confirm_text (确认/同意/跳过)</option>
-    <option value="checkbox_text">checkbox_text (今日不再弹出)</option>
-    <option value="lobby_keywords">lobby_keywords (大厅判定)</option>
-    <option value="loading_keywords">loading_keywords (加载中判定)</option>
-    <option value="login_keywords">login_keywords (登录页判定)</option>
-    <option value="left_game_keywords">left_game_keywords (退游判定)</option>
-  </select>
-  <input id="kw-text" placeholder="新关键字…" style="width:200px">
-  <button onclick="addKw()">加</button>
-  <span id="kw-status" style="color:#7d7;"></span>
+<div class="topbar">
+  <h1>GameBot Debug</h1>
+  <span class="meta" id="topbar-meta">session: -</span>
+  <div class="right">
+    <button onclick="openRecords()">历史记录 <span id="rec-count">(0)</span></button>
+    <button onclick="openKeywords()">添加关键字</button>
+  </div>
 </div>
 
-<div class="grid" id="grid">loading…</div>
+<div class="sysbar" id="sysbar">
+  <div class="stat"><span class="pulse off" id="pulse"></span>
+    <span class="stat-label">runner:</span><span class="stat-val" id="run-state">-</span></div>
+  <div class="stat"><span class="stat-label">CPU:</span><span class="stat-val" id="sys-cpu">-</span></div>
+  <div class="stat"><span class="stat-label">内存:</span><span class="stat-val" id="sys-mem">-</span></div>
+  <div class="stat"><span class="stat-label">实例:</span><span class="stat-val" id="sys-inst">-</span></div>
+</div>
 
-<div class="modal" id="modal" onclick="this.classList.remove('show')">
-  <img id="modal-img">
+<div class="grid" id="grid"></div>
+
+<!-- 关键字抽屉 -->
+<div class="drawer-bg" id="kw-bg" onclick="closeKeywords()"></div>
+<div class="drawer" id="kw-drawer">
+  <div class="drawer-head">
+    <h2>添加弹窗关键字</h2>
+    <button class="close" onclick="closeKeywords()">×</button>
+  </div>
+  <div class="drawer-body">
+    <div style="color:#8b95a5;font-size:12px;margin-bottom:12px;line-height:1.6;">
+      添加后写入 popup_rules.json，下一轮 dismiss_popups 自动 reload，无需重启。
+    </div>
+    <div class="field-tabs" id="kw-tabs"></div>
+    <div class="input-row">
+      <input id="kw-text" placeholder="输入关键字…" onkeydown="if(event.key==='Enter')addKw()">
+      <button onclick="addKw()">添加</button>
+    </div>
+    <div class="kw-status" id="kw-status"></div>
+    <h3 style="margin:14px 0 6px;font-size:12px;color:#8b95a5;">当前列表</h3>
+    <div class="kw-list" id="kw-list">loading…</div>
+  </div>
+</div>
+
+<!-- 历史记录抽屉 -->
+<div class="drawer-bg" id="rec-bg" onclick="closeRecords()"></div>
+<div class="drawer" id="rec-drawer">
+  <div class="drawer-head">
+    <h2>历史记录</h2>
+    <button class="close" onclick="closeRecords()">×</button>
+  </div>
+  <div class="drawer-body">
+    <div class="rec-list" id="rec-list">loading…</div>
+  </div>
+</div>
+
+<!-- 记录模态 -->
+<div class="modal-bg" id="modal-bg">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-title">实例 #-</h2>
+      <span class="meta" id="modal-sub" style="color:#8b95a5;font-size:12px;"></span>
+      <button class="close" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-canvas-wrap" id="canvas-wrap">
+        <div class="tools-bar" id="tools-bar">
+          <button class="tool on" data-tool="pen">笔</button>
+          <button class="tool" data-tool="rect">矩形</button>
+          <button class="tool" data-tool="circle">圆</button>
+          <div class="color-row" id="color-row"></div>
+          <button onclick="undoStroke()">撤销</button>
+          <button onclick="clearAnnot()">清空</button>
+        </div>
+        <img id="modal-img" alt="">
+        <canvas id="modal-canvas"></canvas>
+        <div class="frame-nav">
+          <button id="prev-btn" onclick="navFrame(-1)">‹ 上一张</button>
+          <div class="label" id="frame-label">- / -</div>
+          <div class="dots" id="frame-dots"></div>
+          <button id="next-btn" onclick="navFrame(1)">下一张 ›</button>
+        </div>
+      </div>
+      <div class="modal-side">
+        <div class="section">
+          <h3>当前帧信息</h3>
+          <div id="frame-meta"></div>
+        </div>
+        <div class="section">
+          <h3>实例状态</h3>
+          <div id="inst-meta"></div>
+        </div>
+        <div class="section" style="flex:1;display:flex;flex-direction:column;">
+          <h3>备注（共享 · 所有帧）</h3>
+          <textarea id="note-text" placeholder="描述这次记录的情况、问题、要复现的步骤…"></textarea>
+        </div>
+        <div class="save-bar">
+          <button class="cancel" onclick="closeModal()">取消</button>
+          <button onclick="saveRecord()">保存记录</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
-const grid = document.getElementById('grid');
-const sessionEl = document.getElementById('session');
-const ts = () => Math.floor(Date.now()/1000);
+// ─────────── state ───────────
+const FIELDS = [
+  {k:'close_text', label:'关闭按钮文字'},
+  {k:'confirm_text', label:'确认/同意/跳过'},
+  {k:'checkbox_text', label:'今日不再弹出'},
+  {k:'lobby_keywords', label:'大厅判定'},
+  {k:'loading_keywords', label:'加载中判定'},
+  {k:'login_keywords', label:'登录页判定'},
+  {k:'left_game_keywords', label:'退游判定'},
+];
+let kwField = 'close_text';
 
-async function refresh(){
+// 每实例的帧 ring buffer：{idx: [{blob, ts, sys}, ...]} 最近 3 张
+const ringBuf = {};
+const RING_SIZE = 3;
+
+// 模态状态
+let modalIdx = null;
+let modalFrames = [];   // [{blobUrl, ts, sys, strokes: []}]
+let modalCurFrame = 0;
+let modalInst = null;
+
+// 画布工具
+let curTool = 'pen';
+let curColor = '#ff3b3b';
+const COLORS = ['#ff3b3b', '#ffd23f', '#4ade80', '#6fa8ff', '#ffffff'];
+let canvasDrawing = false;
+let canvasStart = null;
+
+// ─────────── grid 实时刷新（in-place，不重建 DOM） ───────────
+
+async function refreshStatus() {
   let data;
-  try { data = await (await fetch('/api/status')).json(); }
-  catch(e){ grid.innerHTML = '<div style="color:#f55">服务挂了：' + e.message + '</div>'; return; }
-  sessionEl.textContent = 'session: ' + (data.session_dir || '-') + ' · running=' + data.running;
-  if (!data.instances || data.instances.length === 0){
-    grid.innerHTML = '<div>没有运行中的实例。在 GameBot 主界面点开始。</div>';
+  try {
+    const r = await fetch('/api/status');
+    data = await r.json();
+  } catch(e) {
+    document.getElementById('topbar-meta').textContent = 'API 失败: ' + e.message;
     return;
   }
-  grid.innerHTML = data.instances.map(i => {
-    const phase = i.phase || '?';
-    const state = i.state || phase;
-    const err = i.error || '';
-    const stages = i.stage_times || {};
-    const stageStr = Object.entries(stages).map(([k,v]) => k+'='+v.toFixed(0)+'s').join(' · ');
-    let badgeClass = 'init';
-    if (state === 'done') badgeClass = 'done';
-    if (err && err !== '') badgeClass = 'error';
-    return `
-      <div class="card">
-        <h3>
-          #${i.idx} · ${i.group||'?'}/${i.role||'?'}
-          <span class="badge ${badgeClass}">${state}</span>
-        </h3>
-        <img class="shot" src="/api/screenshot/${i.idx}.jpg?t=${ts()}" alt="loading…"
-             onclick="zoom(this.src)" onerror="this.style.background='#3a1818'">
-        <div class="meta">phase: ${phase} ${err? ' · err: '+err : ''}</div>
-        <div class="meta">${stageStr}</div>
-      </div>`;
-  }).join('');
+  // sysbar
+  document.getElementById('topbar-meta').textContent =
+    'session: ' + (data.session_dir ? data.session_dir.split(/[\\\/]/).pop() : '-');
+  document.getElementById('run-state').textContent = data.running ? '运行中' : '空闲';
+  document.getElementById('pulse').classList.toggle('off', !data.running);
+  const sys = data.sys || {};
+  document.getElementById('sys-cpu').textContent = (sys.cpu_percent ?? '-') + '%';
+  document.getElementById('sys-mem').textContent =
+    (sys.mem_used_mb ?? '-') + ' / ' + (sys.mem_total_mb ?? '-') + ' MB ('
+    + (sys.mem_percent ?? '-') + '%)';
+  document.getElementById('sys-inst').textContent = (data.instances || []).length;
+
+  // grid 就地更新
+  const grid = document.getElementById('grid');
+  const known = new Set();
+  (data.instances || []).forEach(inst => {
+    known.add(inst.idx);
+    let card = document.getElementById('card-' + inst.idx);
+    if (!card) {
+      card = makeCard(inst);
+      grid.appendChild(card);
+    }
+    updateCard(card, inst);
+  });
+  // 移除消失的
+  grid.querySelectorAll('.card').forEach(c => {
+    const idx = parseInt(c.dataset.idx);
+    if (!known.has(idx)) c.remove();
+  });
+  if (grid.children.length === 0) {
+    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#6e7685;padding:48px;">'
+      + '没有运行中的实例。在 GameBot 主界面点开始运行。</div>';
+  }
 }
 
-function zoom(src){
-  const img = document.getElementById('modal-img');
-  img.src = src;
-  document.getElementById('modal').classList.add('show');
+function makeCard(inst) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = 'card-' + inst.idx;
+  card.dataset.idx = inst.idx;
+  card.innerHTML = `
+    <div class="card-head">
+      <div>
+        <div class="card-title">实例 #${inst.idx}</div>
+        <div class="card-sub" data-role>${inst.group||'?'} / ${inst.role||'?'}</div>
+      </div>
+      <span class="badge" data-state>-</span>
+      <div class="card-actions">
+        <button class="btn-icon record" onclick="openRecord(${inst.idx})">记录</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="ph" data-phase>-</div>
+      <img alt="loading" data-img onclick="zoomCard(this)">
+    </div>
+    <div class="card-foot" data-stages>-</div>
+  `;
+  return card;
 }
 
-async function addKw(){
-  const field = document.getElementById('kw-field').value;
+function updateCard(card, inst) {
+  const role = card.querySelector('[data-role]');
+  role.textContent = (inst.group||'?') + ' / ' + (inst.role||'?');
+  const badge = card.querySelector('[data-state]');
+  const state = inst.state || inst.phase || '-';
+  badge.textContent = state;
+  badge.className = 'badge ' + classifyState(state, inst.error);
+  card.querySelector('[data-phase]').textContent = inst.phase || '-';
+  const stages = inst.stage_times || {};
+  const stagesStr = Object.entries(stages)
+    .map(([k,v]) => k + '=' + v.toFixed(0) + 's').join(' · ') || '-';
+  card.querySelector('[data-stages]').textContent = stagesStr;
+  // 截图：fetch blob → 推 ring buffer + 替 src
+  fetchAndCache(inst.idx, card.querySelector('[data-img]'));
+}
+
+function classifyState(state, error) {
+  if (error) return 'err';
+  if (state === 'done') return 'ok';
+  if (state === 'init' || state === 'idle' || state === '-') return '';
+  return 'run';
+}
+
+async function fetchAndCache(idx, imgEl) {
+  try {
+    const [shotR, sysR] = await Promise.all([
+      fetch('/api/screenshot/' + idx + '.jpg?t=' + Date.now()),
+      fetch('/api/sysinfo'),
+    ]);
+    if (!shotR.ok) {
+      imgEl.alt = 'shot ' + shotR.status;
+      return;
+    }
+    const blob = await shotR.blob();
+    const sys = sysR.ok ? await sysR.json() : {};
+    // 推 ring buffer
+    if (!ringBuf[idx]) ringBuf[idx] = [];
+    ringBuf[idx].push({blob, ts: Date.now()/1000, sys});
+    if (ringBuf[idx].length > RING_SIZE) ringBuf[idx].shift();
+    // 替 src（in-place，不重建 img 节点 → 保持滚动/zoom 状态）
+    if (imgEl._lastUrl) URL.revokeObjectURL(imgEl._lastUrl);
+    imgEl._lastUrl = URL.createObjectURL(blob);
+    imgEl.src = imgEl._lastUrl;
+  } catch(e) { /* ignore */ }
+}
+
+function zoomCard(img) {
+  const w = window.open('', '_blank');
+  w.document.write('<body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;">'
+    + '<img src="' + img.src + '" style="max-width:100%;max-height:100vh;"></body>');
+}
+
+// ─────────── 关键字抽屉 ───────────
+
+function openKeywords() {
+  document.getElementById('kw-bg').classList.add('on');
+  document.getElementById('kw-drawer').classList.add('on');
+  renderFieldTabs();
+  loadRules();
+}
+function closeKeywords() {
+  document.getElementById('kw-bg').classList.remove('on');
+  document.getElementById('kw-drawer').classList.remove('on');
+}
+function renderFieldTabs() {
+  const c = document.getElementById('kw-tabs');
+  c.innerHTML = FIELDS.map(f =>
+    `<div class="field-tab ${f.k===kwField?'on':''}" onclick="selectField('${f.k}')">${f.label}</div>`
+  ).join('');
+}
+function selectField(k) {
+  kwField = k;
+  renderFieldTabs();
+  loadRules();
+}
+async function loadRules() {
+  const list = document.getElementById('kw-list');
+  try {
+    const r = await fetch('/api/rules');
+    const j = await r.json();
+    const arr = (j.rules || {})[kwField] || [];
+    list.innerHTML = arr.length
+      ? arr.map(t => '<span class="kw">' + escapeHtml(t) + '</span>').join('')
+      : '<span style="color:#6e7685;">（空）</span>';
+  } catch(e) { list.textContent = '加载失败: ' + e.message; }
+}
+async function addKw() {
   const text = document.getElementById('kw-text').value.trim();
-  if (!text){ alert('文字不能空'); return; }
+  if (!text) return;
   const status = document.getElementById('kw-status');
-  status.textContent = '...';
+  status.textContent = '保存中…';
+  status.style.color = '#aab2bf';
   try {
     const r = await fetch('/api/add_keyword', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({field, text})
+      body: JSON.stringify({field: kwField, text}),
     });
     const j = await r.json();
-    if (j.ok){
-      status.textContent = '✓ 加成功: ' + j.field + ' (共 ' + (j.list_len || '?') + ' 条)' +
-                           (j.already_present ? ' (已存在)' : '');
+    if (j.ok) {
+      status.textContent = j.already_present
+        ? '已存在' : '已添加（共 ' + j.list_len + ' 条），下一轮自动生效';
+      status.style.color = '#4ade80';
       document.getElementById('kw-text').value = '';
+      loadRules();
+      setTimeout(() => status.textContent = '', 4000);
     } else {
-      status.textContent = '✗ ' + JSON.stringify(j);
+      status.textContent = '失败: ' + JSON.stringify(j);
+      status.style.color = '#ef4444';
     }
-    setTimeout(()=> status.textContent = '', 4000);
-  } catch(e){ status.textContent = '✗ ' + e.message; }
+  } catch(e) {
+    status.textContent = '失败: ' + e.message;
+    status.style.color = '#ef4444';
+  }
 }
 
-refresh();
-setInterval(refresh, 1500);
+// ─────────── 历史记录抽屉 ───────────
+
+async function openRecords() {
+  document.getElementById('rec-bg').classList.add('on');
+  document.getElementById('rec-drawer').classList.add('on');
+  await loadRecords();
+}
+function closeRecords() {
+  document.getElementById('rec-bg').classList.remove('on');
+  document.getElementById('rec-drawer').classList.remove('on');
+}
+async function loadRecords() {
+  const c = document.getElementById('rec-list');
+  c.innerHTML = 'loading…';
+  try {
+    const r = await fetch('/api/records?limit=100');
+    const j = await r.json();
+    document.getElementById('rec-count').textContent = '(' + (j.count||0) + ')';
+    if (!j.records || j.records.length === 0) {
+      c.innerHTML = '<div style="color:#6e7685;text-align:center;padding:24px;">还没有记录</div>';
+      return;
+    }
+    c.innerHTML = j.records.map(rec => `
+      <div class="rec-item">
+        <div class="head">
+          <span><span class="badge run">实例 #${rec.idx}</span></span>
+          <span class="id">${rec.id}</span>
+        </div>
+        <div style="color:#8b95a5;font-size:11px;margin-bottom:6px;">
+          ${rec.ts_clicked_human || ''} · ${rec.frame_count} 帧
+          · phase=${(rec.instance||{}).phase||'-'}
+        </div>
+        <div class="note ${rec.note?'':'empty-note'}">${rec.note ? escapeHtml(rec.note) : '（无备注）'}</div>
+      </div>
+    `).join('');
+  } catch(e) {
+    c.innerHTML = '加载失败: ' + e.message;
+  }
+}
+
+// ─────────── 记录模态 ───────────
+
+async function openRecord(idx) {
+  modalIdx = idx;
+  modalCurFrame = 0;
+  modalFrames = [];
+  modalInst = null;
+
+  // 1. 从 ring buffer 拿过去 1.5s 的帧
+  const past = (ringBuf[idx] || []).slice();
+  for (const e of past) {
+    modalFrames.push({
+      blob: e.blob,
+      blobUrl: URL.createObjectURL(e.blob),
+      ts: e.ts, sys: e.sys, strokes: [],
+    });
+  }
+  // 2. 立即取一张（点击瞬间）
+  modalFrames.push(await captureNow(idx));
+  // 3. 拿当前实例 meta
+  try {
+    const r = await fetch('/api/status');
+    const j = await r.json();
+    modalInst = (j.instances || []).find(i => i.idx === idx);
+  } catch(e) {}
+
+  // 打开模态
+  document.getElementById('modal-bg').classList.add('on');
+  document.getElementById('modal-title').textContent = '实例 #' + idx + ' · 记录';
+  document.getElementById('note-text').value = '';
+  renderColorRow();
+  bindToolButtons();
+  bindCanvas();
+  renderModalFrame();
+
+  // 4. 后台再抓 2 帧（+0.7s 和 +1.4s）
+  setTimeout(async () => {
+    modalFrames.push(await captureNow(idx));
+    renderFrameDots();
+  }, 700);
+  setTimeout(async () => {
+    modalFrames.push(await captureNow(idx));
+    renderFrameDots();
+  }, 1400);
+}
+
+async function captureNow(idx) {
+  try {
+    const [shotR, sysR] = await Promise.all([
+      fetch('/api/screenshot/' + idx + '.jpg?t=' + Date.now()),
+      fetch('/api/sysinfo'),
+    ]);
+    const blob = await shotR.blob();
+    const sys = sysR.ok ? await sysR.json() : {};
+    return {
+      blob,
+      blobUrl: URL.createObjectURL(blob),
+      ts: Date.now()/1000, sys, strokes: [],
+    };
+  } catch(e) {
+    return {blob: null, blobUrl: '', ts: Date.now()/1000, sys: {}, strokes: []};
+  }
+}
+
+function closeModal() {
+  document.getElementById('modal-bg').classList.remove('on');
+  for (const f of modalFrames) if (f.blobUrl) URL.revokeObjectURL(f.blobUrl);
+  modalFrames = []; modalIdx = null;
+}
+
+function renderModalFrame() {
+  const f = modalFrames[modalCurFrame];
+  if (!f) return;
+  const img = document.getElementById('modal-img');
+  const canvas = document.getElementById('modal-canvas');
+  img.onload = () => {
+    // 同步 canvas 尺寸到 img 的渲染尺寸
+    const rect = img.getBoundingClientRect();
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    canvas.style.left = (rect.left - canvas.parentElement.getBoundingClientRect().left) + 'px';
+    canvas.style.top = (rect.top - canvas.parentElement.getBoundingClientRect().top) + 'px';
+    redrawCanvas();
+  };
+  img.src = f.blobUrl;
+  // 帧元信息
+  document.getElementById('frame-meta').innerHTML =
+    metaRow('时间', new Date(f.ts*1000).toLocaleTimeString())
+    + metaRow('CPU', (f.sys.cpu_percent ?? '-') + '%')
+    + metaRow('内存', (f.sys.mem_percent ?? '-') + '%')
+    + metaRow('批注', f.strokes.length + ' 条');
+  if (modalInst) {
+    document.getElementById('inst-meta').innerHTML =
+      metaRow('phase', modalInst.phase || '-')
+      + metaRow('state', modalInst.state || '-')
+      + metaRow('role', modalInst.role || '-')
+      + metaRow('group', modalInst.group || '-')
+      + (modalInst.error ? metaRow('error', modalInst.error) : '');
+  }
+  renderFrameDots();
+  document.getElementById('modal-sub').textContent =
+    'phase=' + (modalInst?.phase||'-') + ' · state=' + (modalInst?.state||'-');
+}
+
+function metaRow(k, v) {
+  return '<div class="meta-row"><span class="k">' + escapeHtml(k) + '</span>'
+    + '<span class="v">' + escapeHtml(String(v)) + '</span></div>';
+}
+
+function renderFrameDots() {
+  const c = document.getElementById('frame-dots');
+  c.innerHTML = modalFrames.map((_, i) =>
+    '<div class="dot ' + (i===modalCurFrame?'on':'') + '" onclick="jumpFrame(' + i + ')"></div>'
+  ).join('');
+  document.getElementById('frame-label').textContent =
+    (modalCurFrame+1) + ' / ' + modalFrames.length;
+  document.getElementById('prev-btn').disabled = modalCurFrame <= 0;
+  document.getElementById('next-btn').disabled = modalCurFrame >= modalFrames.length - 1;
+}
+
+function navFrame(d) {
+  const next = modalCurFrame + d;
+  if (next < 0 || next >= modalFrames.length) return;
+  modalCurFrame = next;
+  renderModalFrame();
+}
+function jumpFrame(i) {
+  if (i < 0 || i >= modalFrames.length) return;
+  modalCurFrame = i;
+  renderModalFrame();
+}
+
+// ─────────── 画布工具 ───────────
+
+function bindToolButtons() {
+  document.querySelectorAll('.tool').forEach(b => {
+    b.onclick = () => {
+      curTool = b.dataset.tool;
+      document.querySelectorAll('.tool').forEach(x =>
+        x.classList.toggle('on', x === b));
+    };
+  });
+}
+
+function renderColorRow() {
+  document.getElementById('color-row').innerHTML = COLORS.map(c =>
+    '<div class="color-dot ' + (c===curColor?'on':'') + '" '
+    + 'style="background:' + c + '" onclick="setColor(\'' + c + '\')"></div>'
+  ).join('');
+}
+function setColor(c) {
+  curColor = c;
+  renderColorRow();
+}
+
+function bindCanvas() {
+  const canvas = document.getElementById('modal-canvas');
+  canvas.onmousedown = (e) => {
+    canvasDrawing = true;
+    const p = canvasPoint(e);
+    canvasStart = p;
+    const f = modalFrames[modalCurFrame];
+    f.strokes.push({tool: curTool, color: curColor, size: 4, pts: [p]});
+  };
+  canvas.onmousemove = (e) => {
+    if (!canvasDrawing) return;
+    const p = canvasPoint(e);
+    const f = modalFrames[modalCurFrame];
+    const s = f.strokes[f.strokes.length - 1];
+    if (s.tool === 'pen') {
+      s.pts.push(p);
+    } else {
+      s.end = p;
+    }
+    redrawCanvas();
+  };
+  canvas.onmouseup = (e) => {
+    if (!canvasDrawing) return;
+    canvasDrawing = false;
+    const p = canvasPoint(e);
+    const f = modalFrames[modalCurFrame];
+    const s = f.strokes[f.strokes.length - 1];
+    if (s.tool !== 'pen') s.end = p;
+    redrawCanvas();
+    // 刷一次帧 meta（批注数）
+    document.getElementById('frame-meta').innerHTML.includes('批注') && renderModalFrame();
+  };
+  canvas.onmouseleave = canvas.onmouseup;
+}
+
+function canvasPoint(e) {
+  const canvas = document.getElementById('modal-canvas');
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+    y: (e.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function redrawCanvas() {
+  const canvas = document.getElementById('modal-canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const f = modalFrames[modalCurFrame];
+  if (!f) return;
+  for (const s of f.strokes) drawStroke(ctx, s);
+}
+
+function drawStroke(ctx, s) {
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = Math.max(2, s.size);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (s.tool === 'pen') {
+    if (s.pts.length < 1) return;
+    ctx.beginPath();
+    ctx.moveTo(s.pts[0].x, s.pts[0].y);
+    for (let i = 1; i < s.pts.length; i++) ctx.lineTo(s.pts[i].x, s.pts[i].y);
+    ctx.stroke();
+  } else if (s.tool === 'rect' && s.end) {
+    const x = s.pts[0].x, y = s.pts[0].y;
+    ctx.strokeRect(x, y, s.end.x - x, s.end.y - y);
+  } else if (s.tool === 'circle' && s.end) {
+    const cx = (s.pts[0].x + s.end.x) / 2;
+    const cy = (s.pts[0].y + s.end.y) / 2;
+    const rx = Math.abs(s.end.x - s.pts[0].x) / 2;
+    const ry = Math.abs(s.end.y - s.pts[0].y) / 2;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
+    ctx.stroke();
+  }
+}
+
+function undoStroke() {
+  const f = modalFrames[modalCurFrame];
+  if (!f || f.strokes.length === 0) return;
+  f.strokes.pop();
+  redrawCanvas();
+  renderModalFrame();
+}
+function clearAnnot() {
+  const f = modalFrames[modalCurFrame];
+  if (!f) return;
+  f.strokes = [];
+  redrawCanvas();
+  renderModalFrame();
+}
+
+// ─────────── 保存记录 ───────────
+
+async function saveRecord() {
+  if (modalIdx === null || modalFrames.length === 0) return;
+  const note = document.getElementById('note-text').value;
+  // 把每帧 blob 转 dataURL；批注 canvas 渲染为透明 PNG dataURL
+  const framePayload = [];
+  for (let i = 0; i < modalFrames.length; i++) {
+    const f = modalFrames[i];
+    const dataUrl = f.blob ? await blobToDataUrl(f.blob) : null;
+    let annUrl = null;
+    if (f.strokes && f.strokes.length > 0) {
+      // 离屏画布渲染批注为透明 PNG
+      const off = document.createElement('canvas');
+      // 用 img 的 naturalSize 作为画布尺寸（保证坐标一致）
+      const img = new Image();
+      await new Promise(r => { img.onload = r; img.src = f.blobUrl; });
+      off.width = img.naturalWidth;
+      off.height = img.naturalHeight;
+      const offCtx = off.getContext('2d');
+      for (const s of f.strokes) drawStroke(offCtx, s);
+      annUrl = off.toDataURL('image/png');
+    }
+    framePayload.push({
+      data_url: dataUrl,
+      annotation_data_url: annUrl,
+      ts: f.ts,
+      sys: f.sys,
+    });
+  }
+  try {
+    const r = await fetch('/api/records', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({idx: modalIdx, note, frames: framePayload}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('已保存 ' + j.id);
+      closeModal();
+      loadRecords();
+    } else {
+      alert('保存失败: ' + JSON.stringify(j));
+    }
+  } catch(e) {
+    alert('保存失败: ' + e.message);
+  }
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onloadend = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2400);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+
+// 启动
+refreshStatus();
+setInterval(refreshStatus, 1500);
 </script>
 </body>
 </html>
@@ -322,7 +1360,7 @@ def start_in_thread(host: str = "0.0.0.0", port: int = 8901):
     """在后台线程启动 debug server，不阻塞主进程"""
     global _server_thread
     if _server_thread is not None and _server_thread.is_alive():
-        logger.info("[debug] server 已在跑，跳过")
+        logger.info("[debug] server already running, skip")
         return
 
     def _run():
@@ -335,8 +1373,8 @@ def start_in_thread(host: str = "0.0.0.0", port: int = 8901):
             server = uvicorn.Server(config)
             asyncio.run(server.serve())
         except Exception as e:
-            logger.error(f"[debug] server 崩溃: {e}")
+            logger.error(f"[debug] server crashed: {e}")
 
     _server_thread = threading.Thread(target=_run, daemon=True, name="debug-server")
     _server_thread.start()
-    logger.info(f"[debug] server 启动 http://{host}:{port}/")
+    logger.info(f"[debug] server started http://{host}:{port}/")
