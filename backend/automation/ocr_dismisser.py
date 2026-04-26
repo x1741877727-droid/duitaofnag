@@ -64,9 +64,14 @@ def _live_rules() -> dict:
 # 模板/OCR/形状任何一路命中这里都会被 _is_never_tap 拒绝
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _NEVER_TAP_RECTS = [
-    (0.91, 0.0, 1.0, 0.95),   # 右侧栏（公告/静音/帮助/修复/注销/上报日志）
-    (0.0, 0.0, 1.0, 0.07),    # 顶部防沉迷广播
-    (0.94, 0.86, 1.0, 1.0),   # 右下角龄标
+    # 右侧栏（公告/静音/帮助/修复/注销/上报日志）— y 从 0.18 起，**留出顶部右上角**
+    # 给弹窗 X（小马宝莉/抽奖等弹窗 X 在 y∈[0.05, 0.17] 范围）。旧 (0.91, 0, 1, 0.95)
+    # 把弹窗 X 也圈进去导致点不到。
+    (0.91, 0.18, 1.0, 0.95),
+    # 顶部防沉迷广播（中央长条文字，不到右边角）— x 限 0.85 留右上角给弹窗 X
+    (0.0, 0.0, 0.85, 0.05),
+    # 右下"16+ 适龄"标
+    (0.94, 0.86, 1.0, 1.0),
 ]
 
 
@@ -442,13 +447,16 @@ class OcrDismisser:
         hits = self._ocr_all(screenshot)
         rules = _live_rules()  # 热加载：每次拿最新规则
 
-        # 先勾选复选框
-        for h in hits:
-            if _is_never_tap(h.cx, h.cy, sw, sh):
-                continue
-            for kw in rules["checkbox_text"]:
-                if kw in h.text:
-                    return (h.cx, h.cy, f"勾选:{h.text}")
+        # 注：原"勾选 今日内不再弹出"路径已禁用 — 实测多数活动弹窗的 checkbox
+        # 不可交互（点了 frame 不变），bot 反复重试到 timeout。用户明确要求"不用管
+        # 这个，直接关弹窗"。如果哪天确实需要勾选行为，从 confirm_text 加关键字
+        # 或重新打开下面这段。
+        # for h in hits:
+        #     if _is_never_tap(h.cx, h.cy, sw, sh):
+        #         continue
+        #     for kw in rules["checkbox_text"]:
+        #         if kw in h.text:
+        #             return (h.cx, h.cy, f"勾选:{h.text}")
 
         # 找关闭按钮
         for h in hits:
