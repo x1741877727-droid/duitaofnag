@@ -104,12 +104,12 @@ def write_data_yaml(data_dir: Path, classes: list[str]):
 
 def _patch_torch_save_retry():
     """
-    workaround torch 2.11 + Windows 上 torch.save 流式写文件被 AV/防护工具截断的 bug:
+    workaround torch 2.11 + Windows 上 torch.save 偶发 IO 中断:
       ValueError: I/O operation on closed file
-      RuntimeError: enforce fail at inline_container.cc:672 unexpected pos
+      RuntimeError: enforce fail at inline_container.cc:672
 
-    修法: 先序列化到内存 BytesIO, 再一次性原子写盘 (open/write/close 单次, AV 难截断)
-    + retry 5 次兜底
+    用 BytesIO 缓冲 + 原子 rename 写盘，retry 5 次。
+    保持 ultralytics 调用语义不变（直接 return _orig 拿到的返回）。
     """
     import torch as _t
     import io as _io
@@ -118,30 +118,29 @@ def _patch_torch_save_retry():
 
     def _safe_save(obj, f, *args, **kwargs):
         import time as _time
-        # 1. 序列化到内存 buffer（这一步不碰磁盘，AV 不会介入）
-        buf = _io.BytesIO()
-        try:
+        # 路径写：BytesIO 缓冲 + 原子 rename
+        if not hasattr(f, "write"):
+            buf = _io.BytesIO()
             _orig(obj, buf, *args, **kwargs)
-        except Exception:
-            # 序列化本身就崩 → 真 bug，不重试
-            raise
-        data = buf.getvalue()
-
-        # 2. 单次原子写盘
+            data = buf.getvalue()
+            tmp = str(f) + ".tmp"
+            last = None
+            for i in range(5):
+                try:
+                    with open(tmp, "wb") as out:
+                        out.write(data)
+                    _os.replace(tmp, f)
+                    return
+                except (ValueError, OSError, RuntimeError) as e:
+                    last = e
+                    print(f"  [save retry {i+1}/5] {type(e).__name__}: {e}")
+                    _time.sleep(0.5 * (i + 1))
+            raise last
+        # 文件对象：用原始 torch.save 但加 retry
         last = None
         for i in range(5):
             try:
-                if hasattr(f, "write"):
-                    f.write(data)
-                    return
-                # 路径：写临时文件然后 rename（再原子一些）
-                tmp = str(f) + ".tmp"
-                with open(tmp, "wb") as out:
-                    out.write(data)
-                    out.flush()
-                    _os.fsync(out.fileno())
-                _os.replace(tmp, f)
-                return
+                return _orig(obj, f, *args, **kwargs)
             except (ValueError, OSError, RuntimeError) as e:
                 last = e
                 print(f"  [save retry {i+1}/5] {type(e).__name__}: {e}")
@@ -180,6 +179,8 @@ def train(yaml_path: Path, epochs: int, imgsz: int, batch: int) -> Path:
     # workers=0 单进程加载，慢一点但稳；non-Windows 用默认 8 worker
     n_workers = 0 if os.name == "nt" else 8
 
+    # patience=epochs 等价于关闭 early stop（确保跑满 epochs）
+    # 数据集小（~100 张），ultralytics 可能认为收敛过早提前停 → 强行跑满
     results = model.train(
         data=str(yaml_path),
         epochs=epochs,
@@ -187,7 +188,7 @@ def train(yaml_path: Path, epochs: int, imgsz: int, batch: int) -> Path:
         batch=batch,
         device=device,
         workers=n_workers,
-        patience=20,    # 20 epoch 无提升提前停
+        patience=epochs,    # 不提前停
         project=str(yaml_path.parent / "runs"),
         name="yolo_dismiss",
         exist_ok=True,
