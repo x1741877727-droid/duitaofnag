@@ -156,10 +156,38 @@ def export_onnx(best_pt: Path, imgsz: int) -> Path:
 
 
 def upload_model(onnx_path: Path):
-    """POST 上传到 Windows 用户目录"""
+    """
+    部署 ONNX 到用户目录。两种路径：
+      A. Windows 本地跑训练 → 直接 copy 到 %APPDATA%\\GameBot\\... (无网络)
+      B. Mac / 远程跑 → POST /api/yolo/upload_model 上传
+    """
+    # 优先尝试本地：本机就是 Windows 且 user_paths 模块能 import
+    import os, shutil, sys
+    if os.name == "nt":
+        try:
+            # 把项目根加到 sys.path 来 import backend.automation.user_paths
+            here = Path(__file__).resolve().parent.parent
+            if str(here) not in sys.path:
+                sys.path.insert(0, str(here))
+            from backend.automation.user_paths import user_yolo_dir
+            models_dir = user_yolo_dir() / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            named = models_dir / f"dismiss_{ts}.onnx"
+            latest = models_dir / "latest.onnx"
+            shutil.copy(onnx_path, named)
+            shutil.copy(onnx_path, latest)
+            print(f"[6/6] 本地部署 ONNX (Windows 直写)")
+            print(f"     -> {named}")
+            print(f"     -> {latest}")
+            return
+        except Exception as e:
+            print(f"     本地部署失败 ({e}), 走 HTTP 上传")
+
+    # B. HTTP 上传
     import requests
     url = f"{DEBUG_SERVER}/api/yolo/upload_model"
-    print(f"[6/6] 上传 ONNX 到 {url} ...")
+    print(f"[6/6] HTTP 上传 ONNX 到 {url}")
     with open(onnx_path, "rb") as f:
         files = {"file": ("dismiss_v1.onnx", f, "application/octet-stream")}
         r = requests.post(url, files=files, timeout=60)
