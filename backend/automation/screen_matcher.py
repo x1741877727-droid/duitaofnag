@@ -22,6 +22,10 @@ NORM_W, NORM_H = 1280, 720
 # 多尺度搜索（容忍轻微缩放差异）
 SCALES = [1.0, 0.95, 1.05, 0.9, 1.1]
 
+# X 关闭按钮专用：覆盖更广，因为不同弹窗 X 大小差很多
+# 全屏活动弹窗的大 X 可能 50x50px，普通对话框 X 可能只有 25x25px
+SCALES_CLOSE_X = [1.0, 0.85, 1.15, 0.7, 1.3, 0.55, 1.5, 1.7]
+
 
 @dataclass
 class MatchHit:
@@ -134,11 +138,13 @@ class ScreenMatcher:
         threshold: float | None = None,
         multi_scale: bool = True,
         use_edge: bool = False,
+        scales: "list[float] | None" = None,
     ) -> Optional[MatchHit]:
         """匹配单个模板，返回命中或None
 
         Args:
             use_edge: 使用 Canny 边缘检测匹配，对光照/对比度变化更鲁棒
+            scales: 显式指定 scale 列表（覆盖 multi_scale 默认值）
         """
         if template_name not in self._templates:
             return None
@@ -153,7 +159,8 @@ class ScreenMatcher:
             screen_gray = cv2.Canny(screen_gray, 50, 150)
             tmpl_gray = cv2.Canny(tmpl_gray, 50, 150)
 
-        scales = SCALES if multi_scale else [1.0]
+        if scales is None:
+            scales = SCALES if multi_scale else [1.0]
         best_val = 0.0
         best_loc = None
         best_scale = 1.0
@@ -261,9 +268,15 @@ class ScreenMatcher:
         return hit is not None
 
     def find_close_button(self, screenshot: np.ndarray) -> Optional[MatchHit]:
-        """查找任何X关闭按钮"""
+        """查找任何X关闭按钮 — 用 SCALES_CLOSE_X 覆盖更广尺度（全屏弹窗的大 X）"""
         names = [n for n in self._templates if n.startswith("close_x_")]
-        return self.find_any(screenshot, names, threshold=0.70)
+        # 直接展开 find_any 逻辑，因为要传 scales 参数
+        best: Optional[MatchHit] = None
+        for name in names:
+            hit = self.match_one(screenshot, name, threshold=0.70, scales=SCALES_CLOSE_X)
+            if hit and (best is None or hit.confidence > best.confidence):
+                best = hit
+        return best
 
     def find_action_button(self, screenshot: np.ndarray) -> Optional[MatchHit]:
         """查找任何操作按钮（确定/同意/加入等）"""

@@ -105,10 +105,11 @@ def _find_dialog_rect(screenshot: np.ndarray) -> "tuple[int, int, int, int] | No
     best_area = 0
     for c in contours:
         x, y, cw, ch = cv2.boundingRect(c)
-        # 过滤：dialog 必须够大（占屏 30%+ 任一边）、不贴边（不超 92%）、形状合理
+        # 过滤：dialog 必须够大（占屏 30%+ 任一边）、不超 97%（保留 1px 余量给非全屏判断）
+        # 旧上限 0.92 漏掉了"幸运开启抽奖"等近全屏活动弹窗 (~96%)
         if cw < w * 0.30 or ch < h * 0.30:
             continue
-        if cw > w * 0.92 or ch > h * 0.92:  # 全屏不算 dialog
+        if cw > w * 0.97 or ch > h * 0.97:
             continue
         cx = x + cw // 2
         # 横向居中（左右各 15% 余量）
@@ -468,8 +469,10 @@ class OcrDismisser:
                         return (sw // 2, sh // 2, f"点击屏幕:{h.text}")
                     return (h.cx, h.cy, f"确认:{h.text}")
 
-        # 级别3: 形状检测 — 仅在确认有遮罩层时才用（防止大厅页面误触）
-        if self._has_overlay(screenshot):
+        # 级别3: 形状检测 — 触发条件：有遮罩 OR 检测到 dialog rect
+        # 旧逻辑只看 _has_overlay，对全屏活动弹窗（4 角不暗）失效；
+        # 新逻辑加上 dialog 检测，覆盖近全屏弹窗。
+        if self._has_overlay(screenshot) or _find_dialog_rect(screenshot) is not None:
             pos = self._find_x_shape(screenshot)
             if pos and not _is_never_tap(pos[0], pos[1], sw, sh):
                 return (pos[0], pos[1], "形状检测X")
@@ -511,7 +514,20 @@ class OcrDismisser:
                             f"dialog=({dx},{dy},{dw}x{dh})")
                 return (fb_x, fb_y)
 
-        # 兜底：旧逻辑（右半屏上 2/3）
+        # 兜底 1：右上角固定小 ROI（专治"全屏弹窗 + dialog 检测失败 + overlay 失败"）
+        # ROI: x∈[0.78w, 0.92w], y∈[0, 0.18h]，刚好是游戏弹窗 X 关闭按钮的标准位置
+        # 不依赖 dialog rect 也不依赖 _has_overlay → 永远跑一遍这个小区域
+        # 风险有限：禁点 ROI 已排除 x>0.91 的右侧栏，剩下的角落区域基本只能是弹窗 X
+        rx0, rx1 = int(w * 0.78), int(w * 0.92)
+        ry0, ry1 = 0, int(h * 0.18)
+        if rx1 > rx0 and ry1 > ry0:
+            roi = screenshot[ry0:ry1, rx0:rx1]
+            pos = self._scan_x_in_roi(roi, rx0, ry0)
+            if pos and not _is_never_tap(pos[0], pos[1], w, h):
+                logger.info(f"[shape] 右上角 X: ({pos[0]},{pos[1]})")
+                return pos
+
+        # 兜底 2：旧逻辑（右半屏上 2/3）
         roi = screenshot[0:h * 2 // 3, w // 3:]
         pos = self._scan_x_in_roi(roi, w // 3, 0)
         if pos and not _is_never_tap(pos[0], pos[1], w, h):
