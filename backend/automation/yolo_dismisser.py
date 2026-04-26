@@ -364,6 +364,23 @@ class YoloDismisser:
             dur_ms = (time.perf_counter() - t0) * 1000
             metrics.record("yolo_detect", dur_ms=round(dur_ms, 2), n=len(dets))
 
+            # v2-4 漏检诊断: 每轮都打 dets 概览, 让"P2 前 18s 没动" 能精确定位
+            # 是 'YOLO 真没看到东西' 还是 '看到了但 conf 低于阈值'
+            if dets:
+                _det_summary = ", ".join(
+                    f"{d.name}({d.conf:.2f})@({d.cx},{d.cy})"
+                    for d in dets[:5]
+                )
+                logger.info(
+                    f"[Y{rnd + 1}] dets={len(dets)} infer={dur_ms:.0f}ms "
+                    f"top: {_det_summary}"
+                )
+            else:
+                logger.info(
+                    f"[Y{rnd + 1}] dets=0 infer={dur_ms:.0f}ms"
+                    f" (画面无 close_x/action_btn 检出)"
+                )
+
             # ─── v2 P2 四元融合判大厅 (代替老的"连续 2 次模板命中") ───
             # 模板命中 + close_x=0 + action_btn=0 + 无遮罩 + phash 5 帧稳定
             if use_quad:

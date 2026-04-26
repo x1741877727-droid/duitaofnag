@@ -283,10 +283,16 @@ class MultiRunnerService:
             else:
                 logger.info(f"[实例{idx}] minicap 不可用，使用 screencap 回退")
 
-            # 用 GuardedADB 包装：任何阶段截图时自动清除意外弹窗
+            # v2-4: GuardedADB 已被 PopupWatchdog 取代 (后台 task + phase 感知).
+            # 设 GAMEBOT_ENABLE_GUARDED_ADB=1 可临时回退老路径.
             from .automation.ocr_dismisser import OcrDismisser
             dismisser = OcrDismisser(max_rounds=25)
-            guarded_adb = GuardedADB(raw_adb, dismisser, matcher)
+            if os.environ.get("GAMEBOT_ENABLE_GUARDED_ADB") == "1":
+                guarded_adb = GuardedADB(raw_adb, dismisser, matcher)
+                logger.info(f"[实例{idx}] GuardedADB 启用 (legacy)")
+            else:
+                guarded_adb = raw_adb
+                logger.info(f"[实例{idx}] GuardedADB 禁用 (v2 PopupWatchdog 接管)")
 
             # phase 变化回调
             def make_phase_cb(instance_idx):
