@@ -1709,23 +1709,35 @@ async function loadImage(i) {
   curIdx = i;
   const it = items[i];
   document.getElementById('cur-name').textContent = it.name + ' (' + (i+1) + '/' + items.length + ')';
+
+  // 立刻清掉上一张的 box（避免缓存命中时 img.onload 比 fetch 先到，画错框）
+  curBoxes = [];
+  drawAll();
+  renderBoxList();
+
   const img = document.getElementById('img');
   img.onload = () => {
     imgNatW = img.naturalWidth;
     imgNatH = img.naturalHeight;
     syncCanvas();
-    drawAll();
+    drawAll();   // 用当前 curBoxes 画（fetch 没回来就是空，回来了就有内容）
   };
   img.src = '/api/labeler/image/' + encodeURIComponent(it.name);
-  // 加载已存 labels
+
+  // 加载已存 labels（异步，可能比 img.onload 先回也可能后回）
+  let myIdx = curIdx;
   try {
     const r = await fetch('/api/labeler/labels/' + encodeURIComponent(it.name));
+    if (curIdx !== myIdx) return;  // 期间用户跳别的图了，丢弃
     const d = await r.json();
     curBoxes = (d.boxes || []).map(b => ({
       class_id: b.class_id,
       cx: b.cx, cy: b.cy, w: b.w, h: b.h
     }));
   } catch(e) { curBoxes = []; }
+
+  // 关键：fetch 完成后再画一次（覆盖 onload 时画的空 / 残影）
+  drawAll();
   renderBoxList();
   renderSidebar();
 }
