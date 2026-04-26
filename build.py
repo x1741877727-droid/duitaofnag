@@ -194,7 +194,7 @@ a = Analysis(
         'backend.automation.yolo_detector', 'backend.automation.ocr_pool',
         'backend.automation.screenshot_collector',
         'backend.automation.recognizer', 'backend.automation.memory_l1',
-        'backend.automation.watchdogs',
+        'backend.automation.watchdogs', 'backend.automation.lobby_check',
         'yaml', 'psutil', 'multiprocessing',
     ] + av_hidden,
 )

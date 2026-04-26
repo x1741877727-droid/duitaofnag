@@ -259,6 +259,13 @@ class YoloDismisser:
         last_tap = (0, 0)
         same_target_count = 0
 
+        # v2 P2 四元信号融合判大厅 — 替代旧"连续 2 次模板命中"简化逻辑
+        # 修半透明弹窗误判 bug: 模板命中 + close_x=0 + action_btn=0 +
+        # 无遮罩 + phash 5 帧稳定, 全过才算大厅
+        from .lobby_check import LobbyQuadDetector
+        quad_detector = LobbyQuadDetector(stable_frames_required=3)
+        use_quad = True  # 灰度开关, 出问题改 False 退回旧逻辑
+
         for rnd in range(self.max_rounds):
             shot = await device.screenshot()
             if shot is None:
@@ -327,27 +334,13 @@ class YoloDismisser:
                     cv2.imwrite(str(decision.path / "lobby_annot.jpg"), annot,
                                 [cv2.IMWRITE_JPEG_QUALITY, 70])
                     tier_lobby.note = f"命中 {tname}@({h.cx},{h.cy}) conf={h.confidence:.2f} → 见 lobby_annot.jpg"
-                    # 借用 yolo_annot_image 字段把图链给前端（前端会渲染）
                     tier_lobby.yolo_annot_image = "lobby_annot.jpg"
                 except Exception:
                     pass
                 tier_lobby.early_exit = True
                 decision.add_tier(tier_lobby)
-
-                # 还要确认没遮罩
-                lobby_confirm += 1
-                if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
-                    logger.info(f"[Y{rnd + 1}] 大厅确认 → 完成 (关闭 {popups_closed})")
-                    decision.finalize(outcome="lobby_confirmed",
-                                      note=f"模板{tname}连续命中 {LOBBY_CONFIRM_NEEDED} 次 · 关闭 {popups_closed} 个弹窗")
-                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
-                logger.debug(f"[Y{rnd + 1}] 大厅初判 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                decision.finalize(outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}",
-                                  note=f"模板{tname}命中, 但需连续 {LOBBY_CONFIRM_NEEDED} 次确认")
-                await asyncio.sleep(0.3)
-                continue
             else:
-                # 模板未命中, 记录后继续走 YOLO
+                # 模板未命中, 记录后继续走 YOLO (quad 检查也会用)
                 decision.add_tier(tier_lobby)
 
             # YOLO 推理
@@ -355,6 +348,50 @@ class YoloDismisser:
             dets = self.detect(shot)
             dur_ms = (time.perf_counter() - t0) * 1000
             metrics.record("yolo_detect", dur_ms=round(dur_ms, 2), n=len(dets))
+
+            # ─── v2 P2 四元融合判大厅 (代替老的"连续 2 次模板命中") ───
+            # 模板命中 + close_x=0 + action_btn=0 + 无遮罩 + phash 5 帧稳定
+            if use_quad:
+                quad_r = quad_detector.check(shot, matcher, dets)
+                if quad_r.is_lobby:
+                    logger.info(
+                        f"[Y{rnd + 1}] 大厅 (四元融合) → 完成 · 关闭 {popups_closed}"
+                    )
+                    quad_tier = _TR(
+                        tier=0,
+                        name="四元融合·大厅判定",
+                        duration_ms=0.0,
+                        early_exit=True,
+                        note=quad_r.note,
+                    )
+                    decision.add_tier(quad_tier)
+                    decision.finalize(
+                        outcome="lobby_confirmed_quad",
+                        note=f"四元融合 OK · 关闭 {popups_closed} 个弹窗 · {quad_r.note}",
+                    )
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                # 模板命中但 quad 不通过 → 仍清弹窗 (说明有遮罩或 close_x 在)
+                if lobby_hit is not None:
+                    logger.debug(
+                        f"[Y{rnd + 1}] 模板命中但 quad 拒: {quad_r.note}"
+                    )
+            else:
+                # 灰度回退: 旧"连续 2 次模板命中"路径
+                if lobby_hit is not None:
+                    lobby_confirm += 1
+                    if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
+                        logger.info(f"[Y{rnd + 1}] 大厅确认 (legacy) → 完成 (关闭 {popups_closed})")
+                        decision.finalize(
+                            outcome="lobby_confirmed_legacy",
+                            note=f"模板连续命中 {LOBBY_CONFIRM_NEEDED} 次 · 关闭 {popups_closed} 个弹窗",
+                        )
+                        return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                    decision.finalize(
+                        outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}",
+                        note=f"模板命中, 等 {LOBBY_CONFIRM_NEEDED} 次 (legacy)",
+                    )
+                    await asyncio.sleep(0.3)
+                    continue
 
             # 记录 YOLO Tier 到 Decision
             tier_yolo = TierRecord(tier=2, name="YOLO", duration_ms=round(dur_ms, 2))
