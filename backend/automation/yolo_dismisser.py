@@ -60,6 +60,11 @@ class DismissResult:
     popups_closed: int
     final_state: str
     rounds: int
+    # v2-4 细粒度时间记录 (单位: ms, -1 = 未发生)
+    t_first_popup_seen_ms: float = -1.0   # 第一次 YOLO 检到 close_x/action_btn
+    t_first_tap_ms: float = -1.0          # 第一次 tap (从 dismiss_all 开始算)
+    t_first_dismiss_ok_ms: float = -1.0   # 第一次成功关掉弹窗 (verify 通过)
+    t_lobby_confirmed_ms: float = -1.0    # 大厅确认时间
 
 
 def _model_path() -> Path:
@@ -260,6 +265,14 @@ class YoloDismisser:
         same_target_count = 0
         empty_dets_streak = 0  # 连续多少轮 YOLO 没检到 close_x/action_btn
 
+        # v2-4 细粒度时间记录: 从 dismiss_all 开始的累计 ms
+        _phase_start_ts = time.perf_counter()
+        _t_first_popup_seen_ms = -1.0
+        _t_first_tap_ms = -1.0
+        _t_first_dismiss_ok_ms = -1.0
+        def _ms_since_start() -> float:
+            return round((time.perf_counter() - _phase_start_ts) * 1000, 1)
+
         # v2 P2 四元信号融合判大厅 — 替代旧"连续 2 次模板命中"简化逻辑
         # 修半透明弹窗误判 bug: 模板命中 + close_x=0 + action_btn=0 +
         # 无遮罩 + phash 稳定, 全过才算大厅
@@ -371,7 +384,7 @@ class YoloDismisser:
                         outcome="lobby_confirmed_quad",
                         note=f"四元融合 OK · 关闭 {popups_closed} 个弹窗 · {quad_r.note}",
                     )
-                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
                 # 模板命中但 quad 不通过 → 仍清弹窗 (说明有遮罩或 close_x 在)
                 if lobby_hit is not None:
                     logger.debug(
@@ -387,7 +400,7 @@ class YoloDismisser:
                             outcome="lobby_confirmed_legacy",
                             note=f"模板连续命中 {LOBBY_CONFIRM_NEEDED} 次 · 关闭 {popups_closed} 个弹窗",
                         )
-                        return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                        return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
                     decision.finalize(
                         outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}",
                         note=f"模板命中, 等 {LOBBY_CONFIRM_NEEDED} 次 (legacy)",
@@ -406,6 +419,14 @@ class YoloDismisser:
 
             close_xs = [d for d in dets if d.name == "close_x" and d.conf > TAP_CONF_CLOSE]
             actions = [d for d in dets if d.name == "action_btn" and d.conf > TAP_CONF_ACTION]
+
+            # ── 时间埋点: 第一次见弹窗 ──
+            if (close_xs or actions) and _t_first_popup_seen_ms < 0:
+                _t_first_popup_seen_ms = _ms_since_start()
+                logger.info(
+                    f"[时间] dismiss_popups: 第一次见弹窗 +{_t_first_popup_seen_ms:.0f}ms"
+                    f" (close_x={len(close_xs)}, action_btn={len(actions)})"
+                )
 
             tap_xy: Optional[tuple[int, int, str]] = None
             target_class = ""
@@ -453,7 +474,7 @@ class YoloDismisser:
                         outcome="lobby_confirmed_empty",
                         note=f"连续 {empty_dets_streak} 轮 YOLO 无目标 + 模板命中 lobby_start_btn",
                     )
-                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
                 logger.debug(f"[Y{rnd + 1}] 无目标 (dets={len(dets)}, 连续{empty_dets_streak}轮)，等待")
                 decision.finalize(outcome="no_target", note=f"YOLO 检 {len(dets)} 个目标但都不达标")
                 await asyncio.sleep(0.6)
@@ -479,6 +500,10 @@ class YoloDismisser:
             decision.set_tap(tap_xy[0], tap_xy[1], method="YOLO",
                              target_class=target_class, target_text=ocr_text,
                              target_conf=target_conf, screenshot=shot)
+            # ── 时间埋点: 第一次 tap ──
+            if _t_first_tap_ms < 0:
+                _t_first_tap_ms = _ms_since_start()
+                logger.info(f"[时间] dismiss_popups: 第一次 tap +{_t_first_tap_ms:.0f}ms")
             await device.tap(tap_xy[0], tap_xy[1])
             popups_closed += 1
             lobby_confirm = 0
@@ -523,6 +548,14 @@ class YoloDismisser:
                                 f"[Y{rnd + 1}] State Expectation 失败 [{expect_label}]: "
                                 f"{exp_r.note}"
                             )
+                        else:
+                            # 时间埋点: 第一次成功关闭弹窗 (verify 通过)
+                            if _t_first_dismiss_ok_ms < 0:
+                                _t_first_dismiss_ok_ms = _ms_since_start()
+                                logger.info(
+                                    f"[时间] dismiss_popups: 第一次成功关闭 "
+                                    f"+{_t_first_dismiss_ok_ms:.0f}ms"
+                                )
                     except Exception as _ee:
                         logger.debug(f"[Y{rnd + 1}] expectation verify err: {_ee}")
             except Exception:
@@ -532,7 +565,7 @@ class YoloDismisser:
                               note=f"{target_class} conf={target_conf:.2f} · {verify_note}")
 
         logger.warning(f"[yolo] {self.max_rounds} 轮 timeout (关闭 {popups_closed})")
-        return DismissResult(False, popups_closed, "timeout", self.max_rounds)
+        return DismissResult(False, popups_closed, "timeout", self.max_rounds, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=-1.0)
 
     @classmethod
     def _ocr_bbox(cls, roi: np.ndarray) -> str:
