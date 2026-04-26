@@ -448,7 +448,13 @@ class MultiRunnerService:
                 except Exception:
                     return -1
 
-            wd_mgr.start_process(_pidof_game, interval_s=5.0)
+            async def _wd_proc_screenshot():
+                try:
+                    return await runner.adb.screenshot()
+                except Exception:
+                    return None
+
+            wd_mgr.start_process(_pidof_game, _wd_proc_screenshot, interval_s=5.0)
 
             # PopupWatchdog: phase 感知 (dismiss_popups skip / team_create+map_setup
             # system_only / 其他 all). YOLO 模型不存在时安静跳过.
