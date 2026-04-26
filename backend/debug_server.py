@@ -375,6 +375,101 @@ async def api_labeler_save_labels(filename: str, req: SaveLabelsReq):
     return {"ok": True, "count": len(lines), "path": str(label_p)}
 
 
+@app.get("/api/labeler/export.zip")
+async def api_labeler_export():
+    """打包导出训练数据。返回 zip:
+      images/<png>          仅有非空 .txt 标注的图 + 一定比例的跳过图（背景）
+      labels/<txt>          YOLO 格式标注
+      classes.txt           类名（每行一个）
+    Mac 训练脚本一键 curl 这个。
+    """
+    import io, zipfile, random
+    raw, labels_dir, classes_p = _yolo_paths()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 写 classes.txt
+        zf.writestr("classes.txt", "\n".join(LABEL_CLASSES) + "\n")
+
+        # 收集已标图（.txt 非空）
+        labeled_imgs = []
+        skipped_imgs = []
+        for p in sorted(raw.glob("*.png")) + sorted(raw.glob("*.jpg")):
+            label_p = labels_dir / f"{p.stem}.txt"
+            if not label_p.is_file():
+                continue
+            if label_p.stat().st_size > 0:
+                labeled_imgs.append(p)
+            else:
+                skipped_imgs.append(p)
+
+        # 背景图（skipped）采样 ~30% 比例（避免负样本压倒正样本）
+        max_bg = max(20, len(labeled_imgs) // 3)
+        random.seed(42)  # 固定种子，重训重现
+        bg_sample = random.sample(skipped_imgs, min(max_bg, len(skipped_imgs)))
+
+        for p in labeled_imgs + bg_sample:
+            label_p = labels_dir / f"{p.stem}.txt"
+            zf.write(str(p), arcname=f"images/{p.name}")
+            # 过滤 class_id >= 当前类数（剔除历史 dialog cid=2）
+            if label_p.is_file() and label_p.stat().st_size > 0:
+                kept = []
+                for line in label_p.read_text(encoding="utf-8").splitlines():
+                    parts = line.strip().split()
+                    if len(parts) != 5:
+                        continue
+                    try:
+                        cid = int(parts[0])
+                    except ValueError:
+                        continue
+                    if 0 <= cid < len(LABEL_CLASSES):
+                        kept.append(line.strip())
+                zf.writestr(f"labels/{p.stem}.txt",
+                            "\n".join(kept) + ("\n" if kept else ""))
+            else:
+                # 背景图：空 .txt（YOLO 视作 no-object）
+                zf.writestr(f"labels/{p.stem}.txt", "")
+
+        # 元信息
+        zf.writestr("manifest.json", json.dumps({
+            "classes": LABEL_CLASSES,
+            "labeled": len(labeled_imgs),
+            "background_sampled": len(bg_sample),
+            "background_total": len(skipped_imgs),
+        }, ensure_ascii=False, indent=2))
+
+    buf.seek(0)
+    from datetime import datetime as _dt
+    fname = f"yolo_dataset_{_dt.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    return Response(
+        content=buf.read(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
+    )
+
+
+@app.post("/api/yolo/upload_model")
+async def api_yolo_upload_model(file: UploadFile = File(...)):
+    """Mac 训练完，把 ONNX 上传回 Windows 用户目录"""
+    from .automation.user_paths import user_yolo_dir
+    models_dir = user_yolo_dir() / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    name = _safe_id(file.filename or "model.onnx")
+    if not name.endswith(".onnx"):
+        name = name + ".onnx"
+    out = models_dir / name
+    data = await file.read()
+    out.write_bytes(data)
+    # 同时更新 latest.onnx 软链接（Windows 没软链就直接复制覆盖）
+    latest = models_dir / "latest.onnx"
+    latest.write_bytes(data)
+    return {
+        "ok": True,
+        "saved": str(out),
+        "size": len(data),
+        "latest": str(latest),
+    }
+
+
 @app.delete("/api/labeler/image/{filename}")
 async def api_labeler_delete_image(filename: str):
     """废弃图片（移到 .trash/ 子目录）"""
