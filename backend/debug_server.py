@@ -249,9 +249,12 @@ async def labeler_page():
 
 @app.get("/api/labeler/list")
 async def api_labeler_list():
-    """所有原始截图 + 标注状态"""
+    """所有原始截图 + 标注状态 + 每类 bbox 实例数"""
     raw, labels_dir, _ = _yolo_paths()
     items = []
+    # 每类实例数 (cid -> count) + 出现在多少张图 (cid -> image_set)
+    class_counts: dict[int, int] = {}
+    class_imgs: dict[int, set[str]] = {}
     for p in sorted(raw.glob("*.png")) + sorted(raw.glob("*.jpg")):
         label_p = labels_dir / f"{p.stem}.txt"
         labeled = label_p.is_file() and label_p.stat().st_size > 0
@@ -263,15 +266,47 @@ async def api_labeler_list():
             "labeled": labeled,
             "skipped": skipped,
         })
+        if labeled:
+            try:
+                for line in label_p.read_text(encoding="utf-8").splitlines():
+                    parts = line.strip().split()
+                    if len(parts) != 5:
+                        continue
+                    try:
+                        cid = int(parts[0])
+                    except ValueError:
+                        continue
+                    class_counts[cid] = class_counts.get(cid, 0) + 1
+                    class_imgs.setdefault(cid, set()).add(p.name)
+            except Exception:
+                pass
     items.sort(key=lambda x: x["mtime"])
     n_labeled = sum(1 for i in items if i["labeled"])
     n_skipped = sum(1 for i in items if i["skipped"])
+
+    # 组装 per_class: 当前类（active）+ 历史遗留类（如 dialog idx=2）都返回
+    per_class = []
+    all_cids = sorted(set(list(class_counts.keys()) + list(range(len(LABEL_CLASSES)))))
+    legacy_names = {2: "dialog (历史)"}  # 兼容：之前标过 dialog 的，仍显示数字
+    for cid in all_cids:
+        if cid < len(LABEL_CLASSES):
+            name = LABEL_CLASSES[cid]
+        else:
+            name = legacy_names.get(cid, f"class_{cid}")
+        per_class.append({
+            "id": cid,
+            "name": name,
+            "instances": class_counts.get(cid, 0),
+            "images": len(class_imgs.get(cid, set())),
+        })
+
     return {
         "total": len(items),
         "labeled": n_labeled,
         "skipped": n_skipped,
         "remaining": len(items) - n_labeled - n_skipped,
         "classes": LABEL_CLASSES,
+        "per_class": per_class,
         "items": items,
     }
 
@@ -1611,7 +1646,8 @@ LABELER_HTML = r"""<!doctype html>
     跳过 <span id="prog-skipped">0</span> /
     总计 <span id="prog-total">0</span>
   </span>
-  <button onclick="reload()">刷新列表</button>
+  <span id="class-stats" style="display:flex; gap:6px;"></span>
+  <button onclick="reload()">刷新</button>
   <span style="margin-left:auto; color:#8b95a5; font-size:11px;" id="cur-name">-</span>
 </div>
 
@@ -1669,6 +1705,19 @@ async function reload() {
   document.getElementById('prog-labeled').textContent = d.labeled;
   document.getElementById('prog-skipped').textContent = d.skipped;
   document.getElementById('prog-total').textContent = d.total;
+  // 每类实例数显示在顶栏
+  const stats = document.getElementById('class-stats');
+  stats.innerHTML = (d.per_class || []).map(p => {
+    const isLegacy = p.id >= CLASSES.length;
+    const color = isLegacy ? '#6e7685' : (COLORS[p.id] || '#888');
+    const opacity = isLegacy ? 0.5 : 1;
+    return `<span style="background:${color}25; border:1px solid ${color};
+                         color:${color}; padding:3px 8px; border-radius:4px;
+                         font-size:11px; opacity:${opacity};"
+                  title="${p.name}: ${p.instances} 个 bbox, 在 ${p.images} 张图">
+              ${p.name}: <strong>${p.instances}</strong>
+            </span>`;
+  }).join('');
   renderSidebar();
   renderClassRow();
   if (curIdx < 0 || curIdx >= items.length) {
@@ -1909,6 +1958,19 @@ async function reloadKeepCursor() {
   document.getElementById('prog-labeled').textContent = d.labeled;
   document.getElementById('prog-skipped').textContent = d.skipped;
   document.getElementById('prog-total').textContent = d.total;
+  // 同步刷新每类计数（保存后能立刻看到 bbox 数变化）
+  const stats = document.getElementById('class-stats');
+  stats.innerHTML = (d.per_class || []).map(p => {
+    const isLegacy = p.id >= CLASSES.length;
+    const color = isLegacy ? '#6e7685' : (COLORS[p.id] || '#888');
+    const opacity = isLegacy ? 0.5 : 1;
+    return `<span style="background:${color}25; border:1px solid ${color};
+                         color:${color}; padding:3px 8px; border-radius:4px;
+                         font-size:11px; opacity:${opacity};"
+                  title="${p.name}: ${p.instances} 个 bbox, 在 ${p.images} 张图">
+              ${p.name}: <strong>${p.instances}</strong>
+            </span>`;
+  }).join('');
   renderSidebar();
 }
 
