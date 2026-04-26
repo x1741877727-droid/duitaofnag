@@ -1,67 +1,109 @@
-"""
-用户数据持久目录 — rebuild 不会被覆盖
+r"""
+统一管理"用户可写持久化目录" — rebuild 不会被覆盖。
 
-所有用户写入的东西都放这里：
-  - 配置文件（popup_rules.json 用户改的版本）
-  - YOLO 训练截图 + 标注
-  - 训练好的模型 weights
+为啥要这个：
+  PyInstaller folder build 每次都 wipe 整个 dist/GameBot/ 重建，
+  写到 _internal/config/、_internal/fixtures/ 的用户数据全没。
 
-Windows: %APPDATA%\\GameBot\\
-其他系统: ~/.gamebot/
+解决：
+  Windows: %APPDATA%\GameBot\         (例: C:\Users\Administrator\AppData\Roaming\GameBot)
+  其他   : ~/.gamebot/
 
-PyInstaller --clean 只清 dist/GameBot/ 下面的东西，
-%APPDATA% 在用户目录，**永远不会被 rebuild 覆盖**。
+目录结构：
+  <user_dir>/
+    config/popup_rules.json          用户编辑的规则覆盖（覆盖 bundle 默认值）
+    data/yolo/raw_screenshots/       自动收集的 YOLO 训练截图
+    data/yolo/labels/                标注 .txt（YOLO 格式）
+    data/yolo/classes.txt            类别表
+    models/                          训练好的 ONNX 模型
 """
 from __future__ import annotations
 
+import logging
 import os
-import shutil
+import sys
 from pathlib import Path
-from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+_CACHED_USER_DIR: "Path | None" = None
 
 
 def user_data_dir() -> Path:
-    """返回持久数据根目录，自动创建"""
+    """返回用户可写持久化目录（rebuild 不动）"""
+    global _CACHED_USER_DIR
+    if _CACHED_USER_DIR is not None:
+        return _CACHED_USER_DIR
     if os.name == "nt":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
         d = Path(base) / "GameBot"
     else:
         d = Path(os.path.expanduser("~/.gamebot"))
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"创建用户目录失败 {d}: {e}")
+    _CACHED_USER_DIR = d
     return d
 
 
 def user_config_dir() -> Path:
-    d = user_data_dir() / "config"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    p = user_data_dir() / "config"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def user_yolo_dir() -> Path:
-    """YOLO 训练数据根目录。子目录：
-      raw_screenshots/   原始截图（自动采）
-      labels/            YOLO 格式 .txt 标注
-      models/            训练后的 onnx
-    """
-    d = user_data_dir() / "data" / "yolo"
-    (d / "raw_screenshots").mkdir(parents=True, exist_ok=True)
-    (d / "labels").mkdir(parents=True, exist_ok=True)
-    (d / "models").mkdir(parents=True, exist_ok=True)
-    return d
+    """YOLO 根目录（debug_server / yolo_dismisser 用）— rebuild 不动"""
+    p = user_data_dir() / "data" / "yolo"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
-def first_run_copy(default_path: Optional[str], user_path: Path) -> Optional[Path]:
-    """
-    若 user_path 不存在但 default_path 存在 → 拷过去（首次运行 seed）
-    返回最终可读取的路径（user 优先）
-    """
-    if user_path.exists():
-        return user_path
-    if default_path and os.path.isfile(default_path):
-        try:
-            user_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(default_path, user_path)
-            return user_path
-        except Exception:
-            return Path(default_path)  # 拷不动就用只读默认
+# 兼容别名
+user_yolo_root = user_yolo_dir
+
+
+def user_yolo_raw_dir() -> Path:
+    p = user_yolo_dir() / "raw_screenshots"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_yolo_labels_dir() -> Path:
+    p = user_yolo_dir() / "labels"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_yolo_classes_file() -> Path:
+    """类别表（YOLO 格式：每行一个类名，行号 = class id）"""
+    p = user_yolo_dir() / "classes.txt"
+    if not p.exists():
+        p.write_text("close_x\naction_btn\n", encoding="utf-8")
+    return p
+
+
+def user_models_dir() -> Path:
+    p = user_data_dir() / "models"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def bundle_config_path(filename: str) -> "Path | None":
+    """返回 bundle 内只读默认配置路径（仅用于读取默认值）"""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "config" / filename)
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "_internal" / "config" / filename)
+        candidates.append(exe_dir / "config" / filename)
+    here = Path(__file__).resolve().parent
+    candidates.append(here.parent.parent / "config" / filename)
+    for p in candidates:
+        if p.is_file():
+            return p
     return None

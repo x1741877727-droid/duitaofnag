@@ -172,10 +172,34 @@ class _Recorder:
     # ─── 历史会话浏览（扫磁盘）───
 
     def _logs_root(self) -> Optional[Path]:
-        """logs/ 根目录, 包含所有 session 子目录"""
-        if self._root is None:
-            return None
-        return self._root.parent.parent  # decisions → session → logs
+        """logs/ 根目录, 包含所有 session 子目录.
+        优先用已 init 的 root, 否则按 runner_service.py 同算法发现 logs 目录.
+        这样即使 runner 未启动, 也能浏览历史 session.
+        """
+        if self._root is not None:
+            return self._root.parent.parent  # decisions → session → logs
+        try:
+            import sys
+            candidates: list[Path] = []
+            here = Path(__file__).resolve()
+            # backend/automation/decision_log.py → backend → project_root
+            candidates.append(here.parent.parent.parent / "logs")
+            # PyInstaller bundle: _internal 目录下
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                candidates.append(Path(meipass) / "logs")
+            if getattr(sys, "frozen", False):
+                candidates.append(Path(sys.executable).parent / "logs")
+                candidates.append(Path(sys.executable).parent / "_internal" / "logs")
+            for c in candidates:
+                try:
+                    if c.is_dir():
+                        return c
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
 
     def list_sessions(self) -> list[dict]:
         """列出所有有决策记录的 session, 按时间倒序"""

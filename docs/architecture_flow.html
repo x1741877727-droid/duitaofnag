@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GameBot 架构流程图 v2</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: #f8fafc;
+    color: #1e293b;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.6;
+  }
+
+  .topbar {
+    background: #ffffff;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 12px 22px;
+    display: flex; align-items: center; gap: 14px;
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  h1 { margin: 0; font-size: 18px; color: #2563eb; font-weight: 700; }
+  .ver-tag {
+    background: #2563eb; color: white;
+    font-size: 11px; padding: 2px 7px; border-radius: 4px;
+    font-weight: 600;
+  }
+  .stats { color: #64748b; font-size: 12px; }
+  .stats strong { color: #f59e0b; font-weight: 600; }
+  .topbar .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  button {
+    background: #f1f5f9; color: #334155;
+    border: 1px solid #e2e8f0;
+    padding: 7px 14px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; font-weight: 500;
+    transition: all 0.15s;
+  }
+  button:hover { background: #e2e8f0; border-color: #cbd5e1; }
+  button.primary { background: #2563eb; color: white; border-color: #2563eb; }
+  button.primary:hover { background: #1d4ed8; border-color: #1d4ed8; }
+
+  .legend {
+    background: white; padding: 10px 22px;
+    border-bottom: 1px solid #e2e8f0;
+    display: flex; gap: 18px; flex-wrap: wrap;
+    font-size: 12px; color: #64748b;
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend i {
+    display: inline-block; width: 13px; height: 13px;
+    border-radius: 3px; border: 1px solid;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 0;
+    height: calc(100vh - 113px);
+  }
+  @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
+
+  .diagrams {
+    background: white;
+    overflow-y: auto;
+    border-right: 1px solid #e2e8f0;
+  }
+  .diagram-section {
+    padding: 16px 24px;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .diagram-section h2 {
+    margin: 0 0 12px;
+    font-size: 14px; color: #1e3a8a; font-weight: 700;
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #dbeafe;
+  }
+  .diagram-section h2 .num {
+    background: #2563eb; color: white;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+  }
+  .diagram-section .desc {
+    margin: -4px 0 12px;
+    font-size: 12px; color: #64748b;
+    line-height: 1.5;
+  }
+  .mermaid { font-size: 13px; }
+  .mermaid .node:hover rect,
+  .mermaid .node:hover polygon,
+  .mermaid .node:hover circle {
+    stroke-width: 3px !important;
+    filter: brightness(0.97);
+  }
+
+  .detail-panel {
+    background: #ffffff;
+    overflow-y: auto;
+    display: flex; flex-direction: column;
+    box-shadow: -2px 0 8px rgba(0,0,0,0.03);
+  }
+  .detail-empty {
+    padding: 40px 30px; text-align: center; color: #94a3b8;
+  }
+  .detail-empty .icon { font-size: 36px; margin-bottom: 14px; }
+  .detail-empty .hint { font-size: 12px; line-height: 1.7; }
+
+  .detail-content {
+    padding: 18px 22px; flex: 1;
+  }
+  .detail-content h2 {
+    margin: 0 0 4px; font-size: 16px; color: #0f172a; font-weight: 700;
+  }
+  .detail-content .meta { color: #64748b; font-size: 12px; margin-bottom: 12px; }
+  .badge {
+    padding: 2px 8px; border-radius: 4px; font-size: 10px;
+    font-weight: 600; letter-spacing: 0.3px; display: inline-block;
+    margin-right: 6px; margin-bottom: 6px;
+  }
+  .badge.critical { background: #fee2e2; color: #b91c1c; }
+  .badge.cross    { background: #fef3c7; color: #b45309; }
+  .badge.phase    { background: #dbeafe; color: #1d4ed8; }
+  .badge.tier     { background: #d1fae5; color: #047857; }
+  .badge.recovery { background: #ede9fe; color: #6d28d9; }
+  .badge.done     { background: #d1fae5; color: #065f46; }
+  .badge.defense  { background: #fef3c7; color: #92400e; }
+  .badge.future   { background: #f1f5f9; color: #64748b; }
+
+  .detail-content h4 {
+    margin: 12px 0 5px; font-size: 11px; color: #475569;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .detail-content ul {
+    margin: 0 0 10px 0; padding-left: 20px;
+    font-size: 13px; color: #1e293b; line-height: 1.65;
+  }
+  .detail-content ul li { margin-bottom: 2px; }
+  .detail-content ul ul { padding-left: 16px; margin: 2px 0; color: #64748b; }
+  .detail-content p { margin: 5px 0; color: #334155; font-size: 13px; }
+  .detail-content code {
+    background: #f1f5f9; padding: 1px 5px; border-radius: 3px;
+    font-size: 12px; color: #be185d;
+  }
+  .detail-content .keyval {
+    display: grid; grid-template-columns: 90px 1fr;
+    gap: 4px 12px; font-size: 12px; margin: 6px 0 12px;
+  }
+  .detail-content .keyval .k { color: #64748b; }
+  .detail-content .warn {
+    background: #fef3c7; border-left: 3px solid #f59e0b;
+    padding: 9px 11px; border-radius: 4px;
+    font-size: 12px; color: #78350f; margin: 8px 0;
+  }
+  .detail-content .info {
+    background: #dbeafe; border-left: 3px solid #2563eb;
+    padding: 9px 11px; border-radius: 4px;
+    font-size: 12px; color: #1e3a8a; margin: 8px 0;
+  }
+  .detail-content .v2 {
+    background: #f1f5f9; border-left: 3px solid #94a3b8;
+    padding: 9px 11px; border-radius: 4px;
+    font-size: 12px; color: #475569; margin: 8px 0;
+  }
+  .detail-content .v2::before { content: "v2 后做 · "; font-weight: 600; color: #64748b; }
+
+  .annot-wrap {
+    border-top: 1px solid #e2e8f0;
+    padding: 14px 22px;
+    background: #fafafa;
+  }
+  .annot-label {
+    font-size: 12px; color: #64748b; margin-bottom: 5px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .annot {
+    width: 100%; min-height: 80px;
+    background: white; color: #1e293b;
+    border: 1px solid #cbd5e1;
+    padding: 9px 11px; border-radius: 6px;
+    font-size: 13px; font-family: inherit;
+    resize: vertical; line-height: 1.5;
+  }
+  .annot:focus {
+    outline: none; border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .annot.has-content { border-color: #f59e0b; }
+
+  .toast {
+    position: fixed; bottom: 22px; right: 22px;
+    background: #d1fae5; color: #065f46;
+    padding: 10px 16px; border: 1px solid #10b981;
+    border-radius: 6px; font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    z-index: 200;
+    animation: slideIn 0.2s;
+  }
+  @keyframes slideIn {
+    from { transform: translateY(8px); opacity: 0; }
+    to   { transform: translateY(0); opacity: 1; }
+  }
+
+  #sync-indicator { font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>GameBot 架构流程图</h1>
+  <span class="ver-tag">v2 基础版</span>
+  <span class="stats">已批注 <strong id="stat-count">0</strong> 个节点</span>
+  <span id="sync-indicator"></span>
+  <div class="right">
+    <button class="primary" onclick="exportNotes()">导出批注</button>
+    <button onclick="resetNotes()">清空</button>
+  </div>
+</div>
+
+<div class="legend">
+  <span><i style="background:#fee2e2;border-color:#dc2626"></i> 关键 / 防封</span>
+  <span><i style="background:#fef3c7;border-color:#f59e0b"></i> 横切 / 防线</span>
+  <span><i style="background:#dbeafe;border-color:#2563eb"></i> Phase</span>
+  <span><i style="background:#d1fae5;border-color:#10b981"></i> 识别层 / Done</span>
+  <span><i style="background:#ede9fe;border-color:#8b5cf6"></i> 失败处理</span>
+  <span><i style="background:#f1f5f9;border-color:#94a3b8"></i> v2 后做</span>
+  <span style="margin-left:auto;color:#94a3b8">点节点查看详情 + 批注</span>
+</div>
+
+<div class="layout">
+
+  <div class="diagrams">
+
+    <!-- ════ 1. 主流程 ════ -->
+    <div class="diagram-section">
+      <h2><span class="num">1</span> 主流程 · 6 实例并发 phase 流水线</h2>
+      <div class="desc">每实例独立跑这个串行流程。横切系统在后台并行运行（VPN 监控 / 弹窗清理 / 闪退检测）。失败回退 v1 只做基础重试，state-aware 智能恢复 v2 后做。</div>
+      <div class="mermaid" id="diag-main">
+flowchart TD
+    Start(["6 实例并发启动<br/>runner_service"]):::done
+
+    subgraph CROSS["横切系统 · 后台并行"]
+        VPN["VPN Watchdog<br/>5s · 防封号"]:::critical
+        PW["PopupWatchdog<br/>2s · 系统弹窗"]:::cross
+        CR["进程闪退 Watchdog<br/>5s pidof"]:::cross
+    end
+
+    Start --> P0
+
+    P0["<b>P0 accelerator</b><br/>VPN + 4 信号校验<br/>1-8s"]:::phase
+    P1["<b>P1 launch_game</b><br/>2s 轮询 + 5 层识别<br/>5-30s"]:::phase
+    P2["<b>P2 dismiss_popups</b><br/>四元信号融合 + 5 层识别<br/>3-10s · 核心"]:::phase
+    Role{"role?"}:::role
+    P3a["<b>P3a team_create</b><br/>队长建队<br/>1.5-3s"]:::phase
+    P3b["<b>P3b team_join</b><br/>队员加入<br/>1-2s"]:::phase
+    P4["<b>P4 map_setup</b><br/>YOLO + OCR 兜底<br/>1-2s"]:::phase
+    Done(["Done<br/>实例就位"]):::done
+
+    P0 --> P1
+    P1 --> P2
+    P2 --> Role
+    Role -->|队长| P3a
+    Role -->|队员| P3b
+    P3a --> P4
+    P3b --> Done
+    P4 --> Done
+
+    Recovery{"基础失败重试<br/>state-aware 后做"}:::recovery
+    P0 -.失败.-> Recovery
+    P1 -.失败.-> Recovery
+    P2 -.失败.-> Recovery
+    P3a -.失败.-> Recovery
+    P3b -.失败.-> Recovery
+    Recovery -->|kill 重启| P0
+
+    classDef critical fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    classDef cross    fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#78350f
+    classDef phase    fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef recovery fill:#ede9fe,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95
+    classDef done     fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef role     fill:#f1f5f9,stroke:#64748b,stroke-width:2px,color:#334155
+
+    click VPN nodeClick
+    click PW nodeClick
+    click CR nodeClick
+    click P0 nodeClick
+    click P1 nodeClick
+    click P2 nodeClick
+    click Role nodeClick
+    click P3a nodeClick
+    click P3b nodeClick
+    click P4 nodeClick
+    click Recovery nodeClick
+    click Start nodeClick
+    click Done nodeClick
+      </div>
+    </div>
+
+    <!-- ════ 2. 5 层识别链 ════ -->
+    <div class="diagram-section">
+      <h2><span class="num">2</span> 5 层识别链 · Early-exit Chain</h2>
+      <div class="desc">画面进来从 Tier 0 开始, <b>谁高置信度命中谁直接用</b>, 后面 Tier 不跑。99% 流量只到 Tier 0/1, 平均 ~10ms。多源投票 v1 不做（仅冲突时上 Tier 1 兜底）。</div>
+      <div class="mermaid" id="diag-tier">
+flowchart LR
+    Frame(["输入画面"]):::done
+    Frame --> T0
+    T0["① 模板匹配<br/>5ms"]:::tier
+    T0 -->|conf > 0.85| Use(["✓ 用此结果<br/>tap"]):::done
+    T0 -->|低置信| T1
+    T1["② Memory<br/>5ms · phash 查"]:::tier
+    T1 -->|命中| Use
+    T1 -->|没命中| T2
+    T2["③ YOLO<br/>30ms"]:::tier
+    T2 -->|conf > 0.7| Use
+    T2 -->|低置信| T3
+    T3["④ OCR 局部<br/>30ms · YOLO bbox 内"]:::tier
+    T3 -->|关键字匹| Use
+    T3 -->|没匹| T4
+    T4["⑤ VLM 兜底<br/>500ms · 可禁"]:::tier
+    T4 -->|有答案| Use
+    T4 -->|没答案| Skip(["跳过本轮<br/>失败入待标注"]):::recovery
+
+    classDef tier     fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef done     fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef recovery fill:#ede9fe,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95
+
+    click T0 nodeClick
+    click T1 nodeClick
+    click T2 nodeClick
+    click T3 nodeClick
+    click T4 nodeClick
+      </div>
+    </div>
+
+    <!-- ════ 3. 4 道防线 ════ -->
+    <div class="diagram-section">
+      <h2><span class="num">3</span> 4 道防线 · 防误点 / 防失控</h2>
+      <div class="desc">前面识别再准也可能点错。每次 tap 都过这 4 道防线。预期对得上才算成功，对不上自动回退或重选目标。</div>
+      <div class="mermaid" id="diag-defense">
+flowchart TD
+    Decide(["决策: 准备 tap (x,y)"]):::phase
+    Decide --> D1
+    D1["<b>防线 1</b> · phash 验证<br/>tap 后 500ms 截图比对<br/>没变 → 标记此坐标'无效'"]:::defense
+    D1 --> D2
+    D2["<b>防线 2</b> · State Expectation<br/>预期效果对得上才算成功<br/>跳出大厅 → 立刻回退"]:::defense
+    D2 --> D3
+    D3["<b>防线 3</b> · Multi-evidence<br/>仅 Tier 0/1 冲突时投票<br/>三票一致才点"]:::defense
+    D3 --> D4
+    D4["<b>防线 4</b> · Decision Theater<br/>失败入待标注队列<br/>人工纠错 + 模型迭代"]:::defense
+    D4 --> Out(["✓ 安全 tap 完成"]):::done
+
+    classDef defense fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#78350f
+    classDef phase   fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef done    fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+
+    click D1 nodeClick
+    click D2 nodeClick
+    click D3 nodeClick
+    click D4 nodeClick
+      </div>
+    </div>
+
+    <!-- ════ 4. 未来扩展 ════ -->
+    <div class="diagram-section">
+      <h2><span class="num">4</span> v2 后做 · 高级 Memory + 服务端</h2>
+      <div class="desc">v1 基础版只做"phash 复读机"Memory。下面这些等基础架构稳定后再做。</div>
+      <div class="mermaid" id="diag-future">
+flowchart TD
+    Now["v1 基础<br/>L1 Frame Memory<br/>phash + 本地 SQLite"]:::tier
+    Now --> F1
+    F1["v2-① L2 Situation Memory<br/>YOLO embedding 找相似情况<br/>真智能在这层"]:::future
+    F1 --> F2
+    F2["v2-② 置信度账本<br/>失败的记忆自动废弃"]:::future
+    F2 --> F3
+    F3["v2-③ 服务端 Memory<br/>全客户端共享学习"]:::future
+    F3 --> F4
+    F4["v2-④ L3 Policy Memory<br/>从大量数据提炼通用规则"]:::future
+    F4 --> F5
+    F5["v2-⑤ State-aware Recovery<br/>失败按当前状态智能选恢复路径"]:::future
+
+    classDef tier   fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef future fill:#f1f5f9,stroke:#94a3b8,stroke-width:1px,stroke-dasharray:4 3,color:#64748b
+
+    click Now nodeClick
+    click F1 nodeClick
+    click F2 nodeClick
+    click F3 nodeClick
+    click F4 nodeClick
+    click F5 nodeClick
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 右: 详情 + 批注 -->
+  <div class="detail-panel">
+    <div id="detail-empty" class="detail-empty">
+      <div class="icon">→</div>
+      <div class="hint">
+        点左侧任意节点<br>查看详细说明 + 写批注<br><br>
+        <span style="color:#cbd5e1">批注自动保存到本机<br>+ 同步到 docs/annotations.json<br>Claude 可直接读</span>
+      </div>
+    </div>
+    <div id="detail-content" class="detail-content" style="display:none;"></div>
+    <div id="annot-wrap" class="annot-wrap" style="display:none;">
+      <div class="annot-label">
+        <span>对这个节点的批注</span>
+        <span class="count"></span>
+      </div>
+      <textarea class="annot" id="annot-area" placeholder="改进建议 / 疑问 / 不同意的地方..."></textarea>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const NODES = {
+  Start: {
+    title: '6 实例并发启动', badge: 'START', color: 'done',
+    meta: 'runner_service.start_all()',
+    body: `<h4>做什么</h4>
+    <ul>
+      <li>读取每实例配置 (serial / role / group)</li>
+      <li>每实例创建 asyncio.Task 跑 SingleInstanceRunner</li>
+      <li>启动 3 个后台守护任务 (VPN / PopupWatchdog / 进程闪退)</li>
+      <li>同 group 队长 + 队员通过 asyncio.Event 同步</li>
+    </ul>`
+  },
+  Done: {
+    title: 'Done · 实例就位', badge: 'DONE', color: 'done',
+    body: `<p>实例进入 done 状态, 可以接受外部业务调度。</p>
+    <p><b>6 实例从启动到全员 done 目标:</b></p>
+    <p style="font-size:18px;color:#16a34a;font-weight:700;">20-35 秒</p>
+    <p style="color:#64748b">vs 当前 60-120 秒, 提速 3-4×</p>`
+  },
+
+  // 横切
+  VPN: {
+    title: 'VPN Watchdog', badge: 'CRITICAL · 防封号', color: 'critical',
+    meta: '5s 心跳 · 后台 task',
+    body: `<h4>做什么</h4>
+    <ul>
+      <li>4 信号校验: FightMaster 进程 + VpnService + tun0 UP + 默认路由</li>
+      <li>每 5 秒一次, 纯 adb shell 命令</li>
+      <li>掉线立刻 force-stop 游戏 → 重连 → 通知 runner 失败</li>
+    </ul>
+    <div class="warn">封号防线必须独立, 任何 phase 期间触发</div>`
+  },
+  PW: {
+    title: 'PopupWatchdog', badge: 'CROSS', color: 'cross',
+    meta: '2s 心跳 · 后台 task',
+    body: `<h4>做什么</h4>
+    <ul>
+      <li>后台每 2 秒截图 (DXHook 共享内存, &lt;5ms)</li>
+      <li>用 YOLO 找意外冒出的弹窗</li>
+      <li>根据 phase 状态决定是否处理:
+        <ul>
+          <li>dismiss_popups → 跳过 (主流程在做)</li>
+          <li>team_create / map_setup → 只处理"系统级"弹窗</li>
+          <li>其他 → 全管</li>
+        </ul>
+      </li>
+    </ul>
+    <div class="info">替代旧的 GuardedADB. 旧设计绑在 screenshot() 内联, 6 实例叠加性能差。新设计后台异步, 主流程零开销</div>`
+  },
+  CR: {
+    title: '进程闪退 Watchdog', badge: 'CROSS', color: 'cross',
+    meta: '5s pidof 检查',
+    body: `<h4>背景</h4>
+    <p>原本想用 Activity Monitor (logcat / dumpsys) 检测游戏状态切换。<b>实测发现 PUBG 是 UE4, 全程一个 GameActivity</b>, dumpsys 看不到大厅 vs 加载页区别。</p>
+    <h4>替代方案</h4>
+    <ul>
+      <li>每 5 秒 <code>pidof com.tencent.tmgp.pubgmhd</code></li>
+      <li>pid 消失 → 游戏闪退 → 通知所有 phase 失败 → 走 Recovery</li>
+      <li>pid 存在但卡死 (画面长时间 phash 不变) → 视为软挂 → 重启游戏</li>
+    </ul>
+    <div class="info">能区分"游戏在跑 vs 闪退", 但不能区分"在大厅 vs 加载页". 后者交给 phase 内的多层识别处理</div>`
+  },
+
+  // 5 层识别
+  T0: {
+    title: 'Tier 0 · 模板匹配', badge: 'TIER 0', color: 'tier',
+    meta: '5ms · 已知稳定 UI',
+    body: `<h4>用途</h4>
+    <ul>
+      <li>"开始游戏"按钮 (lobby_start_btn)</li>
+      <li>组队按钮、确定按钮等位置稳定的 UI</li>
+      <li>模式卡片 (mode_card)</li>
+    </ul>
+    <h4>命中条件</h4>
+    <p>cv2.matchTemplate normalized score > 0.85 → 直接用</p>
+    <h4>不命中怎么办</h4>
+    <p>分数 0.6-0.85 视为低置信, 进 Tier 1; &lt; 0.6 直接跳</p>`
+  },
+  T1: {
+    title: 'Tier 1 · Memory', badge: 'TIER 1', color: 'tier',
+    meta: '5ms · phash 查询',
+    body: `<h4>v1 基础版</h4>
+    <ul>
+      <li>本地 SQLite 存 (frame_phash, action 坐标, 是否成功)</li>
+      <li>phash 距离 &lt; 5 即算"见过这画面"</li>
+      <li>命中 → 直接复用历史成功 action</li>
+    </ul>
+    <h4>v1 缺陷 (你已指出)</h4>
+    <p>纯复读机, 画面差一点就匹不中, 学不到东西。</p>
+    <div class="v2">L2 Situation Memory (embedding 找相似情况) · L3 Policy Memory (规则提炼) · 服务端共享</div>`
+  },
+  T2: {
+    title: 'Tier 2 · YOLO', badge: 'TIER 2', color: 'tier',
+    meta: '30ms · 视觉检测',
+    body: `<h4>类</h4>
+    <ul>
+      <li>close_x · 关闭按钮</li>
+      <li>action_btn · 操作按钮</li>
+      <li>mode_card · 模式卡片 (P4 用)</li>
+      <li>map_card · 地图卡片 (P4 用)</li>
+      <li>checkbox · 勾选框 (P4 用)</li>
+    </ul>
+    <h4>命中条件</h4>
+    <p>conf > 0.7 → 用</p>
+    <h4>抗 UI 变化</h4>
+    <p>YOLO 学的是结构特征 (圆角矩形 / X 形状), 颜色字体微变不影响。结构变了 → 失败入待标注队列 → 重训。</p>`
+  },
+  T3: {
+    title: 'Tier 3 · OCR 局部', badge: 'TIER 3', color: 'tier',
+    meta: '30ms · YOLO bbox 内',
+    body: `<h4>关键</h4>
+    <p>OCR <b>不跑全屏</b>, 只在 YOLO 给的 bbox 内跑 (30ms vs 全屏 200ms)</p>
+    <h4>用途</h4>
+    <ul>
+      <li>读 action_btn 文字, 排除 nav 词 (前往 / 参加 / 进入)</li>
+      <li>关键字列表在 popup_rules.json, 热加载</li>
+      <li>YOLO 没识别到时, OCR 兜底找文字按钮</li>
+    </ul>`
+  },
+  T4: {
+    title: 'Tier 4 · VLM 兜底', badge: 'TIER 4 · 可禁', color: 'tier',
+    meta: '500ms · 1% 流量',
+    body: `<h4>v1 不做</h4>
+    <p>你已经说"先做基础"。v1 跳过 VLM, 4 层够 92% 准确率。</p>
+    <h4>v2 加</h4>
+    <ul>
+      <li>用 OmniParser (微软专做 GUI 元素识别, 100MB) 替代 Florence-2</li>
+      <li>启动时检测 RAM/CPU 不够 → 自动禁用</li>
+      <li>给完全没见过的新 UI 兜底</li>
+      <li>给的答案进 Memory → 下次免费</li>
+    </ul>`
+  },
+
+  // Phases
+  P0: {
+    title: 'P0 · accelerator', badge: 'PHASE', color: 'phase',
+    meta: '目标 1-8 秒',
+    body: `<h4>做什么</h4>
+    <ul>
+      <li>启动 FightMaster VPN, 4 信号联合校验</li>
+      <li>快路径: 广播 START (1s)</li>
+      <li>慢路径: UI 启动 (拉起界面 + OCR 找连接 + 处理 Android VPN 权限弹窗)</li>
+    </ul>
+    <h4>失败回退 (v1)</h4>
+    <ul>
+      <li>广播失败 → UI 重试 3 次</li>
+      <li>UI 也失败 → 放弃实例 (VPN 是封号防线, 不可跳过)</li>
+    </ul>`
+  },
+  P1: {
+    title: 'P1 · launch_game', badge: 'PHASE', color: 'phase',
+    meta: '目标 5-30 秒',
+    body: `<h4>做什么</h4>
+    <ul>
+      <li>启动前二次校验 VPN (防 P0 后掉线)</li>
+      <li><code>am start</code> 启动游戏</li>
+      <li>每 2 秒一次循环, 最多 60 秒:
+        <ul>
+          <li>截图 (DXHook 50ms)</li>
+          <li>走 5 层识别链找 lobby_start_btn 出现</li>
+        </ul>
+      </li>
+    </ul>
+    <h4>为啥不用 Activity Monitor</h4>
+    <p>实测 PUBG 全程 com.epicgames.ue4.GameActivity, 状态不变。改用截图 + 多层识别。单轮开销 ~80ms, 比当前 250ms 快 3×。</p>
+    <h4>失败回退 (v1)</h4>
+    <ul>
+      <li>am start 命令失败 → 重试 1 次</li>
+      <li>60s 进不了大厅 → kill + 重启 accelerator</li>
+      <li>进程闪退 watchdog 触发 → 走 Recovery</li>
+    </ul>`
+  },
+  P2: {
+    title: 'P2 · dismiss_popups', badge: 'PHASE · 核心', color: 'phase',
+    meta: '目标 3-10 秒',
+    body: `<h4>四元信号融合大厅判定 (修当前最大 bug)</h4>
+    <p style="color:#b45309"><b>必须全部满足才算大厅, 避免半透明弹窗误判:</b></p>
+    <ul>
+      <li>① lobby_start_btn 模板 conf > 0.85 (必要)</li>
+      <li>② YOLO 检测: close_x = 0 个 AND action_btn = 0 个</li>
+      <li>③ 4 角无半透明遮罩 (overlay 检测)</li>
+      <li>④ 画面持续 1 秒稳定 (5 帧 phash 距离 &lt; 3)</li>
+    </ul>
+    <h4>主循环每轮</h4>
+    <ul>
+      <li>截图 → 顺手 collect 训练数据</li>
+      <li>四元判大厅 → 命中 → 完成</li>
+      <li>5 层识别链找目标 → tap</li>
+      <li>tap 后过 4 道防线验证 (phash 验证 + State Expectation 等)</li>
+    </ul>
+    <h4>失败回退 (v1)</h4>
+    <ul>
+      <li>25 轮 timeout → kill + 从 accelerator 重启</li>
+      <li>同坐标连点 3 次画面不变 → 黑名单该坐标</li>
+    </ul>`
+  },
+  Role: {
+    title: 'role 决策', badge: '分支', color: 'phase',
+    body: `<p>实例配置时指定 role。队长跑 P3a + P4, 队员跑 P3b。</p>
+    <p>group 分组: 1 队长 + 2 队员。队员通过 asyncio.Event 等队长生成 game scheme</p>`
+  },
+  P3a: {
+    title: 'P3a · team_create', badge: 'PHASE · 队长', color: 'phase',
+    meta: '目标 1.5-3 秒',
+    body: `<h4>步骤 (5 层识别加速)</h4>
+    <ul>
+      <li>1. Tier 0 模板找"组队"按钮 5ms</li>
+      <li>2. 流水线并行: tap 后立刻轮询截图找下一步元素</li>
+      <li>3. Tier 0 模板找"组队码 tab" / "二维码组队"</li>
+      <li>4. pyzbar 解 QR (5-10× 比 cv2 快)</li>
+      <li>5. HTTP 抓 game scheme URL</li>
+      <li>6. 关闭面板</li>
+    </ul>
+    <h4>失败回退 (v1)</h4>
+    <ul>
+      <li>BACK 键不能用 (会弹"是否退出游戏" — 你已指出)</li>
+      <li>关面板只用 X 按钮或点屏幕外侧空白区</li>
+      <li>每步重试 2-3 次, 超出 → kill 重启</li>
+    </ul>`
+  },
+  P3b: {
+    title: 'P3b · team_join', badge: 'PHASE · 队员', color: 'phase',
+    meta: '目标 1-2 秒',
+    body: `<h4>关键: 队长队员并行</h4>
+    <ul>
+      <li>队长 + 队员同时跑 P0-P2, 全员到大厅</li>
+      <li>队长 P3a (3s), 期间队员 await Event</li>
+      <li>队长 set Event → 队员立刻 <code>am start -d &lt;scheme&gt;</code></li>
+      <li>验证: 模板检测 lobby_start_btn 不再命中 + Tier 2 YOLO 检测队伍房元素</li>
+    </ul>
+    <h4>失败回退 (v1)</h4>
+    <ul>
+      <li>am start 命令错 → 重试 1 次</li>
+      <li>5s 没切到队伍房 → 通知队长重建</li>
+    </ul>`
+  },
+  P4: {
+    title: 'P4 · map_setup', badge: 'PHASE', color: 'phase',
+    meta: '目标 1-2 秒',
+    body: `<h4>新方案: YOLO 主 + OCR 兜底</h4>
+    <p>不是"YOLO 替代 OCR", 是 5 层链一起用:</p>
+    <ul>
+      <li>Tier 0 模板找 lobby_start_btn 下方 60px (打开面板)</li>
+      <li>Tier 2 YOLO 推理找 mode_card / map_card / checkbox</li>
+      <li>Tier 2 没找到 → Tier 3 OCR 兜底文字匹</li>
+      <li>都没 → 跳过 (P4 不致命)</li>
+    </ul>
+    <h4>新增 YOLO 类 (你下次标注)</h4>
+    <ul>
+      <li>mode_card_selected / mode_card_unselected (区分模式选中态)</li>
+      <li>map_card</li>
+      <li>checkbox_checked / checkbox_unchecked</li>
+    </ul>
+    <h4>失败回退 (v1)</h4>
+    <ul>
+      <li>面板没打开 → 重点开 2 次</li>
+      <li>找不到目标地图 → 跳过 (不致命, 进 Done)</li>
+    </ul>`
+  },
+  Recovery: {
+    title: '基础失败重试 (v1)', badge: 'RECOVERY', color: 'recovery',
+    meta: 'state-aware 后做',
+    body: `<h4>v1 简化策略</h4>
+    <p>同 phase 重试 3 次失败 → kill 游戏 + 从 accelerator 重启</p>
+    <p>重启游戏 5 次失败 → 放弃该实例</p>
+    <p>VPN watchdog 触发 → 立刻打断当前 phase 进恢复</p>
+    <div class="v2">智能 state-aware recovery: 失败时先读当前画面状态 (大厅干净 / 大厅+弹窗 / 登录页 / 闪退) → 选最小代价路径恢复, 不一律 kill</div>`
+  },
+
+  // 防线
+  D1: {
+    title: '防线 1 · phash 验证', badge: 'DEFENSE', color: 'defense',
+    meta: '每次 tap 必做',
+    body: `<h4>逻辑</h4>
+    <ul>
+      <li>tap 前截图 → phash_before</li>
+      <li>tap (x, y)</li>
+      <li>等 500ms</li>
+      <li>截图 → phash_after</li>
+      <li>距离 > 5 → 画面变了, 大概率点中</li>
+      <li>距离 &lt; 3 → 没变, 点错或目标无效</li>
+    </ul>
+    <h4>处理</h4>
+    <p>同坐标连点 3 次画面不变 → 标记该坐标"无效", 本会话不再点 → 切下一目标 (其他 close_x / action_btn) → 全部目标都试过 → 升级下一 Tier</p>`
+  },
+  D2: {
+    title: '防线 2 · State Expectation', badge: 'DEFENSE', color: 'defense',
+    body: `<h4>每个 action 注册预期效果</h4>
+    <div class="keyval">
+      <span class="k">tap close_x</span><span>预期: 弹窗消失 (YOLO close_x 数 -1)</span>
+      <span class="k">tap "收下"</span><span>预期: 弹窗消失 OR 切下一弹窗</span>
+      <span class="k">tap "前往"</span><span style="color:#dc2626">预期: 跳出大厅 ← 不要发生!</span>
+      <span class="k">tap mode_card</span><span>预期: 进入 selected 态</span>
+    </div>
+    <h4>跳出大厅怎么办</h4>
+    <p>检测到画面变 lobby → 不是大厅 (不是 P4 想要的状态) → 立刻触发回退: 走 dismiss_popups 流程清回大厅</p>`
+  },
+  D3: {
+    title: '防线 3 · Multi-evidence', badge: 'DEFENSE', color: 'defense',
+    meta: '仅冲突时跑',
+    body: `<h4>不是每次都跑</h4>
+    <p>Early-exit chain 99% 流量在 Tier 0 / 1 就走了, 不需要投票。</p>
+    <h4>触发条件</h4>
+    <p>Tier 0 给位置 A, Tier 1/2 给位置 B, 距离 > 50px → 冲突</p>
+    <h4>投票</h4>
+    <ul>
+      <li>3 票一致 (位置差 &lt; 20px) → 大胆点</li>
+      <li>2 票一致 1 票冲突 → 谨慎点 (标中等风险)</li>
+      <li>分散 → 不点 → 升级 OCR / VLM</li>
+    </ul>
+    <h4>触发率</h4>
+    <p>实测 &lt; 5% 流量, 不影响整体性能</p>`
+  },
+  D4: {
+    title: '防线 4 · Decision Theater', badge: 'DEFENSE', color: 'defense',
+    body: `<h4>每次决策全记录</h4>
+    <p>调试 web 上每个实例卡片实时显示:</p>
+    <ul>
+      <li>当前帧 + bbox 叠加 + 上次 tap 位置</li>
+      <li>哪一 Tier 决定的 + 置信度</li>
+      <li>Memory 命中情况</li>
+      <li>tap 后 phash 变化 (验证结果)</li>
+    </ul>
+    <h4>失败样本闭环</h4>
+    <ul>
+      <li>失败 (phash 没变 / 跳错地方) → 自动入"待标注队列"</li>
+      <li>你/我在调试 web 一键"标记错误" → "正确点这"</li>
+      <li>入 Memory: 下次同 phash 直接命中正确坐标</li>
+      <li>入训练队列: 攒 N 张失败样本就重训 YOLO</li>
+    </ul>
+    <div class="info">这是 Tesla 式车队学习的核心闭环</div>`
+  },
+
+  // v2 future
+  Now: {
+    title: 'v1 基础 · L1 Frame Memory', badge: 'TIER 1', color: 'tier',
+    body: `<p>v1 只做最简单的 phash + SQLite 复读机版本。够用但不智能。</p>
+    <p>下面这些 v2 后做的 Memory 演进是真正"自主学习"的部分。</p>`
+  },
+  F1: {
+    title: 'v2-① L2 Situation Memory', badge: 'v2', color: 'future',
+    body: `<h4>真智能在这层</h4>
+    <ul>
+      <li>用 YOLO backbone 倒数第二层做 embedding (0 额外开销)</li>
+      <li>新画面 embedding 找历史最相似 N 个</li>
+      <li>聚合 N 个的成功 action 投票决策</li>
+      <li>抗 UI 微变 (颜色 / 字体 / 节日皮肤)</li>
+    </ul>`
+  },
+  F2: {
+    title: 'v2-② 置信度账本', badge: 'v2', color: 'future',
+    body: `<h4>每条 Memory 记录:</h4>
+    <ul>
+      <li>成功次数 / 失败次数 / 最近成功率</li>
+      <li>跨客户端验证 (几台机器都成功过)</li>
+      <li>最后成功时间 → 久没用衰减</li>
+    </ul>
+    <h4>自动学习</h4>
+    <ul>
+      <li>连续 5 次失败的记忆 → 自动标记失效 → 不再被检索</li>
+      <li>这是真正"忘记错误经验"</li>
+    </ul>`
+  },
+  F3: {
+    title: 'v2-③ 服务端 Memory', badge: 'v2 · 卖点', color: 'future',
+    body: `<h4>特斯拉车队学习</h4>
+    <ul>
+      <li>所有客户端的 (phash, 决策, 是否成功) 上报到中央 server</li>
+      <li>新发现 → 推送给所有客户端</li>
+      <li>1 个用户失败 1 次 → 几秒后所有用户都会处理新 UI</li>
+    </ul>
+    <h4>实施</h4>
+    <ul>
+      <li>HTTPS 上报 + WebSocket 推送增量</li>
+      <li>每条 &lt; 100 字节 (phash + 坐标 + 成功标志)</li>
+      <li>失败截图才上传 (~50KB 压缩)</li>
+    </ul>`
+  },
+  F4: {
+    title: 'v2-④ L3 Policy Memory', badge: 'v2', color: 'future',
+    body: `<h4>从数据中提炼通用规则</h4>
+    <p>后台定时任务扫描所有 L1+L2 数据, 自动归纳:</p>
+    <ul>
+      <li>"close_x 在右上角 → 99% 安全" → 提炼规则</li>
+      <li>"含'前往'文字 → 90% 跳出大厅" → 提炼规则</li>
+    </ul>
+    <p>规则用 if-then 表达, 决策时直接套用 &lt;1ms。</p>
+    <p>规则可人工审核, 也可手写。</p>`
+  },
+  F5: {
+    title: 'v2-⑤ State-aware Recovery', badge: 'v2', color: 'future',
+    body: `<h4>智能恢复</h4>
+    <p>失败时先读当前实际状态再选恢复路径:</p>
+    <div class="keyval">
+      <span class="k">大厅干净</span><span>直接重做本 phase, 不 kill</span>
+      <span class="k">大厅+弹窗</span><span>跳到 dismiss_popups 清弹窗</span>
+      <span class="k">登录页</span><span>跳到 wait_login</span>
+      <span class="k">闪退</span><span>kill + 从 accelerator 重启</span>
+      <span class="k">网络错</span><span>等 30s 再判</span>
+    </div>
+    <p>vs v1 一律 kill 重启, v2 大幅减少恢复耗时</p>`
+  },
+};
+
+// ─── Mermaid 初始化 ───
+mermaid.initialize({
+  startOnLoad: true,
+  securityLevel: 'loose',
+  theme: 'base',
+  themeVariables: {
+    fontFamily: '-apple-system, "PingFang SC", sans-serif',
+    fontSize: '13px',
+    primaryColor: '#dbeafe',
+    primaryTextColor: '#1e3a8a',
+    primaryBorderColor: '#2563eb',
+    lineColor: '#94a3b8',
+  },
+  flowchart: {
+    curve: 'basis', padding: 12,
+    nodeSpacing: 40, rankSpacing: 50,
+    htmlLabels: true,
+  },
+});
+
+window.nodeClick = function(nodeId) { showDetail(nodeId); };
+
+// 兜底: 渲染完后手动绑事件
+function bindNodeClicksFallback() {
+  const svgs = document.querySelectorAll('.diagrams svg');
+  if (svgs.length === 0) {
+    setTimeout(bindNodeClicksFallback, 200);
+    return;
+  }
+  svgs.forEach(svg => {
+    svg.querySelectorAll('g.node').forEach(g => {
+      const m = (g.id || '').match(/^flowchart-([A-Za-z0-9_]+)-\d+$/);
+      if (!m) return;
+      const nodeId = m[1];
+      if (!NODES[nodeId]) return;
+      g.style.cursor = 'pointer';
+      g.addEventListener('click', e => {
+        e.stopPropagation();
+        showDetail(nodeId);
+      });
+    });
+  });
+}
+setTimeout(bindNodeClicksFallback, 800);
+
+// ─── 详情面板 ───
+const STORAGE_PREFIX = 'gamebot_arch_v2_';
+let currentNode = null;
+
+function showDetail(id) {
+  const n = NODES[id];
+  if (!n) return;
+  currentNode = id;
+  document.getElementById('detail-empty').style.display = 'none';
+  const c = document.getElementById('detail-content');
+  c.style.display = 'block';
+  c.innerHTML = `
+    <div><span class="badge ${n.color}">${n.badge}</span></div>
+    <h2>${n.title}</h2>
+    ${n.meta ? `<div class="meta">${n.meta}</div>` : ''}
+    ${n.body}
+  `;
+  document.getElementById('annot-wrap').style.display = 'block';
+  const ta = document.getElementById('annot-area');
+  ta.value = localStorage.getItem(STORAGE_PREFIX + id) || '';
+  updateAnnotState();
+  ta.oninput = () => {
+    localStorage.setItem(STORAGE_PREFIX + currentNode, ta.value);
+    updateAnnotState();
+    updateStatCount();
+    scheduleServerSync();
+  };
+  ta.focus();
+}
+
+function updateAnnotState() {
+  const ta = document.getElementById('annot-area');
+  const has = ta.value.trim().length > 0;
+  ta.classList.toggle('has-content', has);
+  const lab = document.querySelector('.annot-label .count');
+  if (lab) lab.textContent = has ? `${ta.value.length} 字` : '';
+}
+
+function updateStatCount() {
+  let c = 0;
+  Object.keys(NODES).forEach(id => {
+    if ((localStorage.getItem(STORAGE_PREFIX + id) || '').trim().length > 0) c++;
+  });
+  document.getElementById('stat-count').textContent = c;
+}
+
+// ─── 服务端同步 ───
+let saveTimer = null;
+function scheduleServerSync() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(syncToServer, 400);
+}
+function syncToServer() {
+  const all = {};
+  Object.keys(NODES).forEach(id => {
+    const v = (localStorage.getItem(STORAGE_PREFIX + id) || '').trim();
+    if (v) all[id] = { title: NODES[id].title, badge: NODES[id].badge, text: v };
+  });
+  fetch('/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(all),
+  }).then(r => {
+    if (r.ok) {
+      const ind = document.getElementById('sync-indicator');
+      ind.textContent = '✓ 已自动保存';
+      ind.style.color = '#10b981';
+      clearTimeout(ind._t);
+      ind._t = setTimeout(() => { ind.textContent = ''; }, 1500);
+    }
+  }).catch(() => {
+    const ind = document.getElementById('sync-indicator');
+    ind.textContent = '⚠ 服务器没跑 (仅本地)';
+    ind.style.color = '#f59e0b';
+  });
+}
+
+async function loadFromServer() {
+  try {
+    const r = await fetch('/api/annotations');
+    if (!r.ok) return;
+    const obj = await r.json();
+    Object.keys(obj).forEach(id => {
+      const text = obj[id]?.text;
+      if (text && !localStorage.getItem(STORAGE_PREFIX + id)) {
+        localStorage.setItem(STORAGE_PREFIX + id, text);
+      }
+    });
+    updateStatCount();
+  } catch (e) {}
+}
+
+function exportNotes() {
+  const sections = [];
+  Object.keys(NODES).forEach(id => {
+    const txt = (localStorage.getItem(STORAGE_PREFIX + id) || '').trim();
+    if (txt) sections.push(`### ${NODES[id].title}\n${txt}`);
+  });
+  if (sections.length === 0) { showToast('还没批注任何节点', 'warn'); return; }
+  const out = `# GameBot v2 架构批注 (${new Date().toLocaleString()})\n\n` + sections.join('\n\n---\n\n');
+  navigator.clipboard.writeText(out).then(() => {
+    showToast(`已复制 ${sections.length} 条批注`);
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = out;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast(`已复制 ${sections.length} 条 (fallback)`);
+  });
+}
+
+function resetNotes() {
+  if (!confirm('清空所有批注?')) return;
+  Object.keys(NODES).forEach(id => localStorage.removeItem(STORAGE_PREFIX + id));
+  if (currentNode) {
+    document.getElementById('annot-area').value = '';
+    updateAnnotState();
+  }
+  updateStatCount();
+  showToast('已清空');
+}
+
+function showToast(msg, kind) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  if (kind === 'warn') {
+    el.style.background = '#fef3c7';
+    el.style.color = '#78350f';
+    el.style.borderColor = '#f59e0b';
+  }
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2400);
+}
+
+loadFromServer().then(updateStatCount);
+</script>
+
+</body>
+</html>

@@ -1060,7 +1060,9 @@ HTML_PAGE = r"""<!doctype html>
   <h1>GameBot Debug</h1>
   <span class="meta" id="topbar-meta">session: -</span>
   <div class="right">
-    <button onclick="window.open('/decisions','_blank')" style="background:#3b6fd1;color:#fff;border-color:#4a82e8;">Decision Theater</button>
+    <a href="/decisions" target="_blank" style="text-decoration:none;display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#3b6fd1,#5a8aff);color:#fff;border:1px solid #4a82e8;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:500;box-shadow:0 2px 6px rgba(74,130,232,0.35);">
+      <span style="font-size:14px;">◧</span>决策剧场
+    </a>
     <button onclick="window.open('/labeler','_blank')">YOLO 标注</button>
     <button onclick="openRecords()">历史记录 <span id="rec-count">(0)</span></button>
     <button onclick="openKeywords()">添加关键字</button>
@@ -2242,257 +2244,432 @@ DECISIONS_HTML = r"""<!doctype html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>决策剧场 · GameBot 识别决策回放</title>
+<title>决策剧场 · GameBot</title>
 <style>
-  * { box-sizing: border-box; }
-  body { margin:0; padding:0; background:#0f1115; color:#e3e6eb;
-         font-family: -apple-system, "PingFang SC", sans-serif; font-size:13px; }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; }
+  body {
+    background:#f4f6f9; color:#1a2233;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", sans-serif; font-size:13px;
+    -webkit-font-smoothing: antialiased;
+  }
 
+  /* ─── 顶栏 ─── */
   .topbar {
-    position: sticky; top:0; z-index:20;
-    background:#161a21; border-bottom:1px solid #252a33;
-    padding:10px 18px; display:flex; align-items:center; gap:14px;
+    height: 52px; background:#fff; border-bottom:1px solid #e3e6ed;
+    padding: 0 16px; display:flex; align-items:center; gap:14px;
+    position: sticky; top: 0; z-index: 30;
   }
-  .topbar h1 { margin:0; font-size:17px; color:#6fa8ff; font-weight:700; }
-  .topbar .meta { color:#8b95a5; font-size:12px; }
-  .topbar input, .topbar button {
-    background:#2a3140; color:#e3e6eb; border:1px solid #3a4252;
-    padding:6px 12px; border-radius:5px; font-size:12px;
+  .topbar .back {
+    color:#5b6573; text-decoration:none; font-size:13px;
+    padding:6px 10px; border-radius:6px;
   }
-  .topbar button { cursor:pointer; }
-  .topbar button:hover { background:#3a4252; }
-  .topbar .right { margin-left:auto; display:flex; gap:8px; align-items:center; }
-  .pulse { width:9px; height:9px; border-radius:50%; background:#4ade80;
+  .topbar .back:hover { background:#eef0f4; color:#1a2233; }
+  .topbar h1 {
+    margin:0; font-size:15px; font-weight:600; color:#1a2233;
+    border-left:1px solid #e3e6ed; padding-left:14px;
+  }
+  .topbar .status {
+    display:flex; align-items:center; gap:7px; color:#5b6573; font-size:12px;
+    background:#f4f6f9; padding:5px 10px; border-radius:999px;
+  }
+  .pulse { width:8px; height:8px; border-radius:50%; background:#16a34a; flex-shrink:0;
            animation: pulse 1.4s infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .pulse.off { background:#94a3b8; animation:none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .topbar .ctrls { margin-left:auto; display:flex; align-items:center; gap:8px; }
 
-  .help-bar {
-    background:#1a1f28; border-bottom:1px solid #252a33; padding:8px 18px;
-    font-size:11px; color:#8b95a5; display:flex; gap:16px; flex-wrap:wrap;
+  /* ─── 自定义下拉 ─── */
+  .session-pill {
+    display:inline-flex; align-items:center; gap:8px;
+    height:30px; padding: 0 10px 0 12px;
+    background:#fff; border:1px solid #d6dbe3; border-radius:8px;
+    cursor:pointer; font-size:12px; color:#1a2233;
+    transition: all 0.12s;
   }
-  .help-bar b { color:#aab2bf; }
+  .session-pill:hover { border-color:#2563eb; box-shadow:0 0 0 3px #2563eb20; }
+  .session-pill.active { border-color:#2563eb; background:#eff5ff; }
+  .session-pill .lab { color:#8b95a5; font-size:11px; }
+  .session-pill .val { font-weight:500; max-width:200px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .session-pill .caret { color:#8b95a5; font-size:10px; }
 
-  .feed { padding: 14px 18px; max-width: 1400px; margin: 0 auto; }
-
-  .group {
-    background:#161a21; border:1px solid #252a33; border-radius:8px;
-    margin-bottom: 14px; overflow:hidden;
-  }
-  .group-head {
-    padding: 10px 14px; background:#1f2530;
-    display:flex; align-items:center; gap:10px; cursor:pointer;
-    user-select:none; border-bottom:1px solid #252a33;
-  }
-  .group-head:hover { background:#232a37; }
-  .group-head .toggle { color:#6e7685; font-size:11px; transition:transform 0.18s; }
-  .group.open .toggle { transform: rotate(90deg); }
-  .group-head .name { font-weight:600; color:#6fa8ff; font-size:14px; }
-  .group-head .summary { color:#8b95a5; font-size:11px; margin-left: auto; }
-  .group-body { display:none; }
-  .group.open .group-body { display:block; }
-
-  .card {
-    border-bottom: 1px solid #1f2530;
-    padding: 10px 14px;
-  }
-  .card:last-child { border-bottom: none; }
-  .card-head {
-    display:flex; align-items:center; gap:10px; cursor:pointer;
-    user-select:none;
-  }
-  .card-head .toggle { color:#6e7685; font-size:10px; transition:transform 0.18s; }
-  .card.open .card-head .toggle { transform: rotate(90deg); }
-  .card-head .time { font-family:monospace; color:#6fa8ff; font-size:11px; min-width:90px; }
-  .card-head .badge {
-    font-size:10px; padding:2px 8px; border-radius:3px; font-weight:500;
-  }
-  .badge.lobby_done { background:#1e4034; color:#4ade80; }
-  .badge.lobby_pending { background:#1e3a44; color:#5eead4; }
-  .badge.tapped { background:#1f3550; color:#6fa8ff; }
-  .badge.no_target { background:#3d2f1a; color:#fbbf24; }
-  .badge.loop_blocked { background:#3d1d1d; color:#ef4444; }
-  .badge.unknown { background:#252a33; color:#8b95a5; }
-  .card-head .summary { color:#aab2bf; font-size:12px; flex: 1; }
-  .card-head .r-num { color:#6e7685; font-size:11px; font-family:monospace; min-width:36px; }
-  .card-head .story-icon {
-    width:18px; height:18px; border-radius:50%;
-    display:inline-flex; align-items:center; justify-content:center;
-    font-size:11px; font-weight:bold; flex-shrink:0;
-  }
-  .card-head .story-icon.ok { background:#1e4034; color:#4ade80; }
-  .card-head .story-icon.fail { background:#3d1d1d; color:#ef4444; }
-  .card-head .story-icon.warn { background:#3d2f1a; color:#fbbf24; }
-  .card-head .story-icon.neutral { background:#252a33; color:#8b95a5; }
-  .card-head .story { color:#e3e6eb; font-size:13px; flex:1; }
-
-  .divider {
-    padding: 8px 14px;
-    font-size: 11px; text-align:center;
-    border-top: 1px solid #252a33; border-bottom: 1px solid #252a33;
-  }
-  .divider.success { background:#0f2014; color:#4ade80; }
-  .divider.phase { background:#1a1f28; color:#fbbf24; }
-
-  .img-card.big img { max-height: 600px; }
-  .main-view { padding: 0; background: transparent; border: none; margin-bottom: 12px; }
-
-  .story-section { background: #1a1f28; border-color: #2563eb40; }
-  .story-title {
-    color:#6fa8ff; font-size:12px; font-weight:600;
-    margin-bottom:8px;
-  }
-  .story-list {
-    margin: 0; padding-left: 22px; line-height: 1.85;
-    font-size: 13px; color:#e3e6eb;
-  }
-  .story-list li { margin-bottom: 3px; }
-  .story-list b { color:#fbbf24; }
-  .card-head .v-ok { color:#4ade80; font-size:11px; }
-  .card-head .v-fail { color:#ef4444; font-size:11px; }
-  .card-head .duration { color:#6e7685; font-size:11px; }
-
-  .card-body {
+  .session-menu {
+    position:fixed; top:0; left:0;
+    min-width:340px; max-width:440px; max-height: 64vh;
+    background:#fff; border:1px solid #d6dbe3; border-radius:10px;
+    box-shadow: 0 12px 32px rgba(15,23,42,0.18);
+    overflow-y:auto; z-index: 60;
     display:none;
-    padding: 12px 0 6px;
-    margin-top: 8px;
-    border-top: 1px dashed #252a33;
   }
-  .card.open .card-body { display:block; }
-
-  .section {
-    background:#0f1115; border:1px solid #252a33; border-radius:6px;
-    padding:11px 13px; margin-bottom:10px;
+  .session-menu.on { display:block; }
+  .session-menu .head {
+    padding: 10px 14px; border-bottom: 1px solid #eef0f4;
+    font-size: 11px; color: #8b95a5; font-weight: 600; letter-spacing: 0.5px;
+    text-transform: uppercase;
+    position: sticky; top: 0; background: #fff;
   }
-  .section h3 {
-    margin:0 0 8px; font-size:12px; color:#fbbf24;
-    font-weight:600;
+  .session-item {
+    padding: 10px 14px; border-bottom: 1px solid #f4f6f9;
+    cursor:pointer; transition: background 0.1s;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  .session-item:last-child { border-bottom: none; }
+  .session-item:hover { background:#f4f6f9; }
+  .session-item.selected { background:#eff5ff; }
+  .session-item .name { font-weight:500; color:#1a2233; font-size:13px;
+    font-variant-numeric: tabular-nums; }
+  .session-item .meta {
+    color:#5b6573; font-size:11px;
     display:flex; align-items:center; gap:8px;
   }
-  .section h3 .duration { color:#6e7685; font-size:11px; font-weight:400; margin-left:auto; }
-  .section .desc {
-    color:#6e7685; font-size:11px; margin-bottom:8px; line-height:1.5;
+  .session-item .live-dot {
+    width:6px; height:6px; border-radius:50%; background:#16a34a;
+    display:inline-block; animation: pulse 1.4s infinite;
+  }
+  .session-item .badge-cnt {
+    background:#eef0f4; color:#5b6573; padding: 1px 7px; border-radius: 999px;
+    font-size:10px; font-variant-numeric: tabular-nums;
   }
 
-  .img-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
-  .img-grid.single { grid-template-columns: 1fr; max-width: 700px; }
-  .img-grid .img-card {
-    background:#000; border:1px solid #252a33; border-radius:5px; overflow:hidden;
+  /* ─── 控件 ─── */
+  .ctrl-input {
+    height:30px; padding: 0 10px;
+    background:#fff; border:1px solid #d6dbe3; border-radius:8px;
+    font-size:12px; color:#1a2233; outline: none;
+    width: 110px;
   }
-  .img-card .label {
-    padding:5px 9px; background:#1f2530; font-size:11px; color:#aab2bf;
+  .ctrl-input:focus { border-color:#2563eb; box-shadow:0 0 0 3px #2563eb20; }
+  .ctrl-input::placeholder { color:#8b95a5; }
+  .auto-toggle {
+    height:30px; padding: 0 12px;
+    background:#fff; border:1px solid #d6dbe3; border-radius:8px;
+    font-size:12px; cursor:pointer; color:#1a2233;
+    display:inline-flex; align-items:center; gap:7px;
   }
-  .img-card img { width:100%; display:block; cursor:zoom-in; max-height:380px; object-fit:contain; }
+  .auto-toggle .dot { width:7px; height:7px; border-radius:50%; background:#16a34a; }
+  .auto-toggle.off .dot { background:#94a3b8; }
+  .auto-toggle:hover { border-color:#2563eb; }
 
-  .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 12px; font-size:12px; margin:6px 0; }
-  .kv .k { color:#8b95a5; }
-  .kv .v { color:#e3e6eb; font-family:monospace; }
-
-  .tmpl-list { display:flex; flex-wrap:wrap; gap:8px; margin-top: 6px; }
-  .tmpl-card {
-    background:#0a0c10; border:1px solid #252a33; border-radius:4px;
-    padding:6px; width:120px; font-size:11px;
+  /* ─── 主布局：左右分栏 ─── */
+  .layout {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    height: calc(100vh - 52px);
+    overflow: hidden;
   }
-  .tmpl-card.hit { border-color:#4ade80; box-shadow: 0 0 0 1px #4ade8050; }
-  .tmpl-card.miss { opacity:0.55; }
-  .tmpl-card img { width:100%; height:46px; object-fit:contain; background:#000; }
-  .tmpl-card .name { font-family:monospace; font-size:10px; color:#aab2bf; margin-top:3px; word-break: break-all; }
-  .tmpl-card .score { font-size:11px; color:#e3e6eb; margin-top:2px; }
-  .tmpl-card .score.hit { color:#4ade80; font-weight:600; }
-  .tmpl-card .score.miss { color:#6e7685; }
 
-  .det-list { font-size:11px; margin-top: 6px; }
-  .det-list .det {
-    display:flex; gap:8px; padding:5px 8px; border-radius:4px;
-    background:#1a1f28; margin-bottom: 3px;
+  /* ─── 左侧列表 ─── */
+  .sidebar {
+    background:#fff; border-right:1px solid #e3e6ed;
+    overflow-y: auto; overflow-x: hidden;
   }
-  .det-list .cls { font-weight:500; min-width:80px; }
-  .det-list .cls.close_x { color:#ef4444; }
-  .det-list .cls.action_btn { color:#fbbf24; }
-
-  .ocr-list { font-size:11px; max-height:160px; overflow-y:auto; margin-top: 6px; }
-  .ocr-list .h {
-    display:flex; gap:8px; padding:4px 8px; background:#1a1f28;
-    border-radius:3px; margin-bottom:2px;
+  .sidebar-empty {
+    padding: 40px 24px; text-align:center; color:#8b95a5; font-size:13px;
+    line-height: 1.7;
   }
-  .ocr-list .text { color:#e3e6eb; flex:1; }
-  .ocr-list .conf { color:#6e7685; font-family:monospace; }
+  .sidebar-empty .hint { font-size:11px; color:#a8b0bc; margin-top: 6px; }
 
-  .verify-bar {
-    display:flex; gap:14px; align-items:center;
-    padding:9px 12px; border-radius:5px;
-    background:#0a0c10; border:1px solid #252a33;
-    font-size:12px; margin-top:8px;
+  .inst-group { border-bottom: 1px solid #eef0f4; }
+  .inst-head {
+    padding: 12px 16px 8px; display:flex; align-items:center; gap:8px;
+    background:#fafbfc; position: sticky; top: 0; z-index: 5;
+    border-bottom: 1px solid #eef0f4;
   }
-  .verify-bar.ok { border-color:#4ade80; }
-  .verify-bar.fail { border-color:#ef4444; }
-  .verify-bar.unknown { border-color:#fbbf24; }
-  .verify-bar .label { color:#8b95a5; }
-  .verify-bar.ok .result { color:#4ade80; font-weight:600; }
-  .verify-bar.fail .result { color:#ef4444; font-weight:600; }
-  .verify-bar.unknown .result { color:#fbbf24; font-weight:600; }
+  .inst-head .name { font-weight:600; color:#1a2233; font-size:13px; }
+  .inst-head .stat { margin-left:auto; color:#8b95a5; font-size:11px;
+    font-variant-numeric: tabular-nums; }
+  .inst-dot {
+    width:7px; height:7px; border-radius:50%;
+    background:#2563eb;
+  }
 
+  .deci-row {
+    padding: 9px 16px; cursor: pointer;
+    border-left: 3px solid transparent;
+    display:flex; align-items:flex-start; gap:9px;
+    transition: background 0.08s;
+    border-bottom: 1px solid #f4f6f9;
+  }
+  .deci-row:hover { background: #f8f9fb; }
+  .deci-row.selected {
+    background: #eff5ff; border-left-color: #2563eb;
+  }
+  .deci-row.new-glow { animation: rowGlow 1.4s ease-out; }
+  @keyframes rowGlow {
+    0% { background:#fef3c7; }
+    100% { background: transparent; }
+  }
+  .deci-row .icon {
+    width:18px; height:18px; border-radius:50%; flex-shrink:0;
+    display:inline-flex; align-items:center; justify-content:center;
+    font-size:11px; font-weight:700;
+  }
+  .deci-row .icon.ok   { background:#dcfce7; color:#15803d; }
+  .deci-row .icon.fail { background:#fee2e2; color:#b91c1c; }
+  .deci-row .icon.warn { background:#fef3c7; color:#a16207; }
+  .deci-row .icon.idle { background:#eef0f4; color:#5b6573; }
+  .deci-row .body { flex:1; min-width:0; }
+  .deci-row .top { display:flex; align-items:center; gap:8px; }
+  .deci-row .time {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; color:#5b6573;
+  }
+  .deci-row .round { font-size:10px; color:#8b95a5; }
+  .deci-row .story {
+    font-size: 12px; color:#1a2233; line-height: 1.4; margin-top:2px;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+
+  .lobby-divider {
+    padding: 6px 16px; font-size:10.5px; color:#15803d;
+    background: linear-gradient(90deg, #dcfce7, #fff);
+    border-bottom: 1px solid #bbf7d0;
+    text-align: center; font-weight:500; letter-spacing: 0.3px;
+  }
+  .phase-divider {
+    padding: 6px 16px; font-size:10.5px; color:#a16207;
+    background: linear-gradient(90deg, #fef3c7, #fff);
+    border-bottom: 1px solid #fde68a;
+    text-align: center; font-weight:500;
+  }
+
+  /* ─── 右侧详情 ─── */
+  .detail-pane {
+    overflow-y: auto; padding: 0;
+    background:#f4f6f9;
+  }
+  .detail-empty {
+    height: 100%; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; color:#8b95a5;
+    font-size:14px; gap:8px;
+  }
+  .detail-empty .icon { font-size: 48px; opacity: 0.3; }
+
+  .detail-head {
+    padding: 18px 24px 14px; background:#fff; border-bottom:1px solid #e3e6ed;
+    position: sticky; top: 0; z-index: 4;
+  }
+  .detail-head .row1 {
+    display:flex; align-items:center; gap:12px; margin-bottom:6px;
+  }
+  .detail-head .title { font-size: 16px; font-weight:600; color:#1a2233; }
+  .detail-head .meta { color:#5b6573; font-size:12px; }
+  .detail-head .meta b { color:#1a2233; font-weight:500; }
+  .detail-head .id-tag {
+    margin-left:auto; font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 11px; color:#8b95a5;
+    background:#f4f6f9; padding: 3px 8px; border-radius: 5px;
+  }
+
+  .detail-body { padding: 18px 24px; }
+  .panel {
+    background:#fff; border:1px solid #e3e6ed; border-radius:10px;
+    margin-bottom: 14px; overflow: hidden;
+  }
+  .panel-head {
+    padding: 11px 16px; border-bottom: 1px solid #eef0f4;
+    display:flex; align-items:center; gap:10px;
+    background:#fafbfc;
+  }
+  .panel-head .h {
+    font-size:12px; font-weight:600; color:#1a2233; letter-spacing: 0.2px;
+  }
+  .panel-head .duration {
+    margin-left:auto; font-size:11px; color:#8b95a5;
+    font-variant-numeric: tabular-nums;
+  }
+  .panel-head .badge-tier {
+    background:#e0e7ff; color:#3730a3;
+    padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight:500;
+  }
+  .panel-head .badge-tier.exit { background:#dcfce7; color:#15803d; }
+  .panel-body { padding: 14px 16px; }
+
+  .img-wrap {
+    background: #0a0c10; border-radius: 8px; overflow: hidden;
+    border: 1px solid #e3e6ed; position: relative;
+  }
+  .img-wrap img {
+    width:100%; display:block; max-height: 540px;
+    object-fit: contain; cursor: zoom-in;
+  }
+  .img-wrap .label {
+    position:absolute; top:10px; left:10px;
+    background: rgba(15,23,42,0.78); color:#fff;
+    padding:4px 10px; border-radius:6px; font-size:11px;
+    backdrop-filter: blur(4px);
+  }
+
+  .story-card {
+    background: linear-gradient(135deg, #eff5ff, #f0fdf4);
+    border: 1px solid #bfdbfe; border-radius: 10px;
+    padding: 14px 18px; margin-bottom: 14px;
+  }
+  .story-card .h {
+    font-size: 11px; color:#1e40af; font-weight:600;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .story-card ol {
+    margin:0; padding-left:20px; font-size: 13.5px; color:#1a2233; line-height: 1.7;
+  }
+  .story-card ol li { margin-bottom: 2px; }
+  .story-card b { color: #b91c1c; font-weight:600; }
+
+  .verify-card {
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;
+    display:flex; align-items:center; gap:14px; font-size: 13px;
+  }
+  .verify-card.ok   { background:#dcfce7; border:1px solid #86efac; color:#15803d; }
+  .verify-card.fail { background:#fee2e2; border:1px solid #fca5a5; color:#b91c1c; }
+  .verify-card.unk  { background:#fef3c7; border:1px solid #fde68a; color:#a16207; }
+  .verify-card .result { font-weight:600; font-size:14px; }
+  .verify-card .meta { margin-left:auto; font-size:11px; opacity:0.8;
+    font-variant-numeric: tabular-nums; }
+
+  .kv {
+    display:grid; grid-template-columns: 110px 1fr; gap: 6px 14px;
+    font-size: 12.5px;
+  }
+  .kv .k { color:#5b6573; }
+  .kv .v {
+    color:#1a2233;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 12px;
+  }
+
+  /* 模板列表 */
+  .tmpl-grid {
+    display:grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+  }
+  .tmpl-item {
+    background:#fafbfc; border:1px solid #e3e6ed; border-radius:6px;
+    padding: 8px; font-size: 11px;
+  }
+  .tmpl-item.hit {
+    background:#dcfce7; border-color:#86efac;
+    box-shadow: 0 0 0 1px #86efac;
+  }
+  .tmpl-item.miss { opacity:0.6; }
+  .tmpl-item img {
+    width:100%; height:50px; object-fit:contain;
+    background:#0a0c10; border-radius:3px; margin-bottom:5px;
+    cursor: zoom-in;
+  }
+  .tmpl-item .name {
+    font-family: ui-monospace, monospace; font-size: 10px;
+    color:#5b6573; word-break: break-all;
+  }
+  .tmpl-item .score {
+    margin-top: 3px; display:flex; justify-content: space-between;
+    font-variant-numeric: tabular-nums; color:#5b6573; font-size: 10.5px;
+  }
+  .tmpl-item.hit .score b { color:#15803d; }
+
+  /* YOLO/OCR 命中列表 */
+  .det-list { display:flex; flex-direction:column; gap:5px; }
+  .det-item {
+    background:#fafbfc; border:1px solid #eef0f4; border-radius:6px;
+    padding: 7px 11px; font-size:12px;
+    display:flex; align-items:center; gap:12px;
+  }
+  .det-item .cls {
+    font-weight:600; min-width: 80px;
+    font-family: ui-monospace, monospace; font-size: 11px;
+  }
+  .det-item .cls.close_x   { color:#b91c1c; }
+  .det-item .cls.action_btn { color:#a16207; }
+  .det-item .conf {
+    color:#5b6573; font-variant-numeric: tabular-nums; font-size: 11px;
+  }
+  .det-item .bbox {
+    margin-left:auto; color:#8b95a5; font-size: 10.5px;
+    font-family: ui-monospace, monospace;
+  }
+  .ocr-text { color:#1a2233; font-size: 12.5px; flex:1; }
+
+  /* 浮层 */
   .modal {
-    position:fixed; inset:0; background:rgba(0,0,0,0.94);
-    display:none; justify-content:center; align-items:center; z-index:99;
+    position:fixed; inset:0; background:rgba(15,23,42,0.92);
+    display:none; justify-content:center; align-items:center;
+    z-index: 100; cursor: zoom-out;
   }
   .modal.on { display:flex; }
-  .modal img { max-width:96vw; max-height:96vh; cursor:zoom-out; }
+  .modal img { max-width:96vw; max-height:96vh; border-radius: 6px; }
 
-  .empty { padding:80px; text-align:center; color:#6e7685; font-size:14px; }
-
-  .new-glow { animation: newGlow 1.2s ease-out; }
-  @keyframes newGlow {
-    0% { box-shadow: 0 0 0 2px #6fa8ff; transform: scale(1.005); }
-    100% { box-shadow: none; transform: scale(1); }
+  .toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background:#1a2233; color:#fff; padding: 10px 16px; border-radius: 8px;
+    font-size: 13px; z-index: 110;
+    box-shadow: 0 8px 24px rgba(15,23,42,0.3);
+    opacity: 0; transition: opacity 0.2s;
   }
+  .toast.on { opacity: 1; }
+
+  /* 滚动条美化 */
+  .sidebar::-webkit-scrollbar, .detail-pane::-webkit-scrollbar,
+  .session-menu::-webkit-scrollbar { width: 8px; }
+  .sidebar::-webkit-scrollbar-thumb, .detail-pane::-webkit-scrollbar-thumb,
+  .session-menu::-webkit-scrollbar-thumb { background: #d6dbe3; border-radius: 999px; }
+  .sidebar::-webkit-scrollbar-thumb:hover { background: #b8c0cc; }
 </style>
 </head>
 <body>
 
-<div class="topbar">
+<header class="topbar">
+  <a href="/" class="back">← Debug</a>
   <h1>决策剧场</h1>
-  <span class="pulse" id="pulse" title="实时刷新中"></span>
-  <span class="meta" id="status">loading...</span>
-  <select id="session-select" style="background:#2a3140;color:#e3e6eb;border:1px solid #3a4252;padding:6px 10px;border-radius:5px;font-size:12px;">
-    <option value="">当前 session（实时）</option>
-  </select>
-  <input id="filter-inst" type="number" placeholder="只看实例 #" min="0" max="9" style="width:120px;">
-  <button onclick="expandAll()">全部展开</button>
-  <button onclick="collapseAll()">全部折叠</button>
-  <div class="right">
-    <button onclick="toggleAuto()" id="btn-auto">自动刷新: 开</button>
+  <span class="status" id="status">
+    <span class="pulse off" id="pulse"></span>
+    <span id="status-text">加载中…</span>
+  </span>
+  <div class="ctrls">
+    <button class="session-pill" id="session-pill" onclick="toggleSessionMenu(event)">
+      <span class="lab">会话</span>
+      <span class="val" id="session-label">当前 · 实时</span>
+      <span class="caret">▾</span>
+    </button>
+    <input class="ctrl-input" id="filter-inst" type="number" placeholder="实例 #" min="0" max="9">
+    <button class="auto-toggle" id="btn-auto" onclick="toggleAuto()">
+      <span class="dot"></span><span id="auto-text">自动刷新</span>
+    </button>
   </div>
+</header>
+
+<div class="session-menu" id="session-menu" onclick="event.stopPropagation()">
+  <div class="head">选择会话</div>
+  <div id="session-menu-list"></div>
 </div>
 
-<div class="help-bar">
-  <span><b>识别层（Tier）说明：</b></span>
-  <span><b>Tier 0 模板</b>：像素级精确比对，最快 5ms</span>
-  <span><b>Tier 1 Memory</b>：phash 查历史决策</span>
-  <span><b>Tier 2 YOLO</b>：视觉检测物体（按钮/X 等）</span>
-  <span><b>Tier 3 OCR</b>：文字识别（在 YOLO bbox 内）</span>
-  <span style="margin-left:auto;color:#fbbf24"><b>新决策插入会闪一下</b></span>
-</div>
-
-<div class="feed" id="feed">
-  <div class="empty">暂无决策记录<br><span style="font-size:11px">在 GameBot 主界面点开始, 跑实例触发 dismiss_popups</span></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-empty">加载中…</div>
+  </aside>
+  <main class="detail-pane" id="detail">
+    <div class="detail-empty">
+      <div class="icon">◧</div>
+      <div>请从左侧选一条决策查看</div>
+    </div>
+  </main>
 </div>
 
 <div class="modal" id="modal" onclick="this.classList.remove('on')">
   <img id="modal-img">
 </div>
 
+<div class="toast" id="toast"></div>
+
 <script>
 let allItems = [];
-let knownIds = new Set();     // 已渲染的决策 id（增量渲染用）
-let openCards = new Set();    // 展开的决策 id
-let openGroups = new Set();   // 展开的实例号
-let cachedDetails = {};        // id → 已加载的详情 HTML
+let knownIds = new Set();
+let allSessions = [];
+let currentSession = "";    // "" = 当前 session
+let selectedId = "";
 let autoRefresh = true;
-let currentSession = "";       // 空 = 当前 session 实时, 否则 = 历史 session 名
-
-function getSession() {
-  return document.getElementById('session-select').value;
-}
+let cachedDetails = {};
 
 const PHASE_CN = {
   'dismiss_popups': '弹窗清理',
@@ -2503,580 +2680,313 @@ const PHASE_CN = {
   'map_setup': '地图设置',
   'accelerator': '加速器连接',
 };
-
 const OUTCOME_CN = {
-  'lobby_confirmed': '✓ 大厅确认完成（关弹窗结束）',
-  'lobby_pending_1/2': '大厅初判 1/2 (需连续 2 次确认)',
-  'lobby_pending_2/2': '大厅初判 2/2 (再确认一次)',
+  'lobby_confirmed': '✓ 大厅确认完成',
   'tapped': '已点击目标',
-  'no_target': '没找到可点目标 (画面在加载/动画中)',
-  'loop_blocked': '同位置连点 3 次无效, 等待',
-  '': '未知结果',
+  'no_target': '没找到可点目标',
+  'loop_blocked': '同位置连点 3 次无效',
 };
-
-const OUTCOME_BADGE = {
-  'lobby_confirmed': 'lobby_done',
-  'tapped': 'tapped',
-  'no_target': 'no_target',
-  'loop_blocked': 'loop_blocked',
-};
-
+function phaseText(p) { return PHASE_CN[p] || p || '-'; }
 function outcomeText(o) {
   if (!o) return '未知';
   if (OUTCOME_CN[o]) return OUTCOME_CN[o];
-  if (o.startsWith('lobby_pending')) return '大厅初判 ' + o.replace('lobby_pending_', '') + ' (需多次确认)';
+  if (o.startsWith('lobby_pending')) return '大厅初判 ' + o.replace('lobby_pending_', '');
   return o;
 }
-function outcomeBadgeClass(o) {
-  if (!o) return 'unknown';
-  if (OUTCOME_BADGE[o]) return OUTCOME_BADGE[o];
-  if (o.startsWith('lobby')) return 'lobby_pending';
-  return 'unknown';
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
 }
-function phaseText(p) { return PHASE_CN[p] || p; }
+
+function fmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false });
+}
+function fmtDate(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function showToast(msg, ms = 1800) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('on');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove('on'), ms);
+}
+
+/* ─── 自定义会话下拉 ─── */
+function toggleSessionMenu(ev) {
+  ev && ev.stopPropagation();
+  const menu = document.getElementById('session-menu');
+  const pill = document.getElementById('session-pill');
+  if (menu.classList.contains('on')) {
+    menu.classList.remove('on'); pill.classList.remove('active'); return;
+  }
+  // 定位到 pill 下方
+  const r = pill.getBoundingClientRect();
+  menu.style.left = r.left + 'px';
+  menu.style.top = (r.bottom + 6) + 'px';
+  pill.classList.add('active');
+  menu.classList.add('on');
+}
+document.addEventListener('click', () => {
+  const m = document.getElementById('session-menu');
+  if (m && m.classList.contains('on')) {
+    m.classList.remove('on');
+    document.getElementById('session-pill').classList.remove('active');
+  }
+});
+
+function renderSessionMenu() {
+  const list = document.getElementById('session-menu-list');
+  let html = '';
+  // 当前 session 永远在第一项
+  const isCurSel = currentSession === '';
+  html += `<div class="session-item ${isCurSel ? 'selected' : ''}" onclick="pickSession('')">
+    <div class="name">当前会话</div>
+    <div class="meta">
+      <span class="live-dot"></span>
+      <span>实时刷新</span>
+    </div>
+  </div>`;
+  for (const s of allSessions) {
+    if (s.is_current) continue;
+    const sel = s.session === currentSession ? 'selected' : '';
+    html += `<div class="session-item ${sel}" onclick="pickSession('${escapeHtml(s.session)}')">
+      <div class="name">${escapeHtml(s.session)}</div>
+      <div class="meta">
+        <span class="badge-cnt">${s.decision_count} 条</span>
+        <span>${fmtDate(s.mtime)}</span>
+      </div>
+    </div>`;
+  }
+  if (allSessions.filter(x => !x.is_current).length === 0) {
+    html += `<div class="session-item" style="cursor:default;color:#8b95a5;">
+      <div class="meta">暂无历史会话</div>
+    </div>`;
+  }
+  list.innerHTML = html;
+}
+
+function pickSession(name) {
+  currentSession = name;
+  document.getElementById('session-label').textContent =
+    name === '' ? '当前 · 实时' : name;
+  document.getElementById('session-menu').classList.remove('on');
+  document.getElementById('session-pill').classList.remove('active');
+  selectedId = '';
+  knownIds.clear();
+  cachedDetails = {};
+  document.getElementById('detail').innerHTML =
+    '<div class="detail-empty"><div class="icon">◧</div><div>请从左侧选一条决策查看</div></div>';
+  // 历史 session 暂停自动刷新
+  if (name !== '' && autoRefresh) {
+    autoRefresh = false;
+    document.getElementById('btn-auto').classList.add('off');
+    document.getElementById('auto-text').textContent = '自动刷新（历史已停）';
+  }
+  reload(true);
+}
 
 async function reloadSessions() {
   try {
     const r = await fetch('/api/sessions');
     const d = await r.json();
-    const sel = document.getElementById('session-select');
-    const cur = sel.value;
-    let html = '<option value="">当前 session（实时）</option>';
-    for (const s of d.sessions) {
-      if (s.is_current) continue;
-      const date = new Date(s.mtime * 1000).toLocaleString('zh-CN', {hour12:false});
-      html += `<option value="${s.session}">${s.session} · ${s.decision_count} 条 · ${date}</option>`;
-    }
-    sel.innerHTML = html;
-    sel.value = cur;
-  } catch (e) {}
+    allSessions = (d.sessions || []).slice().sort((a,b) => (b.mtime||0)-(a.mtime||0));
+    renderSessionMenu();
+  } catch (e) {
+    console.warn('reloadSessions failed', e);
+  }
 }
 
+/* ─── 拉取决策列表 ─── */
 async function reload(forceRedraw = false) {
   let url = '/api/decisions?limit=300';
   const inst = document.getElementById('filter-inst').value;
-  if (inst !== '') url += '&instance=' + inst;
-  const sess = getSession();
-  if (sess) url += '&session=' + encodeURIComponent(sess);
-  // session 切换 → 强制全量重渲染
-  if (sess !== currentSession) {
-    forceRedraw = true;
-    currentSession = sess;
-    knownIds.clear();
-    cachedDetails = {};
-  }
+  if (inst !== '') url += '&instance=' + encodeURIComponent(inst);
+  if (currentSession) url += '&session=' + encodeURIComponent(currentSession);
   try {
     const r = await fetch(url);
     const d = await r.json();
-    document.getElementById('status').textContent =
-      `共 ${d.count} 条决策 · ${sess ? '历史 session: ' + sess : '当前 session'}`;
-    document.getElementById('pulse').style.background = d.enabled ? '#4ade80' : '#6e7685';
-    allItems = d.items;
-    if (forceRedraw) {
-      knownIds.clear();
-      renderFeed();
-    } else {
-      renderIncremental();
-    }
-  } catch (e) {
-    document.getElementById('status').textContent = '加载失败: ' + e.message;
-  }
-}
-
-// 增量渲染: 只插入新决策, 不动已有 DOM
-function renderIncremental() {
-  if (allItems.length === 0) {
-    if (document.getElementById('feed').children.length === 0 ||
-        document.querySelector('#feed .empty')) {
-      renderFeed();
-    }
-    return;
-  }
-  // 找新决策
-  const newOnes = allItems.filter(it => !knownIds.has(it.id));
-  if (newOnes.length === 0) return;
-  // 第一次或结构变化大时全量重画
-  if (knownIds.size === 0 || newOnes.length > 30) {
-    renderFeed();
-    return;
-  }
-  // 增量插入: 找到对应实例 group, 把新卡插入到该 group 第一个测试场次的最前面
-  const byInst = {};
-  for (const it of newOnes) {
-    if (!byInst[it.instance]) byInst[it.instance] = [];
-    byInst[it.instance].push(it);
-    knownIds.add(it.id);
-  }
-  for (const inst of Object.keys(byInst)) {
-    const groupBody = document.querySelector(`[data-key="inst_${inst}"] .group-body`);
-    if (!groupBody) {
-      // 新实例出现 → 全量重画
-      renderFeed();
+    if (d.error) {
+      document.getElementById('status-text').textContent = '加载失败: ' + d.error;
+      document.getElementById('pulse').classList.add('off');
       return;
     }
-    // 找该 group 第一条卡（紧跟在场次分隔条之后）
-    const firstCard = groupBody.querySelector('.card');
-    const fragment = document.createElement('div');
-    let html = '';
-    for (const it of byInst[inst].sort((a, b) => b.created - a.created)) {
-      html += renderCard(it, true);   // true = 标记为新（动画闪一下）
+    allItems = d.items || [];
+    document.getElementById('status-text').textContent =
+      `${d.count} 条 · ${currentSession ? '历史: ' + currentSession : '当前会话'}`;
+    document.getElementById('pulse').classList.toggle('off', !d.enabled);
+
+    // 新决策：闪一下
+    const newOnes = forceRedraw ? [] : allItems.filter(it => !knownIds.has(it.id));
+    renderSidebar(newOnes.map(x => x.id));
+
+    if (selectedId && !allItems.some(it => it.id === selectedId)) {
+      selectedId = '';
     }
-    fragment.innerHTML = html;
-    if (firstCard) {
-      while (fragment.firstChild) firstCard.parentNode.insertBefore(fragment.firstChild, firstCard);
-    } else {
-      groupBody.appendChild(fragment);
-    }
-    // 更新 group 头统计
-    updateGroupSummary(inst);
+  } catch (e) {
+    document.getElementById('status-text').textContent = '加载失败: ' + e.message;
+    document.getElementById('pulse').classList.add('off');
   }
 }
 
-function updateGroupSummary(inst) {
-  const groupItems = allItems.filter(x => x.instance === parseInt(inst));
-  const lobbyDone = groupItems.filter(x => x.outcome === 'lobby_confirmed').length;
-  const summaryEl = document.querySelector(`[data-key="inst_${inst}"] .group-head .summary`);
-  if (summaryEl) {
-    summaryEl.textContent = `共 ${groupItems.length} 条决策 · lobby 完成 ${lobbyDone} 次`;
+/* ─── 故事一句话 ─── */
+function storySummary(it) {
+  const o = it.outcome || '';
+  const target = it.tap_target || '';
+  const v = it.verify_success;
+  if (o === 'lobby_confirmed') return '看到「开始游戏」按钮 → 判定到大厅';
+  if (o.startsWith('lobby_pending')) return '看到大厅按钮，再确认一次（防误判）';
+  if (o === 'no_target') return '没看到弹窗按钮（画面在加载/动画中）';
+  if (o === 'loop_blocked') return '同位置点了 3 次没反应，等等再说';
+  if (o === 'tapped') {
+    if (target === 'close_x') return '看到 X 关闭按钮 → 点了' + (v === true ? '，✓ 弹窗消失' : v === false ? '，✗ 弹窗没消失' : '');
+    if (target === 'action_btn') return '看到操作按钮 → 点了' + (v === true ? '，✓ 画面变了' : v === false ? '，✗ 画面没变' : '');
+    return '点了一下' + (v === true ? '，✓ 有效' : '');
   }
+  return outcomeText(o);
 }
 
-function renderFeed() {
-  const c = document.getElementById('feed');
-  // 全量重画时, 当前 DOM 里所有 ID 进 knownIds
-  knownIds.clear();
-  for (const it of allItems) knownIds.add(it.id);
+function rowIcon(it) {
+  const o = it.outcome || '';
+  if (o === 'lobby_confirmed') return { icon: '✓', cls: 'ok' };
+  if (o === 'tapped' && it.verify_success === true) return { icon: '✓', cls: 'ok' };
+  if (o === 'tapped' && it.verify_success === false) return { icon: '✗', cls: 'fail' };
+  if (o === 'loop_blocked') return { icon: '⚠', cls: 'warn' };
+  if (o === 'no_target') return { icon: '○', cls: 'idle' };
+  if (o.startsWith('lobby_pending')) return { icon: '◔', cls: 'warn' };
+  return { icon: '·', cls: 'idle' };
+}
+
+/* ─── 渲染左侧列表 ─── */
+function renderSidebar(newIds = []) {
+  const c = document.getElementById('sidebar');
+  knownIds = new Set(allItems.map(x => x.id));
+
   if (allItems.length === 0) {
-    c.innerHTML = '<div class="empty">暂无决策记录<br><span style="font-size:11px">在 GameBot 主界面点开始, 跑实例触发 dismiss_popups</span></div>';
+    c.innerHTML = `<div class="sidebar-empty">
+      暂无决策记录
+      <div class="hint">在 GameBot 主面板点开始<br>跑实例触发 dismiss_popups 阶段</div>
+    </div>`;
     return;
   }
 
   // 按实例分组
   const byInst = {};
   for (const it of allItems) {
-    const k = it.instance;
+    const k = it.instance ?? -1;
     if (!byInst[k]) byInst[k] = [];
     byInst[k].push(it);
   }
-
-  // 按实例号排序
-  const instances = Object.keys(byInst).map(x => parseInt(x)).sort((a, b) => a - b);
+  const instances = Object.keys(byInst).map(x => parseInt(x))
+    .sort((a, b) => a - b);
 
   let html = '';
   for (const inst of instances) {
-    const items = byInst[inst].sort((a, b) => b.created - a.created);  // 新的在前
-
-    if (!openGroups.has('inst_' + inst) && openGroups.size === 0) {
-      openGroups.add('inst_' + inst);
-    }
-    const isOpen = openGroups.has('inst_' + inst);
-
-    const totalDecisions = items.length;
+    const items = byInst[inst].sort((a, b) => b.created - a.created);
     const lobbyDone = items.filter(x => x.outcome === 'lobby_confirmed').length;
-    const summary = `共 ${totalDecisions} 条 · 到大厅 ${lobbyDone} 次`;
-    html += `<div class="group ${isOpen ? 'open' : ''}" data-key="inst_${inst}">
-      <div class="group-head" onclick="toggleGroup('inst_${inst}')">
-        <span class="toggle">▶</span>
+    html += `<div class="inst-group">
+      <div class="inst-head">
+        <span class="inst-dot"></span>
         <span class="name">实例 #${inst}</span>
-        <span class="summary">${summary}</span>
-      </div>
-      <div class="group-body">`;
+        <span class="stat">${items.length} 条 · 到大厅 ${lobbyDone}</span>
+      </div>`;
 
-    // 时间线：在 phase 切换 / lobby_confirmed 处插分隔条
-    let prevItem = null;
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      // 上一条是 lobby_confirmed (代表"上一轮清弹窗结束") 或 phase 切换 → 插分隔
-      if (prevItem && (
-          prevItem.outcome === 'lobby_confirmed' ||
-          prevItem.phase !== it.phase
-        )) {
-        const t = new Date(prevItem.created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
-        if (prevItem.outcome === 'lobby_confirmed') {
-          html += `<div class="divider success">━━━ ${t} 清弹窗完成 → 已到大厅 ━━━</div>`;
-        } else {
-          html += `<div class="divider phase">━━━ ${t} 切换到 ${phaseText(it.phase)} ━━━</div>`;
+    let prev = null;
+    for (const it of items) {
+      if (prev) {
+        if (prev.outcome === 'lobby_confirmed') {
+          html += `<div class="lobby-divider">━━ ${fmtTime(prev.created)} 清弹窗完成 ━━</div>`;
+        } else if (prev.phase !== it.phase) {
+          html += `<div class="phase-divider">切换到 ${phaseText(it.phase)}</div>`;
         }
       }
-      html += renderCard(it);
-      prevItem = it;
+      const ic = rowIcon(it);
+      const sel = it.id === selectedId ? 'selected' : '';
+      const flash = newIds.includes(it.id) ? 'new-glow' : '';
+      html += `<div class="deci-row ${sel} ${flash}" data-id="${it.id}" onclick="selectDecision('${it.id}')">
+        <span class="icon ${ic.cls}">${ic.icon}</span>
+        <div class="body">
+          <div class="top">
+            <span class="time">${fmtTime(it.created)}</span>
+            <span class="round">R${it.round}</span>
+          </div>
+          <div class="story">${escapeHtml(storySummary(it))}</div>
+        </div>
+      </div>`;
+      prev = it;
     }
-
-    html += `</div></div>`;
+    html += `</div>`;
   }
   c.innerHTML = html;
 
-  // 展开预先打开的卡
-  openCards.forEach(id => {
-    const el = document.querySelector(`[data-card-id="${id}"]`);
-    if (el) el.classList.add('open');
-  });
-}
-
-function groupIntoSessions(items) {
-  // items 已按时间倒序. 同 phase + 间隔 < 10s 算同 session
-  if (items.length === 0) return [];
-  const sessions = [];
-  let cur = [items[0]];
-  for (let i = 1; i < items.length; i++) {
-    const prev = items[i - 1];
-    const it = items[i];
-    if (it.phase !== prev.phase || prev.created - it.created > 10) {
-      sessions.push(cur);
-      cur = [it];
-    } else {
-      cur.push(it);
-    }
-  }
-  sessions.push(cur);
-  return sessions;
-}
-
-// 故事化总结：一句话讲清楚 bot 在干啥
-function storySummary(it) {
-  const o = it.outcome || '';
-  const target = it.tap_target || '';
-  const v = it.verify_success;
-  if (o === 'lobby_confirmed') return '✓ 看到「开始游戏」按钮 → 判定到大厅，清弹窗结束';
-  if (o.startsWith('lobby_pending')) return '看到「开始游戏」按钮，再确认一次（防误判）';
-  if (o === 'no_target') return '没看到弹窗按钮（画面在加载/动画中）';
-  if (o === 'loop_blocked') return '⚠️ 同位置点了 3 次没反应，等等再说';
-  if (o === 'tapped') {
-    if (target === 'close_x') {
-      return '看到 X 关闭按钮 → 点了' + (v === true ? '，✓ 弹窗消失了' : v === false ? '，✗ 弹窗没消失' : '');
-    }
-    if (target === 'action_btn') {
-      return '看到操作按钮 → 点了' + (v === true ? '，✓ 画面变了' : v === false ? '，✗ 画面没变' : '');
-    }
-    return '点了一下' + (v === true ? '，✓ 有效' : '');
-  }
-  return outcomeText(o);
-}
-
-function renderCard(it, isNew = false) {
-  const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
-  const isOpen = openCards.has(it.id);
-  const story = storySummary(it);
-  const cachedBody = cachedDetails[it.id];
-  const bodyHtml = cachedBody || '<div class="empty" style="padding:20px;">加载中...</div>';
-
-  // 单行图标提示：成功/警告/错误
-  let icon = '·';
-  let iconCls = 'neutral';
-  if (it.outcome === 'lobby_confirmed') { icon = '✓'; iconCls = 'ok'; }
-  else if (it.outcome === 'tapped' && it.verify_success === true) { icon = '✓'; iconCls = 'ok'; }
-  else if (it.outcome === 'tapped' && it.verify_success === false) { icon = '✗'; iconCls = 'fail'; }
-  else if (it.outcome === 'loop_blocked') { icon = '⚠'; iconCls = 'warn'; }
-  else if (it.outcome === 'no_target') { icon = '○'; iconCls = 'neutral'; }
-  else if (it.outcome && it.outcome.startsWith('lobby_pending')) { icon = '◔'; iconCls = 'neutral'; }
-
-  return `<div class="card ${isOpen ? 'open' : ''} ${isNew ? 'new-glow' : ''}" data-card-id="${it.id}">
-    <div class="card-head" onclick="toggleCard('${it.id}')">
-      <span class="toggle">▶</span>
-      <span class="time">${time}</span>
-      <span class="r-num">R${it.round}</span>
-      <span class="story-icon ${iconCls}">${icon}</span>
-      <span class="story">${story}</span>
-    </div>
-    <div class="card-body" id="body-${it.id}">
-      ${bodyHtml}
-    </div>
-  </div>`;
-}
-
-async function toggleCard(id) {
-  const el = document.querySelector(`[data-card-id="${id}"]`);
-  if (!el) return;
-  const opening = !el.classList.contains('open');
-  el.classList.toggle('open');
-  if (opening) {
-    openCards.add(id);
-    const body = document.getElementById('body-' + id);
-    if (body && (!cachedDetails[id] || body.querySelector('.empty'))) {
-      body.innerHTML = '<div class="empty" style="padding:10px;">loading...</div>';
-      try {
-        const sess = getSession();
-        let url = '/api/decision/' + encodeURIComponent(id) + '/data';
-        if (sess) url += '?session=' + encodeURIComponent(sess);
-        const r = await fetch(url);
-        if (!r.ok) { body.innerHTML = '<div class="empty">加载失败</div>'; return; }
-        const d = await r.json();
-        const html = renderDetailHtml(d);
-        cachedDetails[id] = html;
-        body.innerHTML = html;
-      } catch (e) {
-        body.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
-      }
-    }
-  } else {
-    openCards.delete(id);
+  // 选中态恢复
+  if (selectedId) {
+    const el = c.querySelector(`[data-id="${selectedId}"]`);
+    if (el) el.classList.add('selected');
   }
 }
 
-function toggleGroup(key) {
-  if (openGroups.has(key)) openGroups.delete(key);
-  else openGroups.add(key);
-  document.querySelector(`[data-key="${key}"]`).classList.toggle('open');
+/* ─── 选中决策 → 加载详情 ─── */
+async function selectDecision(id) {
+  selectedId = id;
+  // 高亮
+  document.querySelectorAll('.deci-row').forEach(x => x.classList.remove('selected'));
+  const el = document.querySelector(`[data-id="${id}"]`);
+  if (el) el.classList.add('selected');
+
+  const detail = document.getElementById('detail');
+  if (cachedDetails[id]) {
+    detail.innerHTML = cachedDetails[id];
+    return;
+  }
+  detail.innerHTML = '<div class="detail-empty">加载中…</div>';
+  try {
+    let url = '/api/decision/' + encodeURIComponent(id) + '/data';
+    if (currentSession) url += '?session=' + encodeURIComponent(currentSession);
+    const r = await fetch(url);
+    if (!r.ok) {
+      detail.innerHTML = `<div class="detail-empty"><div class="icon">⚠</div>加载失败 (HTTP ${r.status})</div>`;
+      return;
+    }
+    const d = await r.json();
+    const html = renderDetail(d);
+    cachedDetails[id] = html;
+    detail.innerHTML = html;
+    detail.scrollTop = 0;
+  } catch (e) {
+    detail.innerHTML = `<div class="detail-empty"><div class="icon">⚠</div>加载失败: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
-function expandAll() {
-  document.querySelectorAll('.group').forEach(g => {
-    g.classList.add('open');
-    openGroups.add(g.dataset.key);
-  });
-}
-function collapseAll() {
-  document.querySelectorAll('.group').forEach(g => {
-    g.classList.remove('open');
-    openGroups.delete(g.dataset.key);
-  });
-  openCards.clear();
-  document.querySelectorAll('.card').forEach(c => c.classList.remove('open'));
-}
-
-function toggleAuto() {
-  autoRefresh = !autoRefresh;
-  document.getElementById('btn-auto').textContent = '自动刷新: ' + (autoRefresh ? '开' : '关');
-}
-
-function renderDetailHtml(d) {
-  const sess = getSession();
-  const sessParam = sess ? '?session=' + encodeURIComponent(sess) : '';
-  const imgUrl = (name) =>
-    '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name) + sessParam;
-  let html = '';
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // 极简模式（默认显示）
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  // 选最有信息量的一张图作为主图（优先 tap_annot > yolo_annot > lobby_annot > input）
-  let mainImg = '';
-  let mainLabel = '';
-  if (d.tap && d.tap.annot_image) {
-    mainImg = d.tap.annot_image;
-    mainLabel = '红圈 = bot 点击位置';
-  } else {
-    for (const t of (d.tiers || [])) {
-      if (t.yolo_annot_image) {
-        mainImg = t.yolo_annot_image;
-        mainLabel = t.name && t.name.includes('大厅')
-          ? '绿框 = 模板命中位置（lobby_start_btn）'
-          : '红框 = 关闭按钮 X · 黄框 = 操作按钮';
-        break;
-      }
-    }
-  }
-  if (!mainImg && d.input_image) {
-    mainImg = d.input_image;
-    mainLabel = '机器原始截图';
-  }
-
-  if (mainImg) {
-    html += `<div class="section main-view">
-      <div class="img-card big">
-        <div class="label">${mainLabel}</div>
-        <img src="${imgUrl(mainImg)}" onclick="zoom(this.src)">
-      </div>
-    </div>`;
-  }
-
-  // 故事性总结（人话）
-  const storyParts = buildStory(d);
-  if (storyParts.length > 0) {
-    html += `<div class="section story-section">
-      <div class="story-title">bot 是这么想的：</div>
-      <ol class="story-list">${storyParts.map(s => '<li>' + s + '</li>').join('')}</ol>
-    </div>`;
-  }
-
-  // 验证结果（成功 / 失败的彩条）
-  if (d.verify) {
-    const ok = d.verify.success;
-    const stateCls = ok===true ? 'ok' : (ok===false ? 'fail' : 'unknown');
-    const statusText = ok===true ? '✓ 画面变了 → 大概率点中了'
-                     : ok===false ? '✗ 画面没变 → 点错或目标无效'
-                     : '? 没做验证';
-    html += `<div class="verify-bar ${stateCls}" style="margin-bottom:12px;">
-      <span class="result" style="font-size:14px;">${statusText}</span>
-      <span style="margin-left:auto;color:#6e7685;font-size:11px;">画面变化度 ${d.verify.distance}</span>
-    </div>`;
-  }
-
-  // [显示技术细节 ▼] 折叠按钮 + 下面隐藏的全套 Tier 详情
-  html += `<div style="text-align:center;margin:14px 0;">
-    <button onclick="toggleTech('${d.id}')" id="tech-btn-${d.id}"
-            style="background:#1f2530;border:1px solid #3a4252;color:#aab2bf;
-                   padding:7px 16px;border-radius:5px;cursor:pointer;font-size:12px;">
-      显示技术细节 ▼
-    </button>
-  </div>
-  <div id="tech-${d.id}" style="display:none;">`;
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // 技术细节模式（点开才看）
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  // 完整原图
-  if (d.input_image) {
-    html += `<div class="section">
-      <h3>原始截图（机器看见的画面）</h3>
-      <div class="img-card"><div class="label">${d.input_w}×${d.input_h} · phash=${d.input_phash}</div>
-        <img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>
-    </div>`;
-  }
-
-  // tap 详情
-  if (d.tap) {
-    html += `<div class="section">
-      <h3>点击详情</h3>
-      <div class="kv">
-        <span class="k">点击坐标</span><span class="v">(${d.tap.x}, ${d.tap.y})</span>
-        <span class="k">来自识别层</span><span class="v">${d.tap.method}</span>
-        ${d.tap.target_class ? `<span class="k">目标类别</span><span class="v">${d.tap.target_class}</span>` : ''}
-        ${d.tap.target_text ? `<span class="k">目标文字 (OCR)</span><span class="v">${escapeHtml(d.tap.target_text)}</span>` : ''}
-        ${d.tap.target_conf ? `<span class="k">置信度</span><span class="v">${d.tap.target_conf}</span>` : ''}
-      </div>
-    </div>`;
-  }
-
-  // 验证详情
-  if (d.verify) {
-    html += `<div class="section">
-      <h3>验证细节（phash 比对）</h3>
-      <div class="kv" style="font-size:11px;">
-        <span class="k">phash 之前</span><span class="v">${d.verify.phash_before || '-'}</span>
-        <span class="k">phash 之后</span><span class="v">${d.verify.phash_after || '-'}</span>
-        <span class="k">距离</span><span class="v">${d.verify.distance}</span>
-        <span class="k">结论</span><span class="v">${d.verify.success === true ? '画面变了' : d.verify.success === false ? '画面没变' : '未判'}</span>
-      </div>
-    </div>`;
-  }
-
-  // 各 Tier 详细
-  (d.tiers || []).forEach((t, idx) => {
-    html += `<div class="section">
-      <h3>③.${idx+1} Tier ${t.tier} · ${t.name}
-        <span class="duration">${t.duration_ms}ms ${t.early_exit ? '· 此 Tier 命中, 提前退出' : ''}</span>
-      </h3>`;
-
-    // 模板尝试
-    if (t.templates && t.templates.length > 0) {
-      const hits = t.templates.filter(x => x.hit).length;
-      html += `<div class="desc">这次试了 <b>${t.templates.length}</b> 个模板，命中 <b>${hits}</b> 个。绿框 = 命中（分数 ≥ 阈值），灰框 = 没命中。</div>
-        <div class="tmpl-list">`;
-      for (const tm of t.templates) {
-        const cls = tm.hit ? 'hit' : 'miss';
-        const sc = tm.hit
-          ? `<div class="score hit">${tm.score} ✓</div>`
-          : `<div class="score miss">${tm.score}</div>`;
-        const tmplImg = tm.template_image
-          ? `<img src="${imgUrl(tm.template_image)}" alt="" onclick="event.stopPropagation();zoom(this.src)" style="cursor:zoom-in;">`
-          : '<div style="height:46px;color:#6e7685;text-align:center;line-height:46px;font-size:10px;">模板图缺失</div>';
-        html += `<div class="tmpl-card ${cls}">${tmplImg}<div class="name">${tm.name}</div>${sc}<div style="font-size:10px;color:#6e7685;">阈值 ${tm.threshold}</div></div>`;
-      }
-      html += `</div>`;
-    }
-
-    // YOLO 标注图（也用于显示模板命中位置）
-    if (t.yolo_annot_image) {
-      const isLobby = t.name && t.name.includes('大厅');
-      html += `<div class="img-grid single" style="margin-top:8px;"><div class="img-card">
-        <div class="label">${isLobby ? '模板命中位置（绿框=lobby_start_btn）' : 'YOLO 标注画面（红框=close_x · 黄框=action_btn）'}</div>
-        <img src="${imgUrl(t.yolo_annot_image)}" onclick="zoom(this.src)">
-      </div></div>`;
-    }
-
-    // YOLO 检测列表
-    if (t.yolo_detections && t.yolo_detections.length > 0) {
-      html += `<div class="det-list">`;
-      for (const det of t.yolo_detections) {
-        html += `<div class="det">
-          <span class="cls ${det.cls}">${det.cls}</span>
-          <span>conf=<b>${det.conf}</b></span>
-          <span style="color:#6e7685">bbox=[${det.bbox.join(', ')}]</span>
-        </div>`;
-      }
-      html += `</div>`;
-    } else if (t.name === 'YOLO') {
-      html += `<div style="color:#6e7685;font-size:11px;margin-top:6px;">YOLO 未检测到任何目标</div>`;
-    }
-
-    // OCR ROI 图
-    if (t.ocr_roi_image) {
-      html += `<div class="img-grid single" style="margin-top:8px;"><div class="img-card">
-        <div class="label">OCR 识别区域 (橙框=ROI · 绿框=识别到的文字)</div>
-        <img src="${imgUrl(t.ocr_roi_image)}" onclick="zoom(this.src)">
-      </div></div>`;
-    }
-    if (t.ocr_hits && t.ocr_hits.length > 0) {
-      html += `<div class="ocr-list">`;
-      for (const h of t.ocr_hits) {
-        html += `<div class="h"><span class="text">${escapeHtml(h.text)}</span>
-          <span class="conf">${h.conf || ''}</span></div>`;
-      }
-      html += `</div>`;
-    } else if (t.name && t.name.startsWith('OCR')) {
-      html += `<div style="color:#6e7685;font-size:11px;margin-top:6px;">OCR 未识别到任何文字</div>`;
-    }
-
-    // Memory
-    if (t.memory_phash_query) {
-      html += `<div class="kv">
-        <span class="k">phash 查询</span><span class="v">${t.memory_phash_query}</span>
-        <span class="k">命中</span><span class="v">${t.memory_hit ? JSON.stringify(t.memory_hit) : '无 (新画面)'}</span>
-      </div>`;
-    }
-
-    if (t.note) html += `<div style="color:#aab2bf;font-size:11px;margin-top:8px;padding:6px 9px;background:#0a0c10;border-radius:4px;">📝 ${escapeHtml(t.note)}</div>`;
-    html += `</div>`;
-  });
-
-  // note 备注
-  if (d.note) {
-    html += `<div class="section" style="background:#1a1f28;border-color:#3a4252;">
-      <h3>决策备注</h3>
-      <div style="color:#e3e6eb;font-size:13px;">${escapeHtml(d.note)}</div>
-    </div>`;
-  }
-
-  // 关闭技术细节 div
-  html += `</div>`;
-  return html;
-}
-
-// 构造故事化文字总结（人话, 不带技术名词）
-function buildStory(d) {
+/* ─── 详情面板 ─── */
+function buildStoryParts(d) {
   const parts = [];
   let templateHit = null;
-  let yoloHits = [];
+  const yoloHits = [];
   let ocrText = '';
 
   for (const t of (d.tiers || [])) {
-    if (t.templates && t.templates.length > 0) {
+    if (t.templates) {
       const hit = t.templates.find(x => x.hit);
       if (hit && !templateHit) templateHit = { name: hit.name, score: hit.score };
     }
-    if (t.yolo_detections && t.yolo_detections.length > 0) {
-      for (const det of t.yolo_detections) {
+    if (t.yolo_detections) {
+      for (const det of t.yolo_detections)
         if (det.conf > 0.5) yoloHits.push(det);
-      }
     }
     if (t.ocr_hits && t.ocr_hits.length > 0) {
       ocrText = t.ocr_hits.map(x => x.text).join(' ');
     }
   }
 
-  // 模板命中
   if (templateHit) {
     let label = templateHit.name;
-    if (label.includes('lobby_start_btn') || label.includes('lobby_start_game')) {
-      label = '「开始游戏」按钮';
-    }
-    parts.push(`看到 <b>${label}</b>（模板分数 ${templateHit.score}）`);
+    if (label.includes('lobby_start')) label = '「开始游戏」按钮';
+    parts.push(`看到 <b>${escapeHtml(label)}</b>（模板分数 ${templateHit.score}）`);
   }
-
-  // YOLO 看到
   if (yoloHits.length > 0) {
     const closeXs = yoloHits.filter(x => x.cls === 'close_x');
     const actions = yoloHits.filter(x => x.cls === 'action_btn');
@@ -3084,19 +2994,11 @@ function buildStory(d) {
     if (closeXs.length > 0) seg.push(`<b>${closeXs.length} 个 X 关闭按钮</b>（信心 ${closeXs[0].conf}）`);
     if (actions.length > 0) seg.push(`<b>${actions.length} 个文字按钮</b>（信心 ${actions[0].conf}）`);
     if (seg.length > 0) parts.push(`YOLO 模型识别出 ${seg.join(' + ')}`);
-  } else {
-    // 大厅检测有命中但 YOLO 啥都没看到 → 说明到大厅了
-    if (templateHit && d.tiers.some(t => t.name && t.name.includes('YOLO'))) {
-      parts.push(`YOLO 模型没识别到任何弹窗按钮（说明画面干净）`);
-    }
+  } else if (templateHit && (d.tiers || []).some(t => t.name && t.name.includes('YOLO'))) {
+    parts.push(`YOLO 没识别到弹窗按钮（说明画面干净）`);
   }
+  if (ocrText) parts.push(`按钮文字识别为「<b>${escapeHtml(ocrText)}</b>」`);
 
-  // OCR 文字
-  if (ocrText) {
-    parts.push(`按钮上的文字识别为「<b>${escapeHtml(ocrText)}</b>」`);
-  }
-
-  // 决策结果
   if (d.tap) {
     let action = '';
     if (d.tap.target_class === 'close_x') action = '点了关闭按钮';
@@ -3106,28 +3008,215 @@ function buildStory(d) {
   } else if (d.outcome === 'lobby_confirmed') {
     parts.push(`<b>判定：已到大厅，结束清弹窗</b>`);
   } else if (d.outcome && d.outcome.startsWith('lobby_pending')) {
-    parts.push(`<b>判定：可能到大厅了，再确认一次防误判</b>`);
+    parts.push(`<b>判定：可能到大厅，再确认一次防误判</b>`);
   } else if (d.outcome === 'no_target') {
-    parts.push(`<b>判定：暂时没目标，等下一轮</b>（画面可能在加载）`);
+    parts.push(`<b>判定：暂时没目标</b>（画面可能在加载）`);
   } else if (d.outcome === 'loop_blocked') {
-    parts.push(`<b>判定：同位置点了 3 次没反应，等等再说</b>`);
+    parts.push(`<b>判定：同位置点 3 次没反应，等等再说</b>`);
   }
-
   return parts;
 }
 
-// 折叠/展开技术细节
-function toggleTech(id) {
-  const el = document.getElementById('tech-' + id);
-  const btn = document.getElementById('tech-btn-' + id);
-  if (!el) return;
-  if (el.style.display === 'none') {
-    el.style.display = 'block';
-    btn.textContent = '隐藏技术细节 ▲';
+function renderDetail(d) {
+  const sessParam = currentSession ? '?session=' + encodeURIComponent(currentSession) : '';
+  const imgUrl = (name) =>
+    '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name) + sessParam;
+
+  // 主图
+  let mainImg = '', mainLabel = '';
+  if (d.tap && d.tap.annot_image) {
+    mainImg = d.tap.annot_image; mainLabel = '红圈 = bot 点击位置';
   } else {
-    el.style.display = 'none';
-    btn.textContent = '显示技术细节 ▼';
+    for (const t of (d.tiers || [])) {
+      if (t.yolo_annot_image) {
+        mainImg = t.yolo_annot_image;
+        mainLabel = (t.name || '').includes('大厅')
+          ? '绿框 = lobby_start_btn 命中位置'
+          : '红框 = close_x · 黄框 = action_btn';
+        break;
+      }
+    }
   }
+  if (!mainImg && d.input_image) {
+    mainImg = d.input_image; mainLabel = '机器原始截图';
+  }
+
+  let html = `<div class="detail-head">
+    <div class="row1">
+      <span class="title">${phaseText(d.phase)}</span>
+      <span class="meta">实例 <b>#${d.instance}</b> · R<b>${d.round}</b> · ${escapeHtml(fmtTime(d.created))}</span>
+      <span class="id-tag">${escapeHtml(d.id)}</span>
+    </div>
+    <div class="meta">${escapeHtml(outcomeText(d.outcome))}</div>
+  </div>
+  <div class="detail-body">`;
+
+  if (mainImg) {
+    html += `<div class="img-wrap" style="margin-bottom:14px;">
+      <span class="label">${mainLabel}</span>
+      <img src="${imgUrl(mainImg)}" onclick="zoom(this.src)">
+    </div>`;
+  }
+
+  // 故事卡
+  const parts = buildStoryParts(d);
+  if (parts.length > 0) {
+    html += `<div class="story-card">
+      <div class="h">bot 是这么想的</div>
+      <ol>${parts.map(p => '<li>' + p + '</li>').join('')}</ol>
+    </div>`;
+  }
+
+  // 验证
+  if (d.verify) {
+    const ok = d.verify.success;
+    const cls = ok === true ? 'ok' : (ok === false ? 'fail' : 'unk');
+    const txt = ok === true ? '✓ 画面变了 → 大概率点中'
+              : ok === false ? '✗ 画面没变 → 点错或目标无效'
+              : '? 没做验证';
+    html += `<div class="verify-card ${cls}">
+      <span class="result">${txt}</span>
+      <span class="meta">画面变化度 ${d.verify.distance}</span>
+    </div>`;
+  }
+
+  // 输入图
+  if (d.input_image && d.input_image !== mainImg) {
+    html += `<div class="panel">
+      <div class="panel-head"><span class="h">原始截图</span>
+        <span class="duration">${d.input_w}×${d.input_h} · phash=${d.input_phash || '-'}</span>
+      </div>
+      <div class="panel-body">
+        <div class="img-wrap"><img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>
+      </div>
+    </div>`;
+  }
+
+  // 点击详情
+  if (d.tap) {
+    html += `<div class="panel">
+      <div class="panel-head"><span class="h">点击详情</span></div>
+      <div class="panel-body">
+        <div class="kv">
+          <span class="k">点击坐标</span><span class="v">(${d.tap.x}, ${d.tap.y})</span>
+          <span class="k">来自识别层</span><span class="v">${escapeHtml(d.tap.method || '-')}</span>
+          ${d.tap.target_class ? `<span class="k">目标类别</span><span class="v">${escapeHtml(d.tap.target_class)}</span>` : ''}
+          ${d.tap.target_text ? `<span class="k">目标文字</span><span class="v">${escapeHtml(d.tap.target_text)}</span>` : ''}
+          ${d.tap.target_conf ? `<span class="k">置信度</span><span class="v">${d.tap.target_conf}</span>` : ''}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // 验证细节
+  if (d.verify) {
+    html += `<div class="panel">
+      <div class="panel-head"><span class="h">验证细节（phash 比对）</span></div>
+      <div class="panel-body">
+        <div class="kv">
+          <span class="k">phash 之前</span><span class="v">${escapeHtml(d.verify.phash_before || '-')}</span>
+          <span class="k">phash 之后</span><span class="v">${escapeHtml(d.verify.phash_after || '-')}</span>
+          <span class="k">距离</span><span class="v">${d.verify.distance}</span>
+          <span class="k">结论</span><span class="v">${d.verify.success === true ? '画面变了' : d.verify.success === false ? '画面没变' : '未判'}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // 各 Tier
+  (d.tiers || []).forEach((t, idx) => {
+    html += `<div class="panel">
+      <div class="panel-head">
+        <span class="badge-tier ${t.early_exit ? 'exit' : ''}">Tier ${t.tier}</span>
+        <span class="h">${escapeHtml(t.name)}</span>
+        <span class="duration">${t.duration_ms}ms${t.early_exit ? ' · 命中后退出' : ''}</span>
+      </div>
+      <div class="panel-body">`;
+
+    if (t.templates && t.templates.length > 0) {
+      const hits = t.templates.filter(x => x.hit).length;
+      html += `<div style="font-size:11.5px;color:#5b6573;margin-bottom:10px;">
+        试了 <b style="color:#1a2233">${t.templates.length}</b> 个模板，命中 <b style="color:#15803d">${hits}</b> 个
+      </div>
+      <div class="tmpl-grid">`;
+      for (const tm of t.templates) {
+        const cls = tm.hit ? 'hit' : 'miss';
+        const tmplImg = tm.template_image
+          ? `<img src="${imgUrl(tm.template_image)}" onclick="event.stopPropagation();zoom(this.src)">`
+          : '<div style="height:50px;color:#8b95a5;text-align:center;line-height:50px;font-size:10px;background:#0a0c10;border-radius:3px;">缺图</div>';
+        html += `<div class="tmpl-item ${cls}">${tmplImg}
+          <div class="name">${escapeHtml(tm.name)}</div>
+          <div class="score"><span>≥ ${tm.threshold}</span><b>${tm.score}${tm.hit ? ' ✓' : ''}</b></div>
+        </div>`;
+      }
+      html += `</div>`;
+    }
+
+    if (t.yolo_annot_image) {
+      const isLobby = (t.name || '').includes('大厅');
+      html += `<div class="img-wrap" style="margin-top:12px;">
+        <span class="label">${isLobby ? '模板命中位置' : 'YOLO 标注'}</span>
+        <img src="${imgUrl(t.yolo_annot_image)}" onclick="zoom(this.src)">
+      </div>`;
+    }
+
+    if (t.yolo_detections && t.yolo_detections.length > 0) {
+      html += `<div class="det-list" style="margin-top:10px;">`;
+      for (const det of t.yolo_detections) {
+        html += `<div class="det-item">
+          <span class="cls ${det.cls}">${escapeHtml(det.cls)}</span>
+          <span class="conf">conf <b>${det.conf}</b></span>
+          <span class="bbox">[${det.bbox.join(', ')}]</span>
+        </div>`;
+      }
+      html += `</div>`;
+    } else if ((t.name || '').includes('YOLO')) {
+      html += `<div style="color:#8b95a5;font-size:11.5px;margin-top:10px;">YOLO 未检测到任何目标</div>`;
+    }
+
+    if (t.ocr_roi_image) {
+      html += `<div class="img-wrap" style="margin-top:12px;">
+        <span class="label">OCR 识别区域 · 橙框=ROI · 绿框=识别到的文字</span>
+        <img src="${imgUrl(t.ocr_roi_image)}" onclick="zoom(this.src)">
+      </div>`;
+    }
+    if (t.ocr_hits && t.ocr_hits.length > 0) {
+      html += `<div class="det-list" style="margin-top:10px;">`;
+      for (const h of t.ocr_hits) {
+        html += `<div class="det-item">
+          <span class="ocr-text">${escapeHtml(h.text)}</span>
+          <span class="conf">${h.conf || ''}</span>
+        </div>`;
+      }
+      html += `</div>`;
+    } else if ((t.name || '').startsWith('OCR')) {
+      html += `<div style="color:#8b95a5;font-size:11.5px;margin-top:10px;">OCR 未识别到任何文字</div>`;
+    }
+
+    if (t.memory_phash_query) {
+      html += `<div class="kv" style="margin-top:10px;">
+        <span class="k">phash 查询</span><span class="v">${escapeHtml(t.memory_phash_query)}</span>
+        <span class="k">命中</span><span class="v">${t.memory_hit ? escapeHtml(JSON.stringify(t.memory_hit)) : '无（新画面）'}</span>
+      </div>`;
+    }
+
+    if (t.note) {
+      html += `<div style="margin-top:10px;padding:8px 11px;background:#fef3c7;border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#78350f;">
+        📝 ${escapeHtml(t.note)}
+      </div>`;
+    }
+    html += `</div></div>`;
+  });
+
+  if (d.note) {
+    html += `<div class="panel">
+      <div class="panel-head"><span class="h">决策备注</span></div>
+      <div class="panel-body">${escapeHtml(d.note)}</div>
+    </div>`;
+  }
+
+  html += `</div>`;
+  return html;
 }
 
 function zoom(src) {
@@ -3135,30 +3224,50 @@ function zoom(src) {
   document.getElementById('modal').classList.add('on');
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[c]);
+function toggleAuto() {
+  autoRefresh = !autoRefresh;
+  const btn = document.getElementById('btn-auto');
+  btn.classList.toggle('off', !autoRefresh);
+  document.getElementById('auto-text').textContent =
+    autoRefresh ? '自动刷新' : (currentSession ? '自动刷新（历史已停）' : '已暂停');
+  showToast(autoRefresh ? '自动刷新已开启' : '自动刷新已关闭');
 }
 
 document.getElementById('filter-inst').addEventListener('input', () => {
   knownIds.clear();
   reload(true);
 });
-document.getElementById('session-select').addEventListener('change', () => {
-  reload(true);
-  // 选了历史 session, 暂停自动刷新
-  const sess = getSession();
-  if (sess) {
-    autoRefresh = false;
-    document.getElementById('btn-auto').textContent = '自动刷新: 关 (历史)';
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.getElementById('modal').classList.remove('on');
+    const m = document.getElementById('session-menu');
+    if (m.classList.contains('on')) {
+      m.classList.remove('on');
+      document.getElementById('session-pill').classList.remove('active');
+    }
+  }
+  // J/K：上下翻
+  if ((e.key === 'j' || e.key === 'k') && !e.ctrlKey && !e.metaKey
+      && document.activeElement.tagName !== 'INPUT') {
+    e.preventDefault();
+    if (allItems.length === 0) return;
+    const cur = allItems.findIndex(x => x.id === selectedId);
+    let next = cur;
+    if (e.key === 'j') next = cur < 0 ? 0 : Math.min(cur + 1, allItems.length - 1);
+    else next = cur < 0 ? 0 : Math.max(cur - 1, 0);
+    if (allItems[next]) {
+      selectDecision(allItems[next].id);
+      const el = document.querySelector(`[data-id="${allItems[next].id}"]`);
+      if (el) el.scrollIntoView({ block:'nearest', behavior:'smooth' });
+    }
   }
 });
 
 reloadSessions();
 reload(true);
-setInterval(() => { if (autoRefresh) reload(); }, 800);
-setInterval(() => { reloadSessions(); }, 10000);   // 每 10s 检查一次新 session
+setInterval(() => { if (autoRefresh && !currentSession) reload(); }, 1000);
+setInterval(reloadSessions, 12000);
 </script>
 </body>
 </html>

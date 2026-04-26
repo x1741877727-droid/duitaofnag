@@ -48,14 +48,13 @@ _warned_disk_full = False
 
 
 def _ensure_dump_dir() -> Optional[Path]:
-    """统一走 user_paths.user_yolo_dir() — 持久存储，rebuild 不丢"""
+    """统一走 paths.user_yolo_raw_dir() — 持久存储 (%APPDATA%\\GameBot\\data\\yolo)，rebuild 不丢"""
     global _dump_dir
     if _dump_dir is not None:
         return _dump_dir
     try:
-        from .user_paths import user_yolo_dir
-        _dump_dir = user_yolo_dir() / "raw_screenshots"
-        _dump_dir.mkdir(parents=True, exist_ok=True)
+        from .user_paths import user_yolo_raw_dir
+        _dump_dir = user_yolo_raw_dir()
         logger.info(f"YOLO 截图收集目录: {_dump_dir}")
         return _dump_dir
     except Exception as e:
