@@ -468,7 +468,9 @@ class YoloDismisser:
             lobby_confirm = 0
             await asyncio.sleep(0.5)
 
-            # tap 后验证：phash 比对
+            # tap 后验证：防线 1 phash 比对 + 防线 2 State Expectation
+            outcome = "tapped"
+            verify_note = ""
             try:
                 shot_after = await device.screenshot()
                 if shot_after is not None:
@@ -476,11 +478,42 @@ class YoloDismisser:
                     from .adb_lite import phash_distance as _phd
                     dist = _phd(int(ph_before, 16), int(ph_after, 16))
                     decision.set_verify(ph_before, ph_after, dist)
+
+                    # ── v2 防线 2: State Expectation ──
+                    try:
+                        from .state_expectation import verify as _expect_verify
+                        # label 优先用 OCR 文字命中关键字, 否则用 yolo class
+                        expect_label = target_class
+                        if target_class == "action_btn" and ocr_text:
+                            for kw in ("收下", "确定", "确认", "同意", "前往", "参加", "进入"):
+                                if kw in ocr_text:
+                                    expect_label = kw
+                                    break
+                        # 跑下一轮 YOLO 拿 after detections (给 close_x 计数 verifier 用)
+                        try:
+                            yolo_after = self.detect(shot_after)
+                        except Exception:
+                            yolo_after = []
+                        ctx = {
+                            "yolo_before": dets,
+                            "yolo_after": yolo_after,
+                            "matcher": matcher,
+                        }
+                        exp_r = _expect_verify(expect_label, shot, shot_after, ctx)
+                        verify_note = f"expect[{expect_label}]={'OK' if exp_r.matched else 'FAIL'} {exp_r.note}"
+                        if not exp_r.matched:
+                            outcome = "tap_expect_failed"
+                            logger.warning(
+                                f"[Y{rnd + 1}] State Expectation 失败 [{expect_label}]: "
+                                f"{exp_r.note}"
+                            )
+                    except Exception as _ee:
+                        logger.debug(f"[Y{rnd + 1}] expectation verify err: {_ee}")
             except Exception:
                 pass
 
-            decision.finalize(outcome="tapped",
-                              note=f"{target_class} conf={target_conf:.2f}")
+            decision.finalize(outcome=outcome,
+                              note=f"{target_class} conf={target_conf:.2f} · {verify_note}")
 
         logger.warning(f"[yolo] {self.max_rounds} 轮 timeout (关闭 {popups_closed})")
         return DismissResult(False, popups_closed, "timeout", self.max_rounds)

@@ -195,6 +195,7 @@ a = Analysis(
         'backend.automation.screenshot_collector',
         'backend.automation.recognizer', 'backend.automation.memory_l1',
         'backend.automation.watchdogs', 'backend.automation.lobby_check',
+        'backend.automation.state_expectation',
         'yaml', 'psutil', 'multiprocessing',
     ] + av_hidden,
 )

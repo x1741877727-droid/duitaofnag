@@ -449,7 +449,59 @@ class MultiRunnerService:
                     return -1
 
             wd_mgr.start_process(_pidof_game, interval_s=5.0)
-            logger.info(f"[实例{idx}] watchdogs 启动: vpn + process")
+
+            # PopupWatchdog: phase 感知 (dismiss_popups skip / team_create+map_setup
+            # system_only / 其他 all). YOLO 模型不存在时安静跳过.
+            try:
+                from .automation.yolo_dismisser import YoloDismisser
+                if YoloDismisser.is_available():
+                    async def _wd_screenshot():
+                        try:
+                            return await runner.adb.screenshot()
+                        except Exception:
+                            return None
+
+                    def _wd_yolo_detect(frame):
+                        try:
+                            return YoloDismisser.detect(frame)
+                        except Exception:
+                            return []
+
+                    async def _wd_popup_handler(detections):
+                        # 简化策略: 只 tap 第一个高置信 close_x
+                        # (避免跟主流程 dismiss_popups 抢, 主流程已有更复杂逻辑)
+                        target = None
+                        for d in detections:
+                            if getattr(d, 'cls', '') == 'close_x' and getattr(d, 'conf', 0) > 0.7:
+                                target = d
+                                break
+                        if target is None:
+                            return
+                        bbox = getattr(target, 'bbox', None)
+                        if not bbox or len(bbox) < 4:
+                            return
+                        cx = (bbox[0] + bbox[2]) // 2
+                        cy = (bbox[1] + bbox[3]) // 2
+                        try:
+                            raw_adb = getattr(runner.adb, '_adb', runner.adb)
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(
+                                None, raw_adb._cmd, "shell",
+                                f"input tap {cx} {cy}",
+                            )
+                            logger.info(f"[实例{idx}] PopupWatchdog 自动 tap close_x@({cx},{cy})")
+                        except Exception as e:
+                            logger.debug(f"[实例{idx}] PopupWatchdog tap 失败: {e}")
+
+                    wd_mgr.start_popup(
+                        _wd_screenshot, _wd_yolo_detect,
+                        _wd_popup_handler, interval_s=2.0,
+                    )
+                    logger.info(f"[实例{idx}] watchdogs 启动: vpn + process + popup")
+                else:
+                    logger.info(f"[实例{idx}] watchdogs 启动: vpn + process (popup 跳过, YOLO 模型不可用)")
+            except Exception as e:
+                logger.warning(f"[实例{idx}] popup watchdog 启动失败 (非致命): {e}")
         except Exception as e:
             logger.warning(f"[实例{idx}] watchdog 启动失败 (非致命): {e}")
 
