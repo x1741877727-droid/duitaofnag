@@ -37,30 +37,22 @@ class ScreenState(str, Enum):
     UNKNOWN = "unknown"
 
 
-# OCR关键词配置
-LOBBY_KEYWORDS = ["开始游戏"]
-LOADING_KEYWORDS = ["正在检查更新", "正在加载", "加载中"]
-LOGIN_KEYWORDS = ["QQ授权登录", "微信登录", "登录中"]
-# 注意：游戏内底部状态栏也会显示"六花加速器[已连接]"，不能用它判断退出
-# 只有加速器的独有文字才能判定退出了游戏
-LEFT_GAME_KEYWORDS = ["CDN节点第", "六花官方通知"]
+# OCR 关键词热加载（修改 config/popup_rules.json 即可，无需 rebuild）
+# 这些常量保留为"启动 fallback"，每次实际调用都从 RulesLoader.get() 拿最新值
+from .rules_loader import RulesLoader, DEFAULTS as _RULES_DEFAULTS
 
-# 弹窗关闭文字（OCR识别后点击）
-CLOSE_TEXT = ["关闭", "×", "✕", "X"]
-CONFIRM_TEXT = ["确定", "确认", "知道了", "我知道了", "同意", "暂不", "跳过", "不需要",
-                "领取见面礼",
-                "点击屏幕继续", "点击屏幕", "点击继续",
-                # 不常见但可能出现的弹窗
-                "立即更新", "稍后更新",     # 版本更新
-                "已了解", "已阅读",          # 公告/协议
-                "取消", "返回",              # 误触退出确认
-                "重新连接", "重试",          # 网络断开
-                "继续游戏",                  # 防沉迷/实名
-                "我已满18周岁",              # 实名认证
-                "下次再说", "以后再说",      # 各种推荐弹窗
-                ]
-CHECKBOX_TEXT = ["今日内不再弹出", "今日不再弹出", "不再弹出", "不再提醒",
-                 "不再显示", "下次不再提醒"]
+LOBBY_KEYWORDS = _RULES_DEFAULTS["lobby_keywords"]
+LOADING_KEYWORDS = _RULES_DEFAULTS["loading_keywords"]
+LOGIN_KEYWORDS = _RULES_DEFAULTS["login_keywords"]
+LEFT_GAME_KEYWORDS = _RULES_DEFAULTS["left_game_keywords"]
+CLOSE_TEXT = _RULES_DEFAULTS["close_text"]
+CONFIRM_TEXT = _RULES_DEFAULTS["confirm_text"]
+CHECKBOX_TEXT = _RULES_DEFAULTS["checkbox_text"]
+
+
+def _live_rules() -> dict:
+    """每次调用拿最新规则（自动 mtime 检测 reload）"""
+    return RulesLoader.get()
 
 
 @dataclass
@@ -347,13 +339,14 @@ class OcrDismisser:
             ocr_hits = self._ocr_all(screenshot)
         all_text = " ".join(h.text for h in ocr_hits)
 
-        if any(kw in all_text for kw in LOBBY_KEYWORDS):
+        rules = _live_rules()  # 热加载：每次拿最新规则
+        if any(kw in all_text for kw in rules["lobby_keywords"]):
             return ScreenState.LOBBY
-        if any(kw in all_text for kw in LEFT_GAME_KEYWORDS):
+        if any(kw in all_text for kw in rules["left_game_keywords"]):
             return ScreenState.LEFT_GAME
-        if any(kw in all_text for kw in LOGIN_KEYWORDS):
+        if any(kw in all_text for kw in rules["login_keywords"]):
             return ScreenState.LOGIN
-        if any(kw in all_text for kw in LOADING_KEYWORDS):
+        if any(kw in all_text for kw in rules["loading_keywords"]):
             return ScreenState.LOADING
 
         return ScreenState.UNKNOWN
@@ -375,22 +368,23 @@ class OcrDismisser:
 
         # 级别2: OCR找关闭类文字 (~200ms)
         hits = self._ocr_all(screenshot)
+        rules = _live_rules()  # 热加载：每次拿最新规则
 
         # 先勾选复选框
         for h in hits:
-            for kw in CHECKBOX_TEXT:
+            for kw in rules["checkbox_text"]:
                 if kw in h.text:
                     return (h.cx, h.cy, f"勾选:{h.text}")
 
         # 找关闭按钮
         for h in hits:
-            for kw in CLOSE_TEXT:
+            for kw in rules["close_text"]:
                 if kw in h.text:
                     return (h.cx, h.cy, f"关闭:{h.text}")
 
         # 找确认按钮
         for h in hits:
-            for kw in CONFIRM_TEXT:
+            for kw in rules["confirm_text"]:
                 if kw in h.text:
                     # "点击屏幕"类 → 点击屏幕中央而不是文字位置
                     if "屏幕" in kw or "继续" in kw:
