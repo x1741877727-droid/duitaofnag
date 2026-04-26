@@ -282,17 +282,73 @@ class YoloDismisser:
                 pass
 
             # 大厅检测（保留模板路径，因为它在 lobby 上准确率比 YOLO 高）
-            if matcher and matcher.is_at_lobby(shot):
-                # 还要确认没遮罩（弹窗刚消失，下一秒可能又冒新的）
+            # 详细记录 Tier 0 模板：哪个模板命中、命中分数、命中位置（用红框标在画面上）
+            from .decision_log import TierRecord as _TR
+            tier_lobby = _TR(tier=0, name="模板·大厅检测", duration_ms=0.0)
+            lobby_hit = None
+            lobby_t0 = time.perf_counter()
+            try:
+                if matcher:
+                    # 直接调底层 match_one 拿到模板名 + 位置 + 分数
+                    for tname in ("lobby_start_btn", "lobby_start_game"):
+                        h = matcher.match_one(shot, tname, threshold=0.75)
+                        # 不论命中与否, 记录这个尝试
+                        try:
+                            from pathlib import Path as _P
+                            tdir = _P(matcher.template_dir) if hasattr(matcher, 'template_dir') else None
+                        except Exception:
+                            tdir = None
+                        decision.add_template_attempt(
+                            tier_lobby, tname, tdir,
+                            score=(h.confidence if h else 0.0),
+                            threshold=0.75,
+                            hit=(h is not None),
+                            bbox=([h.cx - h.w//2, h.cy - h.h//2, h.cx + h.w//2, h.cy + h.h//2] if h else None),
+                            scale=1.0,
+                        )
+                        if h and lobby_hit is None:
+                            lobby_hit = (tname, h)
+            except Exception as _e:
+                tier_lobby.note = f"模板检测异常: {_e}"
+            tier_lobby.duration_ms = round((time.perf_counter() - lobby_t0) * 1000, 2)
+
+            if lobby_hit is not None:
+                # 命中模板 → 在 input 图上画框, 让用户看见识别在哪
+                tname, h = lobby_hit
+                annot = shot.copy()
+                x1 = max(0, h.cx - h.w // 2)
+                y1 = max(0, h.cy - h.h // 2)
+                x2 = h.cx + h.w // 2
+                y2 = h.cy + h.h // 2
+                cv2.rectangle(annot, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                cv2.putText(annot, f"模板{tname} {h.confidence:.2f}", (x1, max(20, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                try:
+                    cv2.imwrite(str(decision.path / "lobby_annot.jpg"), annot,
+                                [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    tier_lobby.note = f"命中 {tname}@({h.cx},{h.cy}) conf={h.confidence:.2f} → 见 lobby_annot.jpg"
+                    # 借用 yolo_annot_image 字段把图链给前端（前端会渲染）
+                    tier_lobby.yolo_annot_image = "lobby_annot.jpg"
+                except Exception:
+                    pass
+                tier_lobby.early_exit = True
+                decision.add_tier(tier_lobby)
+
+                # 还要确认没遮罩
                 lobby_confirm += 1
                 if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
                     logger.info(f"[Y{rnd + 1}] 大厅确认 → 完成 (关闭 {popups_closed})")
-                    decision.finalize(outcome="lobby_confirmed", note=f"关闭 {popups_closed} 个")
+                    decision.finalize(outcome="lobby_confirmed",
+                                      note=f"模板{tname}连续命中 {LOBBY_CONFIRM_NEEDED} 次 · 关闭 {popups_closed} 个弹窗")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.debug(f"[Y{rnd + 1}] 大厅初判 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
-                decision.finalize(outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}")
+                decision.finalize(outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}",
+                                  note=f"模板{tname}命中, 但需连续 {LOBBY_CONFIRM_NEEDED} 次确认")
                 await asyncio.sleep(0.3)
                 continue
+            else:
+                # 模板未命中, 记录后继续走 YOLO
+                decision.add_tier(tier_lobby)
 
             # YOLO 推理
             t0 = time.perf_counter()

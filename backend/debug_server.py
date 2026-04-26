@@ -2188,147 +2188,202 @@ DECISIONS_HTML = r"""<!doctype html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Decision Theater · GameBot 识别决策回放</title>
+<title>决策剧场 · GameBot 识别决策回放</title>
 <style>
   * { box-sizing: border-box; }
   body { margin:0; padding:0; background:#0f1115; color:#e3e6eb;
          font-family: -apple-system, "PingFang SC", sans-serif; font-size:13px; }
+
   .topbar {
-    position: sticky; top:0; z-index:10;
+    position: sticky; top:0; z-index:20;
     background:#161a21; border-bottom:1px solid #252a33;
-    padding:10px 16px; display:flex; align-items:center; gap:14px;
+    padding:10px 18px; display:flex; align-items:center; gap:14px;
   }
-  .topbar h1 { margin:0; font-size:16px; color:#6fa8ff; }
+  .topbar h1 { margin:0; font-size:17px; color:#6fa8ff; font-weight:700; }
   .topbar .meta { color:#8b95a5; font-size:12px; }
-  .topbar select, .topbar button, .topbar input {
+  .topbar input, .topbar button {
     background:#2a3140; color:#e3e6eb; border:1px solid #3a4252;
     padding:6px 12px; border-radius:5px; font-size:12px;
   }
   .topbar button { cursor:pointer; }
   .topbar button:hover { background:#3a4252; }
   .topbar .right { margin-left:auto; display:flex; gap:8px; align-items:center; }
-  .pulse { width:8px; height:8px; border-radius:50%; background:#4ade80;
+  .pulse { width:9px; height:9px; border-radius:50%; background:#4ade80;
            animation: pulse 1.4s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  .layout { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 50px); }
-
-  .left {
-    background:#161a21; border-right:1px solid #252a33; overflow-y:auto;
+  .help-bar {
+    background:#1a1f28; border-bottom:1px solid #252a33; padding:8px 18px;
+    font-size:11px; color:#8b95a5; display:flex; gap:16px; flex-wrap:wrap;
   }
-  .item {
-    padding:10px 12px; border-bottom:1px solid #1f2530; cursor:pointer;
-    display:flex; flex-direction:column; gap:3px;
-  }
-  .item:hover { background:#1f2530; }
-  .item.cur { background:#2a3a55; border-left:3px solid #6fa8ff; }
-  .item .row1 { display:flex; gap:6px; align-items:center; }
-  .item .badge { font-size:10px; padding:1px 6px; border-radius:3px; font-weight:500; }
-  .badge.lobby { background:#1e4034; color:#4ade80; }
-  .badge.tap { background:#1f3550; color:#6fa8ff; }
-  .badge.no { background:#3d2f1a; color:#fbbf24; }
-  .badge.fail { background:#3d1d1d; color:#ef4444; }
-  .badge.pending { background:#252a33; color:#8b95a5; }
-  .item .id { font-family:monospace; font-size:10px; color:#8b95a5; }
-  .item .row2 { font-size:11px; color:#aab2bf; }
-  .item .v-ok { color:#4ade80; }
-  .item .v-fail { color:#ef4444; }
+  .help-bar b { color:#aab2bf; }
 
-  .right {
-    overflow-y:auto; padding:16px 20px;
-  }
-  .empty { padding:60px; text-align:center; color:#6e7685; font-size:14px; }
+  .feed { padding: 14px 18px; max-width: 1400px; margin: 0 auto; }
 
-  .det-head { margin-bottom:12px; }
-  .det-head h2 { margin:0 0 4px; color:#e3e6eb; font-size:16px; }
-  .det-head .sub { color:#8b95a5; font-size:12px; }
+  .group {
+    background:#161a21; border:1px solid #252a33; border-radius:8px;
+    margin-bottom: 14px; overflow:hidden;
+  }
+  .group-head {
+    padding: 10px 14px; background:#1f2530;
+    display:flex; align-items:center; gap:10px; cursor:pointer;
+    user-select:none; border-bottom:1px solid #252a33;
+  }
+  .group-head:hover { background:#232a37; }
+  .group-head .toggle { color:#6e7685; font-size:11px; transition:transform 0.18s; }
+  .group.open .toggle { transform: rotate(90deg); }
+  .group-head .name { font-weight:600; color:#6fa8ff; font-size:14px; }
+  .group-head .summary { color:#8b95a5; font-size:11px; margin-left: auto; }
+  .group-body { display:none; }
+  .group.open .group-body { display:block; }
+
+  .card {
+    border-bottom: 1px solid #1f2530;
+    padding: 10px 14px;
+  }
+  .card:last-child { border-bottom: none; }
+  .card-head {
+    display:flex; align-items:center; gap:10px; cursor:pointer;
+    user-select:none;
+  }
+  .card-head .toggle { color:#6e7685; font-size:10px; transition:transform 0.18s; }
+  .card.open .card-head .toggle { transform: rotate(90deg); }
+  .card-head .time { font-family:monospace; color:#6fa8ff; font-size:11px; min-width:90px; }
+  .card-head .badge {
+    font-size:10px; padding:2px 8px; border-radius:3px; font-weight:500;
+  }
+  .badge.lobby_done { background:#1e4034; color:#4ade80; }
+  .badge.lobby_pending { background:#1e3a44; color:#5eead4; }
+  .badge.tapped { background:#1f3550; color:#6fa8ff; }
+  .badge.no_target { background:#3d2f1a; color:#fbbf24; }
+  .badge.loop_blocked { background:#3d1d1d; color:#ef4444; }
+  .badge.unknown { background:#252a33; color:#8b95a5; }
+  .card-head .summary { color:#aab2bf; font-size:12px; flex: 1; }
+  .card-head .v-ok { color:#4ade80; font-size:11px; }
+  .card-head .v-fail { color:#ef4444; font-size:11px; }
+  .card-head .duration { color:#6e7685; font-size:11px; }
+
+  .card-body {
+    display:none;
+    padding: 12px 0 6px;
+    margin-top: 8px;
+    border-top: 1px dashed #252a33;
+  }
+  .card.open .card-body { display:block; }
 
   .section {
-    background:#1a1f28; border:1px solid #252a33; border-radius:6px;
-    padding:12px 14px; margin-bottom:12px;
+    background:#0f1115; border:1px solid #252a33; border-radius:6px;
+    padding:11px 13px; margin-bottom:10px;
   }
   .section h3 {
-    margin:0 0 8px; font-size:12px; color:#6fa8ff;
-    font-weight:600; text-transform:uppercase; letter-spacing:0.5px;
+    margin:0 0 8px; font-size:12px; color:#fbbf24;
+    font-weight:600;
     display:flex; align-items:center; gap:8px;
   }
-  .section h3 .duration { color:#8b95a5; font-size:11px; font-weight:400; }
+  .section h3 .duration { color:#6e7685; font-size:11px; font-weight:400; margin-left:auto; }
+  .section .desc {
+    color:#6e7685; font-size:11px; margin-bottom:8px; line-height:1.5;
+  }
 
   .img-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
-  .img-grid .card {
-    background:#0f1115; border:1px solid #252a33; border-radius:5px; overflow:hidden;
+  .img-grid.single { grid-template-columns: 1fr; max-width: 700px; }
+  .img-grid .img-card {
+    background:#000; border:1px solid #252a33; border-radius:5px; overflow:hidden;
   }
-  .img-grid .card .label {
-    padding:5px 8px; background:#1f2530; font-size:11px; color:#8b95a5;
+  .img-card .label {
+    padding:5px 9px; background:#1f2530; font-size:11px; color:#aab2bf;
   }
-  .img-grid .card img { width:100%; display:block; cursor:zoom-in; max-height:400px; object-fit:contain; }
+  .img-card img { width:100%; display:block; cursor:zoom-in; max-height:380px; object-fit:contain; }
 
-  .kv { display:grid; grid-template-columns:120px 1fr; gap:3px 12px; font-size:12px; margin:6px 0; }
+  .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 12px; font-size:12px; margin:6px 0; }
   .kv .k { color:#8b95a5; }
   .kv .v { color:#e3e6eb; font-family:monospace; }
 
-  .tmpl-list { display:flex; flex-wrap:wrap; gap:8px; }
+  .tmpl-list { display:flex; flex-wrap:wrap; gap:8px; margin-top: 6px; }
   .tmpl-card {
-    background:#0f1115; border:1px solid #252a33; border-radius:4px;
+    background:#0a0c10; border:1px solid #252a33; border-radius:4px;
     padding:6px; width:120px; font-size:11px;
   }
-  .tmpl-card.hit { border-color:#4ade80; }
-  .tmpl-card.miss { opacity:0.6; }
-  .tmpl-card img { width:100%; height:60px; object-fit:contain; background:#000; }
-  .tmpl-card .name { font-family:monospace; font-size:10px; color:#aab2bf; margin-top:3px; }
-  .tmpl-card .score { font-size:11px; color:#e3e6eb; }
+  .tmpl-card.hit { border-color:#4ade80; box-shadow: 0 0 0 1px #4ade8050; }
+  .tmpl-card.miss { opacity:0.55; }
+  .tmpl-card img { width:100%; height:46px; object-fit:contain; background:#000; }
+  .tmpl-card .name { font-family:monospace; font-size:10px; color:#aab2bf; margin-top:3px; word-break: break-all; }
+  .tmpl-card .score { font-size:11px; color:#e3e6eb; margin-top:2px; }
   .tmpl-card .score.hit { color:#4ade80; font-weight:600; }
+  .tmpl-card .score.miss { color:#6e7685; }
 
-  .det-list { font-size:11px; }
+  .det-list { font-size:11px; margin-top: 6px; }
   .det-list .det {
-    display:flex; gap:8px; padding:4px 0; border-bottom:1px dashed #252a33;
+    display:flex; gap:8px; padding:5px 8px; border-radius:4px;
+    background:#1a1f28; margin-bottom: 3px;
   }
-  .det-list .det:last-child { border:none; }
   .det-list .cls { font-weight:500; min-width:80px; }
   .det-list .cls.close_x { color:#ef4444; }
   .det-list .cls.action_btn { color:#fbbf24; }
 
-  .ocr-list { font-size:11px; max-height:160px; overflow-y:auto; }
-  .ocr-list .h { display:flex; gap:8px; padding:3px 0; border-bottom:1px dashed #252a33; }
-  .ocr-list .text { color:#e3e6eb; flex:1; }
-  .ocr-list .conf { color:#8b95a5; font-family:monospace; }
-
-  .modal {
-    position:fixed; inset:0; background:rgba(0,0,0,0.92);
-    display:none; justify-content:center; align-items:center; z-index:99;
+  .ocr-list { font-size:11px; max-height:160px; overflow-y:auto; margin-top: 6px; }
+  .ocr-list .h {
+    display:flex; gap:8px; padding:4px 8px; background:#1a1f28;
+    border-radius:3px; margin-bottom:2px;
   }
-  .modal.on { display:flex; }
-  .modal img { max-width:95vw; max-height:95vh; cursor:zoom-out; }
+  .ocr-list .text { color:#e3e6eb; flex:1; }
+  .ocr-list .conf { color:#6e7685; font-family:monospace; }
 
   .verify-bar {
     display:flex; gap:14px; align-items:center;
-    padding:8px 12px; border-radius:5px;
-    background:#0f1115; border:1px solid #252a33;
-    font-size:12px; margin-top:6px;
+    padding:9px 12px; border-radius:5px;
+    background:#0a0c10; border:1px solid #252a33;
+    font-size:12px; margin-top:8px;
   }
   .verify-bar.ok { border-color:#4ade80; }
   .verify-bar.fail { border-color:#ef4444; }
+  .verify-bar.unknown { border-color:#fbbf24; }
   .verify-bar .label { color:#8b95a5; }
+  .verify-bar.ok .result { color:#4ade80; font-weight:600; }
+  .verify-bar.fail .result { color:#ef4444; font-weight:600; }
+  .verify-bar.unknown .result { color:#fbbf24; font-weight:600; }
+
+  .modal {
+    position:fixed; inset:0; background:rgba(0,0,0,0.94);
+    display:none; justify-content:center; align-items:center; z-index:99;
+  }
+  .modal.on { display:flex; }
+  .modal img { max-width:96vw; max-height:96vh; cursor:zoom-out; }
+
+  .empty { padding:80px; text-align:center; color:#6e7685; font-size:14px; }
+
+  .new-glow { animation: newGlow 1.2s ease-out; }
+  @keyframes newGlow {
+    0% { box-shadow: 0 0 0 2px #6fa8ff; transform: scale(1.005); }
+    100% { box-shadow: none; transform: scale(1); }
+  }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <h1>Decision Theater</h1>
-  <span class="pulse" id="pulse" title="实时刷新"></span>
+  <h1>决策剧场</h1>
+  <span class="pulse" id="pulse" title="实时刷新中"></span>
   <span class="meta" id="status">loading...</span>
-  <input id="filter-inst" type="number" placeholder="筛选实例 #" min="0" max="9" style="width:110px;">
-  <button onclick="reload()">刷新</button>
+  <input id="filter-inst" type="number" placeholder="只看实例 #" min="0" max="9" style="width:120px;">
+  <button onclick="expandAll()">全部展开</button>
+  <button onclick="collapseAll()">全部折叠</button>
   <div class="right">
-    <span class="meta" id="cur-id">未选中</span>
+    <button onclick="toggleAuto()" id="btn-auto">自动刷新: 开</button>
   </div>
 </div>
 
-<div class="layout">
-  <div class="left" id="list">loading...</div>
-  <div class="right" id="detail">
-    <div class="empty">点左侧选一条决策<br>右侧展示完整识别+点击过程</div>
-  </div>
+<div class="help-bar">
+  <span><b>识别层（Tier）说明：</b></span>
+  <span><b>Tier 0 模板</b>：像素级精确比对，最快 5ms</span>
+  <span><b>Tier 1 Memory</b>：phash 查历史决策</span>
+  <span><b>Tier 2 YOLO</b>：视觉检测物体（按钮/X 等）</span>
+  <span><b>Tier 3 OCR</b>：文字识别（在 YOLO bbox 内）</span>
+  <span style="margin-left:auto;color:#fbbf24"><b>新决策插入会闪一下</b></span>
+</div>
+
+<div class="feed" id="feed">
+  <div class="empty">暂无决策记录<br><span style="font-size:11px">在 GameBot 主界面点开始, 跑实例触发 dismiss_popups</span></div>
 </div>
 
 <div class="modal" id="modal" onclick="this.classList.remove('on')">
@@ -2337,179 +2392,357 @@ DECISIONS_HTML = r"""<!doctype html>
 
 <script>
 let allItems = [];
-let curId = null;
+let knownIds = new Set();
+let openCards = new Set();    // 展开的决策 id
+let openGroups = new Set();   // 展开的实例号
 let autoRefresh = true;
 
+const PHASE_CN = {
+  'dismiss_popups': '弹窗清理',
+  'launch_game': '启动游戏',
+  'wait_login': '等待登录',
+  'team_create': '组队（队长建队）',
+  'team_join': '组队（队员加入）',
+  'map_setup': '地图设置',
+  'accelerator': '加速器连接',
+};
+
+const OUTCOME_CN = {
+  'lobby_confirmed': '✓ 大厅确认完成（关弹窗结束）',
+  'lobby_pending_1/2': '大厅初判 1/2 (需连续 2 次确认)',
+  'lobby_pending_2/2': '大厅初判 2/2 (再确认一次)',
+  'tapped': '已点击目标',
+  'no_target': '没找到可点目标 (画面在加载/动画中)',
+  'loop_blocked': '同位置连点 3 次无效, 等待',
+  '': '未知结果',
+};
+
+const OUTCOME_BADGE = {
+  'lobby_confirmed': 'lobby_done',
+  'tapped': 'tapped',
+  'no_target': 'no_target',
+  'loop_blocked': 'loop_blocked',
+};
+
+function outcomeText(o) {
+  if (!o) return '未知';
+  if (OUTCOME_CN[o]) return OUTCOME_CN[o];
+  if (o.startsWith('lobby_pending')) return '大厅初判 ' + o.replace('lobby_pending_', '') + ' (需多次确认)';
+  return o;
+}
+function outcomeBadgeClass(o) {
+  if (!o) return 'unknown';
+  if (OUTCOME_BADGE[o]) return OUTCOME_BADGE[o];
+  if (o.startsWith('lobby')) return 'lobby_pending';
+  return 'unknown';
+}
+function phaseText(p) { return PHASE_CN[p] || p; }
+
 async function reload() {
-  let url = '/api/decisions?limit=200';
+  let url = '/api/decisions?limit=300';
   const inst = document.getElementById('filter-inst').value;
   if (inst !== '') url += '&instance=' + inst;
   try {
     const r = await fetch(url);
     const d = await r.json();
     document.getElementById('status').textContent =
-      `${d.count} 条决策 · session=${(d.session_dir || '-').split(/[\\\/]/).pop()}`;
+      `共 ${d.count} 条决策 · session=${(d.session_dir || '-').split(/[\\\/]/).pop()}`;
     document.getElementById('pulse').style.background = d.enabled ? '#4ade80' : '#6e7685';
     allItems = d.items;
-    renderList();
+    renderFeed();
   } catch (e) {
     document.getElementById('status').textContent = '加载失败: ' + e.message;
   }
 }
 
-function renderList() {
-  const c = document.getElementById('list');
+function renderFeed() {
+  const c = document.getElementById('feed');
   if (allItems.length === 0) {
     c.innerHTML = '<div class="empty">暂无决策记录<br><span style="font-size:11px">在 GameBot 主界面点开始, 跑实例触发 dismiss_popups</span></div>';
     return;
   }
-  c.innerHTML = allItems.map(it => {
-    const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
-    const out = it.outcome || '-';
-    let cls = 'pending';
-    if (out.startsWith('lobby')) cls = 'lobby';
-    else if (out === 'tapped') cls = 'tap';
-    else if (out === 'no_target') cls = 'no';
-    else if (out.includes('fail') || out === 'loop_blocked') cls = 'fail';
-    const v = it.verify_success;
-    let vlabel = '';
-    if (v === true) vlabel = '<span class="v-ok">✓ 画面变了</span>';
-    else if (v === false) vlabel = '<span class="v-fail">✗ 画面没变</span>';
-    return `<div class="item ${it.id===curId?'cur':''}" onclick="open_('${it.id}')">
-      <div class="row1">
-        <span class="badge ${cls}">${out}</span>
-        <span style="margin-left:auto" class="meta">实例#${it.instance}</span>
-      </div>
-      <div class="id">${time} · ${it.phase} R${it.round}</div>
-      <div class="row2">
-        ${it.tap_method ? '点 '+it.tap_method+(it.tap_target?'·'+it.tap_target:'') : ''}
-        ${vlabel}
-      </div>
-    </div>`;
-  }).join('');
-}
 
-async function open_(id) {
-  curId = id;
-  document.getElementById('cur-id').textContent = id;
-  renderList();
-  const r = await fetch('/api/decision/' + encodeURIComponent(id) + '/data');
-  if (!r.ok) {
-    document.getElementById('detail').innerHTML = '<div class="empty">加载失败</div>';
-    return;
+  // 按实例分组
+  const byInst = {};
+  for (const it of allItems) {
+    const k = it.instance;
+    if (!byInst[k]) byInst[k] = [];
+    byInst[k].push(it);
   }
-  const d = await r.json();
-  renderDetail(d);
+
+  // 按实例号排序
+  const instances = Object.keys(byInst).map(x => parseInt(x)).sort((a, b) => a - b);
+
+  let html = '';
+  for (const inst of instances) {
+    const items = byInst[inst].sort((a, b) => b.created - a.created);  // 新的在前
+    // 按 phase + 大间隔(>10s)断成"测试场次"
+    const sessions = groupIntoSessions(items);
+
+    // 默认展开所有实例（除非用户手动折叠了）
+    if (!openGroups.has('inst_' + inst) && openGroups.size === 0) {
+      openGroups.add('inst_' + inst);  // 首次默认展开
+    }
+    const isOpen = openGroups.has('inst_' + inst);
+
+    const totalDecisions = items.length;
+    const lobbyDone = items.filter(x => x.outcome === 'lobby_confirmed').length;
+    html += `<div class="group ${isOpen ? 'open' : ''}" data-key="inst_${inst}">
+      <div class="group-head" onclick="toggleGroup('inst_${inst}')">
+        <span class="toggle">▶</span>
+        <span class="name">实例 #${inst}</span>
+        <span class="summary">共 ${totalDecisions} 条决策 · ${sessions.length} 个测试场次 · lobby 完成 ${lobbyDone} 次</span>
+      </div>
+      <div class="group-body">`;
+
+    for (let si = 0; si < sessions.length; si++) {
+      const sess = sessions[si];
+      const start = new Date(sess[sess.length - 1].created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+      const end = new Date(sess[0].created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+      const phase = sess[0].phase;
+      html += `<div style="padding:6px 14px; background:#1a1f28; color:#fbbf24; font-size:11px; border-bottom:1px solid #252a33;">
+        ━━━ 测试场次 ${sessions.length - si} · ${phaseText(phase)} · ${start} → ${end} · 共 ${sess.length} 条 ━━━
+      </div>`;
+      for (const it of sess) {
+        html += renderCard(it);
+      }
+    }
+
+    html += `</div></div>`;
+  }
+  c.innerHTML = html;
+
+  // 展开预先打开的卡
+  openCards.forEach(id => {
+    const el = document.querySelector(`[data-card-id="${id}"]`);
+    if (el) el.classList.add('open');
+  });
 }
 
-function renderDetail(d) {
-  const c = document.getElementById('detail');
-  const imgUrl = (name) => '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name);
+function groupIntoSessions(items) {
+  // items 已按时间倒序. 同 phase + 间隔 < 10s 算同 session
+  if (items.length === 0) return [];
+  const sessions = [];
+  let cur = [items[0]];
+  for (let i = 1; i < items.length; i++) {
+    const prev = items[i - 1];
+    const it = items[i];
+    if (it.phase !== prev.phase || prev.created - it.created > 10) {
+      sessions.push(cur);
+      cur = [it];
+    } else {
+      cur.push(it);
+    }
+  }
+  sessions.push(cur);
+  return sessions;
+}
 
-  let html = `<div class="det-head">
-    <h2>实例 #${d.instance} · ${d.phase} · 第 ${d.round} 轮</h2>
-    <div class="sub">${new Date(d.created*1000).toLocaleString('zh-CN')} · phash=${d.input_phash || '-'} · 结果=<strong>${d.outcome || '-'}</strong></div>
+function renderCard(it) {
+  const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false}) +
+               '.' + String(Math.floor((it.created % 1) * 1000)).padStart(3, '0');
+  const isOpen = openCards.has(it.id);
+  const v = it.verify_success;
+  let vlabel = '';
+  if (v === true) vlabel = '<span class="v-ok">✓ 画面变了</span>';
+  else if (v === false) vlabel = '<span class="v-fail">✗ 画面没变</span>';
+  return `<div class="card ${isOpen ? 'open' : ''}" data-card-id="${it.id}">
+    <div class="card-head" onclick="toggleCard('${it.id}')">
+      <span class="toggle">▶</span>
+      <span class="time">${time}</span>
+      <span class="badge ${outcomeBadgeClass(it.outcome)}">R${it.round}</span>
+      <span class="summary">${outcomeText(it.outcome)}${it.tap_target ? ' · 点 ' + it.tap_target : ''}</span>
+      ${vlabel}
+    </div>
+    <div class="card-body" id="body-${it.id}">
+      <div class="empty" style="padding:20px;">加载详情...</div>
+    </div>
   </div>`;
+}
 
-  // 输入 + 点击
+async function toggleCard(id) {
+  const el = document.querySelector(`[data-card-id="${id}"]`);
+  if (!el) return;
+  const opening = !el.classList.contains('open');
+  el.classList.toggle('open');
+  if (opening) {
+    openCards.add(id);
+    // 加载详情
+    const body = document.getElementById('body-' + id);
+    if (body && body.querySelector('.empty')) {
+      body.innerHTML = '<div class="empty" style="padding:10px;">loading...</div>';
+      try {
+        const r = await fetch('/api/decision/' + encodeURIComponent(id) + '/data');
+        if (!r.ok) { body.innerHTML = '<div class="empty">加载失败</div>'; return; }
+        const d = await r.json();
+        body.innerHTML = renderDetailHtml(d);
+      } catch (e) {
+        body.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
+      }
+    }
+  } else {
+    openCards.delete(id);
+  }
+}
+
+function toggleGroup(key) {
+  if (openGroups.has(key)) openGroups.delete(key);
+  else openGroups.add(key);
+  document.querySelector(`[data-key="${key}"]`).classList.toggle('open');
+}
+
+function expandAll() {
+  document.querySelectorAll('.group').forEach(g => {
+    g.classList.add('open');
+    openGroups.add(g.dataset.key);
+  });
+}
+function collapseAll() {
+  document.querySelectorAll('.group').forEach(g => {
+    g.classList.remove('open');
+    openGroups.delete(g.dataset.key);
+  });
+  openCards.clear();
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('open'));
+}
+
+function toggleAuto() {
+  autoRefresh = !autoRefresh;
+  document.getElementById('btn-auto').textContent = '自动刷新: ' + (autoRefresh ? '开' : '关');
+}
+
+function renderDetailHtml(d) {
+  const imgUrl = (name) => '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name);
+  let html = '';
+
+  // 1. 输入截图 + 点击位置
   const hasInput = !!d.input_image;
   const hasTap = d.tap && d.tap.annot_image;
   if (hasInput || hasTap) {
-    html += `<div class="section"><h3>① 机器看见的画面 ${hasTap ? '+ 点击位置' : ''}</h3>
-      <div class="img-grid">
-        ${hasInput ? `<div class="card"><div class="label">输入截图 ${d.input_w}×${d.input_h}</div><img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>` : ''}
-        ${hasTap ? `<div class="card"><div class="label">点击位置 ${d.tap.method}</div><img src="${imgUrl(d.tap.annot_image)}" onclick="zoom(this.src)"></div>` : ''}
+    html += `<div class="section">
+      <h3>① 机器看见的画面 ${hasTap ? '+ 点击位置标注' : ''}</h3>
+      <div class="desc">这是 bot 截到的原始画面。如果 bot 点了什么，红圈+文字标在第二张图上。</div>
+      <div class="img-grid ${hasTap ? '' : 'single'}">
+        ${hasInput ? `<div class="img-card"><div class="label">原始截图 ${d.input_w}×${d.input_h}</div><img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>` : ''}
+        ${hasTap ? `<div class="img-card"><div class="label">点击位置 (来自 ${d.tap.method})</div><img src="${imgUrl(d.tap.annot_image)}" onclick="zoom(this.src)"></div>` : ''}
       </div>
       ${d.tap ? `<div class="kv" style="margin-top:8px;">
         <span class="k">点击坐标</span><span class="v">(${d.tap.x}, ${d.tap.y})</span>
-        <span class="k">来自</span><span class="v">${d.tap.method}</span>
-        ${d.tap.target_class ? `<span class="k">目标类</span><span class="v">${d.tap.target_class}</span>` : ''}
-        ${d.tap.target_text ? `<span class="k">OCR 文字</span><span class="v">${escapeHtml(d.tap.target_text)}</span>` : ''}
+        <span class="k">来自识别层</span><span class="v">${d.tap.method}</span>
+        ${d.tap.target_class ? `<span class="k">目标类别</span><span class="v">${d.tap.target_class}</span>` : ''}
+        ${d.tap.target_text ? `<span class="k">目标文字 (OCR)</span><span class="v">${escapeHtml(d.tap.target_text)}</span>` : ''}
         ${d.tap.target_conf ? `<span class="k">置信度</span><span class="v">${d.tap.target_conf}</span>` : ''}
       </div>` : ''}
     </div>`;
   }
 
-  // 验证
+  // 2. 验证条
   if (d.verify) {
     const ok = d.verify.success;
-    html += `<div class="verify-bar ${ok===true?'ok':(ok===false?'fail':'')}">
-      <span class="label">tap 后验证</span>
-      <span>phash 距离 = <strong>${d.verify.distance}</strong></span>
-      <span>${ok===true ? '✓ 画面变了, 大概率点中' : (ok===false ? '✗ 画面没变, 点错或目标无效' : '? 未验证')}</span>
+    const stateCls = ok===true ? 'ok' : (ok===false ? 'fail' : 'unknown');
+    html += `<div class="section">
+      <h3>② tap 后验证</h3>
+      <div class="desc">点完后等 500ms 重截图，对比 phash。距离大说明画面变了 = 大概率点中。</div>
+      <div class="verify-bar ${stateCls}">
+        <span class="label">phash 距离 =</span>
+        <span style="font-family:monospace;font-size:14px;font-weight:600;">${d.verify.distance}</span>
+        <span class="result">${ok===true ? '✓ 画面变了，大概率点中' : (ok===false ? '✗ 画面没变，点错或目标无效' : '? 未验证')}</span>
+      </div>
+      <div class="kv" style="margin-top:6px; font-size:11px;">
+        <span class="k">phash 之前</span><span class="v">${d.verify.phash_before || '-'}</span>
+        <span class="k">phash 之后</span><span class="v">${d.verify.phash_after || '-'}</span>
+      </div>
     </div>`;
   }
 
-  // 各 Tier
+  // 3. 各 Tier
   (d.tiers || []).forEach((t, idx) => {
     html += `<div class="section">
-      <h3>Tier ${t.tier} · ${t.name} <span class="duration">${t.duration_ms}ms ${t.early_exit ? '· EARLY EXIT' : ''}</span></h3>`;
+      <h3>③.${idx+1} Tier ${t.tier} · ${t.name}
+        <span class="duration">${t.duration_ms}ms ${t.early_exit ? '· 此 Tier 命中, 提前退出' : ''}</span>
+      </h3>`;
 
     // 模板尝试
     if (t.templates && t.templates.length > 0) {
-      html += `<div style="font-size:11px;color:#8b95a5;margin-bottom:6px;">尝试了 ${t.templates.length} 个模板</div>
+      const hits = t.templates.filter(x => x.hit).length;
+      html += `<div class="desc">这次试了 <b>${t.templates.length}</b> 个模板，命中 <b>${hits}</b> 个。绿框 = 命中（分数 ≥ 阈值），灰框 = 没命中。</div>
         <div class="tmpl-list">`;
       for (const tm of t.templates) {
         const cls = tm.hit ? 'hit' : 'miss';
-        const sc = tm.hit ? `<span class="score hit">${tm.score} ✓</span>` : `<span class="score">${tm.score}</span>`;
-        const tmplImg = tm.template_image ? `<img src="${imgUrl(tm.template_image)}" alt="">` : '<div style="height:60px;color:#6e7685;text-align:center;line-height:60px;">no img</div>';
-        html += `<div class="tmpl-card ${cls}">${tmplImg}<div class="name">${tm.name}</div>${sc} <span style="opacity:0.6">/ ${tm.threshold}</span></div>`;
+        const sc = tm.hit
+          ? `<div class="score hit">${tm.score} ✓</div>`
+          : `<div class="score miss">${tm.score}</div>`;
+        const tmplImg = tm.template_image
+          ? `<img src="${imgUrl(tm.template_image)}" alt="" onclick="event.stopPropagation();zoom(this.src)" style="cursor:zoom-in;">`
+          : '<div style="height:46px;color:#6e7685;text-align:center;line-height:46px;font-size:10px;">模板图缺失</div>';
+        html += `<div class="tmpl-card ${cls}">${tmplImg}<div class="name">${tm.name}</div>${sc}<div style="font-size:10px;color:#6e7685;">阈值 ${tm.threshold}</div></div>`;
       }
       html += `</div>`;
     }
 
-    // YOLO
+    // YOLO 标注图（也用于显示模板命中位置）
     if (t.yolo_annot_image) {
-      html += `<div class="img-grid"><div class="card">
-        <div class="label">YOLO 标注画面（红框=close_x 黄框=action_btn）</div>
+      const isLobby = t.name && t.name.includes('大厅');
+      html += `<div class="img-grid single" style="margin-top:8px;"><div class="img-card">
+        <div class="label">${isLobby ? '模板命中位置（绿框=lobby_start_btn）' : 'YOLO 标注画面（红框=close_x · 黄框=action_btn）'}</div>
         <img src="${imgUrl(t.yolo_annot_image)}" onclick="zoom(this.src)">
       </div></div>`;
     }
+
+    // YOLO 检测列表
     if (t.yolo_detections && t.yolo_detections.length > 0) {
-      html += `<div class="det-list" style="margin-top:8px;">`;
+      html += `<div class="det-list">`;
       for (const det of t.yolo_detections) {
         html += `<div class="det">
           <span class="cls ${det.cls}">${det.cls}</span>
-          <span>conf=<strong>${det.conf}</strong></span>
-          <span style="color:#8b95a5">bbox=[${det.bbox.join(', ')}]</span>
+          <span>conf=<b>${det.conf}</b></span>
+          <span style="color:#6e7685">bbox=[${det.bbox.join(', ')}]</span>
         </div>`;
       }
       html += `</div>`;
     } else if (t.name === 'YOLO') {
-      html += `<div style="color:#6e7685;font-size:11px;">YOLO 未检测到任何目标</div>`;
+      html += `<div style="color:#6e7685;font-size:11px;margin-top:6px;">YOLO 未检测到任何目标</div>`;
     }
 
-    // OCR
+    // OCR ROI 图
     if (t.ocr_roi_image) {
-      html += `<div class="img-grid" style="margin-top:8px;"><div class="card">
-        <div class="label">OCR ROI 区域 (橙框=ROI 绿框=识别文字)</div>
+      html += `<div class="img-grid single" style="margin-top:8px;"><div class="img-card">
+        <div class="label">OCR 识别区域 (橙框=ROI · 绿框=识别到的文字)</div>
         <img src="${imgUrl(t.ocr_roi_image)}" onclick="zoom(this.src)">
       </div></div>`;
     }
     if (t.ocr_hits && t.ocr_hits.length > 0) {
-      html += `<div class="ocr-list" style="margin-top:8px;">`;
+      html += `<div class="ocr-list">`;
       for (const h of t.ocr_hits) {
         html += `<div class="h"><span class="text">${escapeHtml(h.text)}</span>
           <span class="conf">${h.conf || ''}</span></div>`;
       }
       html += `</div>`;
     } else if (t.name && t.name.startsWith('OCR')) {
-      html += `<div style="color:#6e7685;font-size:11px;">OCR 未识别到文字</div>`;
+      html += `<div style="color:#6e7685;font-size:11px;margin-top:6px;">OCR 未识别到任何文字</div>`;
     }
 
     // Memory
     if (t.memory_phash_query) {
       html += `<div class="kv">
-        <span class="k">查询 phash</span><span class="v">${t.memory_phash_query}</span>
-        <span class="k">命中</span><span class="v">${t.memory_hit ? JSON.stringify(t.memory_hit) : '无'}</span>
+        <span class="k">phash 查询</span><span class="v">${t.memory_phash_query}</span>
+        <span class="k">命中</span><span class="v">${t.memory_hit ? JSON.stringify(t.memory_hit) : '无 (新画面)'}</span>
       </div>`;
     }
 
-    if (t.note) html += `<div style="color:#aab2bf;font-size:11px;margin-top:6px;">${escapeHtml(t.note)}</div>`;
+    if (t.note) html += `<div style="color:#aab2bf;font-size:11px;margin-top:8px;padding:6px 9px;background:#0a0c10;border-radius:4px;">📝 ${escapeHtml(t.note)}</div>`;
     html += `</div>`;
   });
 
-  c.innerHTML = html;
+  // note 备注
+  if (d.note) {
+    html += `<div class="section" style="background:#1a1f28;border-color:#3a4252;">
+      <h3>④ 决策备注</h3>
+      <div style="color:#e3e6eb;font-size:13px;">${escapeHtml(d.note)}</div>
+    </div>`;
+  }
+
+  return html;
 }
 
 function zoom(src) {
@@ -2528,7 +2761,7 @@ document.getElementById('filter-inst').addEventListener('input', () => {
 });
 
 reload();
-setInterval(() => { if (autoRefresh) reload(); }, 2000);
+setInterval(() => { if (autoRefresh) reload(); }, 800);
 </script>
 </body>
 </html>
