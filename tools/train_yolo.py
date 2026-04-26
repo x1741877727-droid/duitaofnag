@@ -104,27 +104,47 @@ def write_data_yaml(data_dir: Path, classes: list[str]):
 
 def _patch_torch_save_retry():
     """
-    workaround torch 2.11 + Windows 的两个 bug:
-      1. RuntimeError: enforce fail unexpected pos (zip EOCDR truncate, ~12MB+ 文件)
-      2. ValueError: I/O operation on closed file
-    都是新 zipfile serialization 路径的 bug。
-    修法: 强制走 _use_new_zipfile_serialization=False (旧 pickle 单遍写)
-         + retry 5 次兜底
+    workaround torch 2.11 + Windows 上 torch.save 流式写文件被 AV/防护工具截断的 bug:
+      ValueError: I/O operation on closed file
+      RuntimeError: enforce fail at inline_container.cc:672 unexpected pos
+
+    修法: 先序列化到内存 BytesIO, 再一次性原子写盘 (open/write/close 单次, AV 难截断)
+    + retry 5 次兜底
     """
     import torch as _t
+    import io as _io
+    import os as _os
     _orig = _t.save
 
-    def _safe_save(*a, **kw):
+    def _safe_save(obj, f, *args, **kwargs):
         import time as _time
-        # 强制走旧 pickle 格式 — Windows 上稳很多
-        kw["_use_new_zipfile_serialization"] = False
+        # 1. 序列化到内存 buffer（这一步不碰磁盘，AV 不会介入）
+        buf = _io.BytesIO()
+        try:
+            _orig(obj, buf, *args, **kwargs)
+        except Exception:
+            # 序列化本身就崩 → 真 bug，不重试
+            raise
+        data = buf.getvalue()
+
+        # 2. 单次原子写盘
         last = None
         for i in range(5):
             try:
-                return _orig(*a, **kw)
-            except (RuntimeError, ValueError, OSError) as e:
+                if hasattr(f, "write"):
+                    f.write(data)
+                    return
+                # 路径：写临时文件然后 rename（再原子一些）
+                tmp = str(f) + ".tmp"
+                with open(tmp, "wb") as out:
+                    out.write(data)
+                    out.flush()
+                    _os.fsync(out.fileno())
+                _os.replace(tmp, f)
+                return
+            except (ValueError, OSError, RuntimeError) as e:
                 last = e
-                print(f"  [torch.save retry {i+1}/5] {type(e).__name__}: {e}")
+                print(f"  [save retry {i+1}/5] {type(e).__name__}: {e}")
                 _time.sleep(0.5 * (i + 1))
         raise last
 
