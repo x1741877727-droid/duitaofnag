@@ -472,8 +472,11 @@ def _find_box_pid_for_idx(ld_idx: int) -> Optional[int]:
         import psutil
     except ImportError:
         return None
-    # 实例 0 是 "leidian"，1+ 是 "leidian1"、"leidian2" ...
-    target = "leidian" if ld_idx == 0 else f"leidian{ld_idx}"
+    # LDPlayer 9 实测：所有实例（含 0 号）的 cmdline 都是 `--comment leidianN`，
+    # 包括 leidian0。早期版本可能只有 "leidian"（无数字），fallback 兼容。
+    targets = {f"leidian{ld_idx}"}
+    if ld_idx == 0:
+        targets.add("leidian")
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             if proc.info['name'] != 'Ld9BoxHeadless.exe':
@@ -481,7 +484,7 @@ def _find_box_pid_for_idx(ld_idx: int) -> Optional[int]:
             cmd = ' '.join(proc.info['cmdline'] or [])
             # 用 token 边界匹配避免 leidian1 误匹配 leidian10
             for tok in cmd.split():
-                if tok == target:
+                if tok in targets:
                     return proc.info['pid']
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
