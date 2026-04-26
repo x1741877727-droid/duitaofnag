@@ -32,10 +32,33 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# CTA 不能含的危险词 (跳出大厅 / 强行参与跨场景活动)
+# CTA 不能含的危险词 (跳出大厅 / 强行参与跨场景活动 / 登录页按钮)
 NAV_BLACKLIST: Tuple[str, ...] = (
     "前往", "参加", "进入", "查看活动", "去看看", "立即前往",
     "前往观赛", "去活动", "我要参加", "查看", "开启", "去看",
+    # v2-5 实跑发现: 登录页 "微信登录/QQ登录" 被误识为 CTA, 加进黑名单
+    "微信登录", "QQ登录", "扫码登录", "微信", "QQ登",
+)
+
+
+# CTA 必须含至少 1 个动词关键字才算 "主动按钮"
+# 不在白名单的色块即使大且艳, 也不点 (保守策略, 避免误点装饰按钮)
+# 用户教学时如果遇到新动词没覆盖, 可以加进来 (热加载留 v2-6)
+CTA_VERB_WHITELIST: Tuple[str, ...] = (
+    "立即",  # 立即领取 / 立即砍价 / 立即抽奖 / 立即参与
+    "我要",  # 我要参与
+    "砍价",  # 立即砍价 / 帮砍 / 我要砍价
+    "领取",  # 立即领取 / 一键领取
+    "分享",  # 立即分享
+    "邀请",  # 邀请好友
+    "收下",  # 收下奖励
+    "确定", "确认", "同意", "好的", "知道了",
+    "继续",  # 继续游戏
+    "进入战场", "开始", "开战",
+    "助力",  # 帮 X 助力
+    "充值",  # 立即充值
+    "加入",  # 加入队伍 / 立即加入
+    "签到",
 )
 
 
@@ -58,13 +81,18 @@ def _color_block_mask(
     sat_min: int = 80,
     val_min: int = 100,
 ) -> np.ndarray:
-    """HSV 高饱和 + 高亮度 → 二值 mask"""
+    """HSV 高饱和 + 高亮度 → 二值 mask.
+
+    形态学 kernel 改小 (3,3) 避免相邻按钮粘连
+    (实跑发现: 7x5 把"微信登录"+"QQ登录"两个相邻按钮粘成一个色块,
+    boundingRect 横跨两按钮, tap 落在中间空隙).
+    """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     s = hsv[:, :, 1]
     v = hsv[:, :, 2]
     mask = ((s > sat_min) & (v > val_min)).astype(np.uint8) * 255
-    # 形态学闭运算合并相邻色块碎片
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5))
+    # 形态学闭运算: 仅修复小毛刺, 不要把相邻按钮粘成一个
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
@@ -142,24 +170,37 @@ def find_main_cta(
     frame: np.ndarray,
     ocr_fn: Optional[Callable] = None,
     nav_blacklist: Tuple[str, ...] = NAV_BLACKLIST,
+    verb_whitelist: Tuple[str, ...] = CTA_VERB_WHITELIST,
+    require_verb: bool = True,
     top_k: int = 5,
 ) -> Optional[CtaCandidate]:
-    """找画面里"最显眼的可点 CTA 按钮", 排除危险词.
+    """找画面里"最显眼的可点 CTA 按钮".
 
-    ocr_fn(roi: ndarray) → list (任何包含 .text 属性或字符串的对象) 或 None.
-    没传 ocr_fn 时, 跳过文字验证 (返回最显眼的色块, 风险更高).
+    保守策略 (默认 require_verb=True):
+      ① 候选必须 OCR 出文字 (无文字 = 装饰色块, 不点)
+      ② 文字必须含 verb_whitelist 中的至少 1 个动词 (主动按钮特征)
+      ③ 文字不含 nav_blacklist (跳出大厅 / 登录页等危险词)
+
+    实跑教训:
+      - 登录页 "微信登录"+"QQ登录" 两个按钮 都很显眼, 但都不是 CTA
+      - 因此**白名单优先**, 不在白名单宁可不动也不要乱点
+
+    ocr_fn(roi: ndarray) → list (含 .text 属性或字符串).
+    require_verb=False + ocr_fn=None 时, 退回旧"取最显眼" 行为 (高风险).
     """
     candidates = find_cta_candidates(frame)
     if not candidates:
         return None
 
-    # 没 OCR → 直接返回最显眼候选 (调用方接受不验证文字)
+    # 没 OCR + 不强制动词 → 退回旧行为 (调用方知道在做啥)
     if ocr_fn is None:
+        if require_verb:
+            return None  # 没法验证文字, 保守不动
         cand = candidates[0]
         cand.score = cand.saturation * cand.area / 10000
         return cand
 
-    # 有 OCR → 逐个验证, 跳过含危险词的
+    # 有 OCR → 逐个验证
     for cand in candidates[:top_k]:
         try:
             x1 = max(0, cand.cx - cand.w // 2)
@@ -175,11 +216,20 @@ def find_main_cta(
             continue
         cand.text = text
         if not text.strip():
+            logger.debug(f"[cta] skip 无 OCR 文字 @ ({cand.cx},{cand.cy})")
             continue
         # 排除危险词
         if any(nw and nw in text for nw in nav_blacklist):
             logger.debug(f"[cta] skip nav '{text}' @ ({cand.cx},{cand.cy})")
             continue
+        # 必须含动词关键字 (保守: 不在白名单不点)
+        if require_verb:
+            if not any(v and v in text for v in verb_whitelist):
+                logger.debug(
+                    f"[cta] skip 无动词 '{text}' @ ({cand.cx},{cand.cy}) "
+                    f"(不在 verb_whitelist)"
+                )
+                continue
         cand.score = cand.saturation * cand.area / 10000
         return cand
     return None

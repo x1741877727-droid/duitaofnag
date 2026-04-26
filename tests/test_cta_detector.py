@@ -144,13 +144,48 @@ def test_no_cta_in_empty_frame():
     print("  ✓ no_cta_in_empty_frame")
 
 
-def test_no_ocr_returns_first_blob():
-    """没传 ocr_fn → 返回最显眼候选 (调用方接受不验证文字)"""
+def test_no_ocr_default_returns_none_safe():
+    """默认 (require_verb=True) + 没 OCR → 保守不动"""
     f = make_dark_frame()
     draw_button(f, cx=640, cy=560, color_bgr=(200, 60, 180))
     cta = find_main_cta(f, ocr_fn=None)
+    assert cta is None, "默认保守, 不该乱点"
+    print("  ✓ no_ocr_default_returns_none_safe")
+
+
+def test_no_ocr_force_returns_first_blob():
+    """显式 require_verb=False → 退回旧"取最显眼"行为 (调用方知道在做啥)"""
+    f = make_dark_frame()
+    draw_button(f, cx=640, cy=560, color_bgr=(200, 60, 180))
+    cta = find_main_cta(f, ocr_fn=None, require_verb=False)
     assert cta is not None
-    print("  ✓ no_ocr_returns_first_blob")
+    print("  ✓ no_ocr_force_returns_first_blob")
+
+
+def test_verb_whitelist_required():
+    """OCR 文字不含 verb_whitelist → 不点 (修登录页 '微信登录' 误识)"""
+    f = make_dark_frame()
+    draw_button(f, cx=640, cy=560, color_bgr=(60, 200, 60))  # 绿色 (微信)
+
+    def fake_ocr(roi):
+        return [type("OcrHit", (), {"text": "微信登录"})()]
+
+    cta = find_main_cta(f, ocr_fn=fake_ocr)  # 默认 require_verb=True
+    assert cta is None, "微信登录 不在动词白名单, 不该点"
+    print("  ✓ verb_whitelist_required")
+
+
+def test_verb_whitelist_pass():
+    """OCR 含动词关键字 → 通过"""
+    f = make_dark_frame()
+    draw_button(f, cx=640, cy=560, color_bgr=(200, 60, 200))
+
+    for text in ("立即砍价", "立即领取", "我要参与", "收下奖励", "确定", "邀请好友"):
+        def _ocr(roi, t=text):
+            return [type("OcrHit", (), {"text": t})()]
+        cta = find_main_cta(f, ocr_fn=_ocr)
+        assert cta is not None, f"含动词 '{text}' 应通过"
+    print("  ✓ verb_whitelist_pass")
 
 
 def test_ocr_no_text_skipped():
@@ -184,7 +219,10 @@ def main():
         test_returns_safe_cta_with_ocr,
         test_ocr_string_format,
         test_no_cta_in_empty_frame,
-        test_no_ocr_returns_first_blob,
+        test_no_ocr_default_returns_none_safe,
+        test_no_ocr_force_returns_first_blob,
+        test_verb_whitelist_required,
+        test_verb_whitelist_pass,
         test_ocr_no_text_skipped,
     ]
     print(f"\nRunning {len(tests)} tests for cta_detector\n" + "=" * 60)

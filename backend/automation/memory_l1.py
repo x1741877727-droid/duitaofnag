@@ -152,22 +152,18 @@ class FrameMemory:
                         (ts, existing_id),
                     )
             else:
+                # 没有已存记录:
+                #   success=True → 新建 (学到一条新成功)
+                #   success=False → *不新建* (避免坐标污染 -- 这次失败的坐标
+                #     下次同 phash 还会被 query 当成"历史成功" 复用)
+                if not success:
+                    return
                 self._db.execute(
                     "INSERT INTO frame_action "
                     "(target_name, phash, action_x, action_y, action_w, action_h, "
                     " hit_count, success_count, fail_count, last_seen_ts) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                    (
-                        target_name,
-                        str(cur_phash),
-                        x,
-                        y,
-                        w,
-                        h,
-                        1 if success else 0,
-                        0 if success else 1,
-                        ts,
-                    ),
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, 1, 0, ?)",
+                    (target_name, str(cur_phash), x, y, w, h, ts),
                 )
             self._db.commit()
 
