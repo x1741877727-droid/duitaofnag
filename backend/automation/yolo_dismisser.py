@@ -258,12 +258,14 @@ class YoloDismisser:
         LOBBY_CONFIRM_NEEDED = 2
         last_tap = (0, 0)
         same_target_count = 0
+        empty_dets_streak = 0  # 连续多少轮 YOLO 没检到 close_x/action_btn
 
         # v2 P2 四元信号融合判大厅 — 替代旧"连续 2 次模板命中"简化逻辑
         # 修半透明弹窗误判 bug: 模板命中 + close_x=0 + action_btn=0 +
-        # 无遮罩 + phash 5 帧稳定, 全过才算大厅
+        # 无遮罩 + phash 稳定, 全过才算大厅
+        # stable_frames_required=2: 大厅有金币飞动 / 活动 banner 微动效, 严格 5 帧凑不齐
         from .lobby_check import LobbyQuadDetector
-        quad_detector = LobbyQuadDetector(stable_frames_required=3)
+        quad_detector = LobbyQuadDetector(stable_frames_required=2)
         use_quad = True  # 灰度开关, 出问题改 False 退回旧逻辑
 
         for rnd in range(self.max_rounds):
@@ -439,11 +441,25 @@ class YoloDismisser:
                     target_conf = tgt.conf
 
             if tap_xy is None:
-                # 啥都没识别 → 加载/动画中
-                logger.debug(f"[Y{rnd + 1}] 无目标 (dets={len(dets)})，等待")
+                # 啥都没识别 → 可能加载中, 也可能就是干净的大厅
+                empty_dets_streak += 1
+                # v2-4 兜底: 连续 3 轮 YOLO 没找到任何弹窗 + 模板命中 lobby_start_btn
+                # → 直接判大厅成功. 这是 use_quad=True 下 phash 不稳定无法过四元的兜底.
+                if empty_dets_streak >= 3 and lobby_hit is not None:
+                    logger.info(
+                        f"[Y{rnd + 1}] 大厅 (兜底: 连续 {empty_dets_streak} 轮无弹窗 + 模板命中) → 完成 · 关闭 {popups_closed}"
+                    )
+                    decision.finalize(
+                        outcome="lobby_confirmed_empty",
+                        note=f"连续 {empty_dets_streak} 轮 YOLO 无目标 + 模板命中 lobby_start_btn",
+                    )
+                    return DismissResult(True, popups_closed, "lobby", rnd + 1)
+                logger.debug(f"[Y{rnd + 1}] 无目标 (dets={len(dets)}, 连续{empty_dets_streak}轮)，等待")
                 decision.finalize(outcome="no_target", note=f"YOLO 检 {len(dets)} 个目标但都不达标")
                 await asyncio.sleep(0.6)
                 continue
+            else:
+                empty_dets_streak = 0  # 重置: 这轮有目标
 
             # 防死循环：连续 3 次同一坐标 → 这个目标可能不可交互，跳过本轮
             if abs(tap_xy[0] - last_tap[0]) < 20 and abs(tap_xy[1] - last_tap[1]) < 20:
