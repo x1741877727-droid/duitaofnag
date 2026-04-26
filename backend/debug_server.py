@@ -501,11 +501,20 @@ async def decisions_page():
 @app.get("/api/sessions")
 async def api_sessions():
     """列出所有有决策记录的 session（含历史）"""
-    from .automation.decision_log import get_recorder
-    return {
-        "sessions": get_recorder().list_sessions(),
-        "current_session": Path(_session_dir).name if _session_dir else None,
-    }
+    try:
+        from .automation.decision_log import get_recorder
+        sessions = get_recorder().list_sessions()
+        cur = ""
+        if _session_dir:
+            try:
+                cur = Path(_session_dir).name
+            except Exception:
+                cur = ""
+        return {"sessions": sessions, "current_session": cur}
+    except Exception as e:
+        import traceback
+        logger.error(f"api_sessions error: {e}\n{traceback.format_exc()}")
+        return {"sessions": [], "current_session": "", "error": str(e)}
 
 
 @app.get("/api/decisions")
@@ -515,26 +524,36 @@ async def api_decisions(limit: int = 200, instance: int = -1, session: str = "")
       session 空 → 当前 session（用内存索引最快）
       session 给定 → 扫磁盘历史 session
     """
-    from .automation.decision_log import get_recorder
-    rec = get_recorder()
-    inst_filter = instance if instance >= 0 else None
-    if session:
-        items = rec.list_session_decisions(session, limit=limit, instance=inst_filter)
+    try:
+        from .automation.decision_log import get_recorder
+        rec = get_recorder()
+        inst_filter = instance if instance >= 0 else None
+        if session:
+            items = rec.list_session_decisions(session, limit=limit, instance=inst_filter)
+            return {
+                "count": len(items),
+                "items": items,
+                "session": session,
+                "enabled": rec.is_enabled(),
+            }
+        items = rec.list_recent(limit=limit, instance=inst_filter)
+        cur_name = ""
+        if _session_dir:
+            try:
+                cur_name = Path(_session_dir).name
+            except Exception:
+                pass
         return {
             "count": len(items),
             "items": items,
-            "session_dir": str((rec._logs_root() or Path()) / session) if rec._logs_root() else "",
-            "session": session,
+            "session_dir": _session_dir,
+            "session": cur_name,
             "enabled": rec.is_enabled(),
         }
-    items = rec.list_recent(limit=limit, instance=inst_filter)
-    return {
-        "count": len(items),
-        "items": items,
-        "session_dir": _session_dir,
-        "session": Path(_session_dir).name if _session_dir else "",
-        "enabled": rec.is_enabled(),
-    }
+    except Exception as e:
+        import traceback
+        logger.error(f"api_decisions error: {e}\n{traceback.format_exc()}")
+        return {"count": 0, "items": [], "session": "", "enabled": False, "error": str(e)}
 
 
 def _resolve_decision_dir(decision_id: str, session: str = "") -> Optional[Path]:

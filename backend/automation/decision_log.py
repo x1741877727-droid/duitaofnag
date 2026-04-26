@@ -179,29 +179,61 @@ class _Recorder:
 
     def list_sessions(self) -> list[dict]:
         """列出所有有决策记录的 session, 按时间倒序"""
-        root = self._logs_root()
-        if root is None or not root.is_dir():
-            return []
-        out = []
-        for sess in sorted(root.iterdir(), reverse=True):
-            if not sess.is_dir():
-                continue
-            d_dir = sess / "decisions"
-            if not d_dir.is_dir():
-                continue
+        try:
+            root = self._logs_root()
+            if root is None or not root.is_dir():
+                return []
+            current_parent = None
             try:
-                cnt = sum(1 for _ in d_dir.iterdir() if _.is_dir())
+                if self._root is not None:
+                    current_parent = self._root.parent.resolve()
             except Exception:
-                cnt = 0
-            if cnt == 0:
-                continue
-            out.append({
-                "session": sess.name,
-                "decision_count": cnt,
-                "is_current": (self._root is not None and sess == self._root.parent),
-                "mtime": sess.stat().st_mtime,
-            })
-        return out
+                current_parent = None
+            out = []
+            try:
+                entries = list(root.iterdir())
+            except Exception:
+                return []
+            # 按 mtime 倒序
+            try:
+                entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            except Exception:
+                pass
+            for sess in entries:
+                try:
+                    if not sess.is_dir():
+                        continue
+                    d_dir = sess / "decisions"
+                    if not d_dir.is_dir():
+                        continue
+                    try:
+                        cnt = sum(1 for _ in d_dir.iterdir() if _.is_dir())
+                    except Exception:
+                        cnt = 0
+                    if cnt == 0:
+                        continue
+                    is_cur = False
+                    try:
+                        is_cur = (current_parent is not None
+                                  and sess.resolve() == current_parent)
+                    except Exception:
+                        pass
+                    try:
+                        mtime = sess.stat().st_mtime
+                    except Exception:
+                        mtime = 0
+                    out.append({
+                        "session": sess.name,
+                        "decision_count": cnt,
+                        "is_current": is_cur,
+                        "mtime": mtime,
+                    })
+                except Exception:
+                    continue
+            return out
+        except Exception as _e:
+            logger.warning(f"[decision] list_sessions 异常: {_e}")
+            return []
 
     def list_session_decisions(self, session_name: str, limit: int = 200,
                                 offset: int = 0,
