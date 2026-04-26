@@ -241,6 +241,18 @@ class YoloDismisser:
             logger.warning("[yolo] 模型不可用，退到 OcrDismisser")
             return await OcrDismisser(max_rounds=self.max_rounds).dismiss_all(device, matcher)
 
+        # Decision Recorder（前端可视化每次决策）
+        from .decision_log import get_recorder, TierRecord, YoloDetection
+        from .adb_lite import phash as _phash
+        rec = get_recorder()
+
+        # 实例号（从 ContextVar 读，便于决策 ID）
+        try:
+            from ..runner_service import _current_instance
+            inst_idx = _current_instance.get(-1)
+        except Exception:
+            inst_idx = -1
+
         popups_closed = 0
         lobby_confirm = 0
         LOBBY_CONFIRM_NEEDED = 2
@@ -252,6 +264,15 @@ class YoloDismisser:
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
+
+            # 开始一次决策记录（Decision context）
+            decision = rec.new_decision(inst_idx, "dismiss_popups", rnd + 1)
+            ph_before = ""
+            try:
+                ph_before = hex(_phash(shot))
+            except Exception:
+                pass
+            decision.set_input(shot, ph_before)
 
             # 顺手采集训练数据（持续投喂未来训练用）
             try:
@@ -266,8 +287,10 @@ class YoloDismisser:
                 lobby_confirm += 1
                 if lobby_confirm >= LOBBY_CONFIRM_NEEDED:
                     logger.info(f"[Y{rnd + 1}] 大厅确认 → 完成 (关闭 {popups_closed})")
+                    decision.finalize(outcome="lobby_confirmed", note=f"关闭 {popups_closed} 个")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1)
                 logger.debug(f"[Y{rnd + 1}] 大厅初判 ({lobby_confirm}/{LOBBY_CONFIRM_NEEDED})")
+                decision.finalize(outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}")
                 await asyncio.sleep(0.3)
                 continue
 
@@ -277,29 +300,55 @@ class YoloDismisser:
             dur_ms = (time.perf_counter() - t0) * 1000
             metrics.record("yolo_detect", dur_ms=round(dur_ms, 2), n=len(dets))
 
+            # 记录 YOLO Tier 到 Decision
+            tier_yolo = TierRecord(tier=2, name="YOLO", duration_ms=round(dur_ms, 2))
+            yolo_dets_log = [
+                YoloDetection(cls=d.name, conf=round(d.conf, 3), bbox=[d.x1, d.y1, d.x2, d.y2])
+                for d in dets
+            ]
+            decision.save_yolo_annot(tier_yolo, shot, yolo_dets_log)
+            decision.add_tier(tier_yolo)
+
             close_xs = [d for d in dets if d.name == "close_x" and d.conf > TAP_CONF_CLOSE]
             actions = [d for d in dets if d.name == "action_btn" and d.conf > TAP_CONF_ACTION]
 
             tap_xy: Optional[tuple[int, int, str]] = None
+            target_class = ""
+            target_conf = 0.0
+            ocr_text = ""
 
             # 优先级 1：close_x（最安全，纯关弹窗）
             if close_xs:
                 tgt = close_xs[0]
                 tap_xy = (tgt.cx, tgt.cy, f"close_x({tgt.conf:.2f})")
+                target_class = "close_x"
+                target_conf = tgt.conf
 
             # 优先级 2：action_btn — 但要 OCR 排除 nav 按钮
             elif actions:
                 tgt = actions[0]
-                roi = shot[max(0, tgt.y1):tgt.y2, max(0, tgt.x1):tgt.x2]
-                text = self._ocr_bbox(roi)
+                roi_box = [max(0, tgt.x1), max(0, tgt.y1), tgt.x2, tgt.y2]
+                roi = shot[roi_box[1]:roi_box[3], roi_box[0]:roi_box[2]]
+                text, ocr_hits_log = self._ocr_bbox_with_hits(roi, roi_box)
+                ocr_text = text
+                # 记录 OCR Tier 到 Decision（带 ROI 框）
+                from .decision_log import TierRecord as _TR
+                tier_ocr = _TR(tier=3, name="OCR-bbox",
+                               duration_ms=0.0,
+                               note=f"在 action_btn bbox 内 OCR")
+                decision.save_ocr_roi(tier_ocr, shot, roi=roi_box, hits=ocr_hits_log)
+                decision.add_tier(tier_ocr)
                 if any(nav in text for nav in NAV_WORDS):
                     logger.info(f"[Y{rnd + 1}] action_btn 含 nav 词 '{text[:30]}'，跳过")
                 else:
                     tap_xy = (tgt.cx, tgt.cy, f"action_btn({tgt.conf:.2f},{text[:20]})")
+                    target_class = "action_btn"
+                    target_conf = tgt.conf
 
             if tap_xy is None:
                 # 啥都没识别 → 加载/动画中
                 logger.debug(f"[Y{rnd + 1}] 无目标 (dets={len(dets)})，等待")
+                decision.finalize(outcome="no_target", note=f"YOLO 检 {len(dets)} 个目标但都不达标")
                 await asyncio.sleep(0.6)
                 continue
 
@@ -308,6 +357,7 @@ class YoloDismisser:
                 same_target_count += 1
                 if same_target_count >= 3:
                     logger.warning(f"[Y{rnd + 1}] 连续 3 次同点击({tap_xy[:2]}) 无效果，等待")
+                    decision.finalize(outcome="loop_blocked", note=f"同坐标连点 3 次无效果")
                     await asyncio.sleep(1.5)
                     same_target_count = 0
                     continue
@@ -317,10 +367,27 @@ class YoloDismisser:
 
             logger.info(f"[Y{rnd + 1}] tap {tap_xy[2]} @ ({tap_xy[0]},{tap_xy[1]}) "
                         f"({dur_ms:.0f}ms, dets={len(dets)})")
+            decision.set_tap(tap_xy[0], tap_xy[1], method="YOLO",
+                             target_class=target_class, target_text=ocr_text,
+                             target_conf=target_conf, screenshot=shot)
             await device.tap(tap_xy[0], tap_xy[1])
             popups_closed += 1
             lobby_confirm = 0
             await asyncio.sleep(0.5)
+
+            # tap 后验证：phash 比对
+            try:
+                shot_after = await device.screenshot()
+                if shot_after is not None:
+                    ph_after = hex(_phash(shot_after))
+                    from .adb_lite import phash_distance as _phd
+                    dist = _phd(int(ph_before, 16), int(ph_after, 16))
+                    decision.set_verify(ph_before, ph_after, dist)
+            except Exception:
+                pass
+
+            decision.finalize(outcome="tapped",
+                              note=f"{target_class} conf={target_conf:.2f}")
 
         logger.warning(f"[yolo] {self.max_rounds} 轮 timeout (关闭 {popups_closed})")
         return DismissResult(False, popups_closed, "timeout", self.max_rounds)
@@ -337,3 +404,33 @@ class YoloDismisser:
             return " ".join(h.text for h in hits)
         except Exception:
             return ""
+
+    @classmethod
+    def _ocr_bbox_with_hits(cls, roi: np.ndarray, roi_offset: list) -> tuple[str, list]:
+        """对 bbox 内做 OCR，返回 (拼接文字, OcrHit 列表带全屏坐标)"""
+        from .decision_log import OcrHit
+        if roi is None or roi.size == 0:
+            return "", []
+        try:
+            from .ocr_dismisser import OcrDismisser
+            inst = OcrDismisser()
+            hits = inst._ocr_all(roi)
+            ox, oy = roi_offset[0], roi_offset[1]
+            log_hits = []
+            for h in hits:
+                # h.bbox 是 ROI 内坐标，转全屏坐标
+                bb = getattr(h, "bbox", None)
+                if bb and len(bb) == 4:
+                    full_bb = [bb[0] + ox, bb[1] + oy, bb[2] + ox, bb[3] + oy]
+                else:
+                    full_bb = [ox, oy, ox + roi.shape[1], oy + roi.shape[0]]
+                log_hits.append(OcrHit(
+                    text=h.text,
+                    bbox=full_bb,
+                    conf=getattr(h, "conf", 0.0),
+                    cx=getattr(h, "cx", 0) + ox,
+                    cy=getattr(h, "cy", 0) + oy,
+                ))
+            return " ".join(h.text for h in hits), log_hits
+        except Exception:
+            return "", []

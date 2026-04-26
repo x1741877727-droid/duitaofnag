@@ -488,6 +488,67 @@ async def api_labeler_delete_image(filename: str):
     return {"ok": True, "moved": moved}
 
 
+# ─────────── Decision Theater (识别可视化) ───────────
+
+
+@app.get("/decisions", response_class=HTMLResponse)
+async def decisions_page():
+    return HTMLResponse(content=DECISIONS_HTML, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    })
+
+
+@app.get("/api/decisions")
+async def api_decisions(limit: int = 100, instance: int = -1):
+    """列出最近的决策（从 Recorder 内存索引拿，最快）"""
+    from .automation.decision_log import get_recorder
+    inst_filter = instance if instance >= 0 else None
+    items = get_recorder().list_recent(limit=limit, instance=inst_filter)
+    return {
+        "count": len(items),
+        "items": items,
+        "session_dir": _session_dir,
+        "enabled": get_recorder().is_enabled(),
+    }
+
+
+@app.get("/api/decision/{decision_id}/data")
+async def api_decision_data(decision_id: str):
+    """单条决策的完整 JSON"""
+    from .automation.decision_log import get_recorder
+    root = get_recorder().root()
+    if root is None:
+        raise HTTPException(404, "no active session")
+    p = root / _safe_id(decision_id) / "decision.json"
+    if not p.is_file():
+        raise HTTPException(404, "decision not found")
+    try:
+        return JSONResponse(json.loads(p.read_text(encoding="utf-8")))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/decision/{decision_id}/image/{filename}")
+async def api_decision_image(decision_id: str, filename: str):
+    """决策目录下的任意图片（input.jpg / yolo_annot.jpg / tmpl_*.png ...）"""
+    from .automation.decision_log import get_recorder
+    root = get_recorder().root()
+    if root is None:
+        raise HTTPException(404)
+    safe_name = _safe_id(filename.split(".")[0]) + "." + filename.split(".")[-1]
+    p = root / _safe_id(decision_id) / safe_name
+    if not p.is_file():
+        # 兼容多种文件名变体
+        for f in (root / _safe_id(decision_id)).iterdir() if (root / _safe_id(decision_id)).is_dir() else []:
+            if f.name == filename:
+                p = f
+                break
+        if not p.is_file():
+            raise HTTPException(404, f"image not found: {filename}")
+    media_type = "image/png" if p.suffix == ".png" else "image/jpeg"
+    return FileResponse(p, media_type=media_type)
+
+
 @app.get("/api/log/tail")
 async def api_log_tail(n: int = 100):
     """读当前 session 的 run.log 最后 N 行"""
@@ -945,6 +1006,7 @@ HTML_PAGE = r"""<!doctype html>
   <h1>GameBot Debug</h1>
   <span class="meta" id="topbar-meta">session: -</span>
   <div class="right">
+    <button onclick="window.open('/decisions','_blank')" style="background:#3b6fd1;color:#fff;border-color:#4a82e8;">Decision Theater</button>
     <button onclick="window.open('/labeler','_blank')">YOLO 标注</button>
     <button onclick="openRecords()">历史记录 <span id="rec-count">(0)</span></button>
     <button onclick="openKeywords()">添加关键字</button>
@@ -2113,6 +2175,360 @@ function escapeHtml(s) {
 }
 
 reload();
+</script>
+</body>
+</html>
+"""
+
+
+# ─────────── Decision Theater HTML ───────────
+
+DECISIONS_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Decision Theater · GameBot 识别决策回放</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; padding:0; background:#0f1115; color:#e3e6eb;
+         font-family: -apple-system, "PingFang SC", sans-serif; font-size:13px; }
+  .topbar {
+    position: sticky; top:0; z-index:10;
+    background:#161a21; border-bottom:1px solid #252a33;
+    padding:10px 16px; display:flex; align-items:center; gap:14px;
+  }
+  .topbar h1 { margin:0; font-size:16px; color:#6fa8ff; }
+  .topbar .meta { color:#8b95a5; font-size:12px; }
+  .topbar select, .topbar button, .topbar input {
+    background:#2a3140; color:#e3e6eb; border:1px solid #3a4252;
+    padding:6px 12px; border-radius:5px; font-size:12px;
+  }
+  .topbar button { cursor:pointer; }
+  .topbar button:hover { background:#3a4252; }
+  .topbar .right { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .pulse { width:8px; height:8px; border-radius:50%; background:#4ade80;
+           animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .layout { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 50px); }
+
+  .left {
+    background:#161a21; border-right:1px solid #252a33; overflow-y:auto;
+  }
+  .item {
+    padding:10px 12px; border-bottom:1px solid #1f2530; cursor:pointer;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  .item:hover { background:#1f2530; }
+  .item.cur { background:#2a3a55; border-left:3px solid #6fa8ff; }
+  .item .row1 { display:flex; gap:6px; align-items:center; }
+  .item .badge { font-size:10px; padding:1px 6px; border-radius:3px; font-weight:500; }
+  .badge.lobby { background:#1e4034; color:#4ade80; }
+  .badge.tap { background:#1f3550; color:#6fa8ff; }
+  .badge.no { background:#3d2f1a; color:#fbbf24; }
+  .badge.fail { background:#3d1d1d; color:#ef4444; }
+  .badge.pending { background:#252a33; color:#8b95a5; }
+  .item .id { font-family:monospace; font-size:10px; color:#8b95a5; }
+  .item .row2 { font-size:11px; color:#aab2bf; }
+  .item .v-ok { color:#4ade80; }
+  .item .v-fail { color:#ef4444; }
+
+  .right {
+    overflow-y:auto; padding:16px 20px;
+  }
+  .empty { padding:60px; text-align:center; color:#6e7685; font-size:14px; }
+
+  .det-head { margin-bottom:12px; }
+  .det-head h2 { margin:0 0 4px; color:#e3e6eb; font-size:16px; }
+  .det-head .sub { color:#8b95a5; font-size:12px; }
+
+  .section {
+    background:#1a1f28; border:1px solid #252a33; border-radius:6px;
+    padding:12px 14px; margin-bottom:12px;
+  }
+  .section h3 {
+    margin:0 0 8px; font-size:12px; color:#6fa8ff;
+    font-weight:600; text-transform:uppercase; letter-spacing:0.5px;
+    display:flex; align-items:center; gap:8px;
+  }
+  .section h3 .duration { color:#8b95a5; font-size:11px; font-weight:400; }
+
+  .img-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  .img-grid .card {
+    background:#0f1115; border:1px solid #252a33; border-radius:5px; overflow:hidden;
+  }
+  .img-grid .card .label {
+    padding:5px 8px; background:#1f2530; font-size:11px; color:#8b95a5;
+  }
+  .img-grid .card img { width:100%; display:block; cursor:zoom-in; max-height:400px; object-fit:contain; }
+
+  .kv { display:grid; grid-template-columns:120px 1fr; gap:3px 12px; font-size:12px; margin:6px 0; }
+  .kv .k { color:#8b95a5; }
+  .kv .v { color:#e3e6eb; font-family:monospace; }
+
+  .tmpl-list { display:flex; flex-wrap:wrap; gap:8px; }
+  .tmpl-card {
+    background:#0f1115; border:1px solid #252a33; border-radius:4px;
+    padding:6px; width:120px; font-size:11px;
+  }
+  .tmpl-card.hit { border-color:#4ade80; }
+  .tmpl-card.miss { opacity:0.6; }
+  .tmpl-card img { width:100%; height:60px; object-fit:contain; background:#000; }
+  .tmpl-card .name { font-family:monospace; font-size:10px; color:#aab2bf; margin-top:3px; }
+  .tmpl-card .score { font-size:11px; color:#e3e6eb; }
+  .tmpl-card .score.hit { color:#4ade80; font-weight:600; }
+
+  .det-list { font-size:11px; }
+  .det-list .det {
+    display:flex; gap:8px; padding:4px 0; border-bottom:1px dashed #252a33;
+  }
+  .det-list .det:last-child { border:none; }
+  .det-list .cls { font-weight:500; min-width:80px; }
+  .det-list .cls.close_x { color:#ef4444; }
+  .det-list .cls.action_btn { color:#fbbf24; }
+
+  .ocr-list { font-size:11px; max-height:160px; overflow-y:auto; }
+  .ocr-list .h { display:flex; gap:8px; padding:3px 0; border-bottom:1px dashed #252a33; }
+  .ocr-list .text { color:#e3e6eb; flex:1; }
+  .ocr-list .conf { color:#8b95a5; font-family:monospace; }
+
+  .modal {
+    position:fixed; inset:0; background:rgba(0,0,0,0.92);
+    display:none; justify-content:center; align-items:center; z-index:99;
+  }
+  .modal.on { display:flex; }
+  .modal img { max-width:95vw; max-height:95vh; cursor:zoom-out; }
+
+  .verify-bar {
+    display:flex; gap:14px; align-items:center;
+    padding:8px 12px; border-radius:5px;
+    background:#0f1115; border:1px solid #252a33;
+    font-size:12px; margin-top:6px;
+  }
+  .verify-bar.ok { border-color:#4ade80; }
+  .verify-bar.fail { border-color:#ef4444; }
+  .verify-bar .label { color:#8b95a5; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Decision Theater</h1>
+  <span class="pulse" id="pulse" title="实时刷新"></span>
+  <span class="meta" id="status">loading...</span>
+  <input id="filter-inst" type="number" placeholder="筛选实例 #" min="0" max="9" style="width:110px;">
+  <button onclick="reload()">刷新</button>
+  <div class="right">
+    <span class="meta" id="cur-id">未选中</span>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="left" id="list">loading...</div>
+  <div class="right" id="detail">
+    <div class="empty">点左侧选一条决策<br>右侧展示完整识别+点击过程</div>
+  </div>
+</div>
+
+<div class="modal" id="modal" onclick="this.classList.remove('on')">
+  <img id="modal-img">
+</div>
+
+<script>
+let allItems = [];
+let curId = null;
+let autoRefresh = true;
+
+async function reload() {
+  let url = '/api/decisions?limit=200';
+  const inst = document.getElementById('filter-inst').value;
+  if (inst !== '') url += '&instance=' + inst;
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    document.getElementById('status').textContent =
+      `${d.count} 条决策 · session=${(d.session_dir || '-').split(/[\\\/]/).pop()}`;
+    document.getElementById('pulse').style.background = d.enabled ? '#4ade80' : '#6e7685';
+    allItems = d.items;
+    renderList();
+  } catch (e) {
+    document.getElementById('status').textContent = '加载失败: ' + e.message;
+  }
+}
+
+function renderList() {
+  const c = document.getElementById('list');
+  if (allItems.length === 0) {
+    c.innerHTML = '<div class="empty">暂无决策记录<br><span style="font-size:11px">在 GameBot 主界面点开始, 跑实例触发 dismiss_popups</span></div>';
+    return;
+  }
+  c.innerHTML = allItems.map(it => {
+    const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+    const out = it.outcome || '-';
+    let cls = 'pending';
+    if (out.startsWith('lobby')) cls = 'lobby';
+    else if (out === 'tapped') cls = 'tap';
+    else if (out === 'no_target') cls = 'no';
+    else if (out.includes('fail') || out === 'loop_blocked') cls = 'fail';
+    const v = it.verify_success;
+    let vlabel = '';
+    if (v === true) vlabel = '<span class="v-ok">✓ 画面变了</span>';
+    else if (v === false) vlabel = '<span class="v-fail">✗ 画面没变</span>';
+    return `<div class="item ${it.id===curId?'cur':''}" onclick="open_('${it.id}')">
+      <div class="row1">
+        <span class="badge ${cls}">${out}</span>
+        <span style="margin-left:auto" class="meta">实例#${it.instance}</span>
+      </div>
+      <div class="id">${time} · ${it.phase} R${it.round}</div>
+      <div class="row2">
+        ${it.tap_method ? '点 '+it.tap_method+(it.tap_target?'·'+it.tap_target:'') : ''}
+        ${vlabel}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function open_(id) {
+  curId = id;
+  document.getElementById('cur-id').textContent = id;
+  renderList();
+  const r = await fetch('/api/decision/' + encodeURIComponent(id) + '/data');
+  if (!r.ok) {
+    document.getElementById('detail').innerHTML = '<div class="empty">加载失败</div>';
+    return;
+  }
+  const d = await r.json();
+  renderDetail(d);
+}
+
+function renderDetail(d) {
+  const c = document.getElementById('detail');
+  const imgUrl = (name) => '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name);
+
+  let html = `<div class="det-head">
+    <h2>实例 #${d.instance} · ${d.phase} · 第 ${d.round} 轮</h2>
+    <div class="sub">${new Date(d.created*1000).toLocaleString('zh-CN')} · phash=${d.input_phash || '-'} · 结果=<strong>${d.outcome || '-'}</strong></div>
+  </div>`;
+
+  // 输入 + 点击
+  const hasInput = !!d.input_image;
+  const hasTap = d.tap && d.tap.annot_image;
+  if (hasInput || hasTap) {
+    html += `<div class="section"><h3>① 机器看见的画面 ${hasTap ? '+ 点击位置' : ''}</h3>
+      <div class="img-grid">
+        ${hasInput ? `<div class="card"><div class="label">输入截图 ${d.input_w}×${d.input_h}</div><img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>` : ''}
+        ${hasTap ? `<div class="card"><div class="label">点击位置 ${d.tap.method}</div><img src="${imgUrl(d.tap.annot_image)}" onclick="zoom(this.src)"></div>` : ''}
+      </div>
+      ${d.tap ? `<div class="kv" style="margin-top:8px;">
+        <span class="k">点击坐标</span><span class="v">(${d.tap.x}, ${d.tap.y})</span>
+        <span class="k">来自</span><span class="v">${d.tap.method}</span>
+        ${d.tap.target_class ? `<span class="k">目标类</span><span class="v">${d.tap.target_class}</span>` : ''}
+        ${d.tap.target_text ? `<span class="k">OCR 文字</span><span class="v">${escapeHtml(d.tap.target_text)}</span>` : ''}
+        ${d.tap.target_conf ? `<span class="k">置信度</span><span class="v">${d.tap.target_conf}</span>` : ''}
+      </div>` : ''}
+    </div>`;
+  }
+
+  // 验证
+  if (d.verify) {
+    const ok = d.verify.success;
+    html += `<div class="verify-bar ${ok===true?'ok':(ok===false?'fail':'')}">
+      <span class="label">tap 后验证</span>
+      <span>phash 距离 = <strong>${d.verify.distance}</strong></span>
+      <span>${ok===true ? '✓ 画面变了, 大概率点中' : (ok===false ? '✗ 画面没变, 点错或目标无效' : '? 未验证')}</span>
+    </div>`;
+  }
+
+  // 各 Tier
+  (d.tiers || []).forEach((t, idx) => {
+    html += `<div class="section">
+      <h3>Tier ${t.tier} · ${t.name} <span class="duration">${t.duration_ms}ms ${t.early_exit ? '· EARLY EXIT' : ''}</span></h3>`;
+
+    // 模板尝试
+    if (t.templates && t.templates.length > 0) {
+      html += `<div style="font-size:11px;color:#8b95a5;margin-bottom:6px;">尝试了 ${t.templates.length} 个模板</div>
+        <div class="tmpl-list">`;
+      for (const tm of t.templates) {
+        const cls = tm.hit ? 'hit' : 'miss';
+        const sc = tm.hit ? `<span class="score hit">${tm.score} ✓</span>` : `<span class="score">${tm.score}</span>`;
+        const tmplImg = tm.template_image ? `<img src="${imgUrl(tm.template_image)}" alt="">` : '<div style="height:60px;color:#6e7685;text-align:center;line-height:60px;">no img</div>';
+        html += `<div class="tmpl-card ${cls}">${tmplImg}<div class="name">${tm.name}</div>${sc} <span style="opacity:0.6">/ ${tm.threshold}</span></div>`;
+      }
+      html += `</div>`;
+    }
+
+    // YOLO
+    if (t.yolo_annot_image) {
+      html += `<div class="img-grid"><div class="card">
+        <div class="label">YOLO 标注画面（红框=close_x 黄框=action_btn）</div>
+        <img src="${imgUrl(t.yolo_annot_image)}" onclick="zoom(this.src)">
+      </div></div>`;
+    }
+    if (t.yolo_detections && t.yolo_detections.length > 0) {
+      html += `<div class="det-list" style="margin-top:8px;">`;
+      for (const det of t.yolo_detections) {
+        html += `<div class="det">
+          <span class="cls ${det.cls}">${det.cls}</span>
+          <span>conf=<strong>${det.conf}</strong></span>
+          <span style="color:#8b95a5">bbox=[${det.bbox.join(', ')}]</span>
+        </div>`;
+      }
+      html += `</div>`;
+    } else if (t.name === 'YOLO') {
+      html += `<div style="color:#6e7685;font-size:11px;">YOLO 未检测到任何目标</div>`;
+    }
+
+    // OCR
+    if (t.ocr_roi_image) {
+      html += `<div class="img-grid" style="margin-top:8px;"><div class="card">
+        <div class="label">OCR ROI 区域 (橙框=ROI 绿框=识别文字)</div>
+        <img src="${imgUrl(t.ocr_roi_image)}" onclick="zoom(this.src)">
+      </div></div>`;
+    }
+    if (t.ocr_hits && t.ocr_hits.length > 0) {
+      html += `<div class="ocr-list" style="margin-top:8px;">`;
+      for (const h of t.ocr_hits) {
+        html += `<div class="h"><span class="text">${escapeHtml(h.text)}</span>
+          <span class="conf">${h.conf || ''}</span></div>`;
+      }
+      html += `</div>`;
+    } else if (t.name && t.name.startsWith('OCR')) {
+      html += `<div style="color:#6e7685;font-size:11px;">OCR 未识别到文字</div>`;
+    }
+
+    // Memory
+    if (t.memory_phash_query) {
+      html += `<div class="kv">
+        <span class="k">查询 phash</span><span class="v">${t.memory_phash_query}</span>
+        <span class="k">命中</span><span class="v">${t.memory_hit ? JSON.stringify(t.memory_hit) : '无'}</span>
+      </div>`;
+    }
+
+    if (t.note) html += `<div style="color:#aab2bf;font-size:11px;margin-top:6px;">${escapeHtml(t.note)}</div>`;
+    html += `</div>`;
+  });
+
+  c.innerHTML = html;
+}
+
+function zoom(src) {
+  document.getElementById('modal-img').src = src;
+  document.getElementById('modal').classList.add('on');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+
+document.getElementById('filter-inst').addEventListener('input', () => {
+  reload();
+});
+
+reload();
+setInterval(() => { if (autoRefresh) reload(); }, 2000);
 </script>
 </body>
 </html>

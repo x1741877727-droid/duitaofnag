@@ -208,6 +208,13 @@ class MultiRunnerService:
         except Exception:
             pass
 
+        # 初始化 Decision Recorder（每次决策都记录到磁盘 + 前端可视化）
+        try:
+            from .automation.decision_log import get_recorder
+            get_recorder().init(self._session_dir)
+        except Exception as _e:
+            logger.warning(f"Decision Recorder 初始化失败: {_e}")
+
         # 结构化性能指标（Task 0.1）
         from .automation import metrics
         metrics.configure(os.path.join(self._session_dir, "metrics.jsonl"))
