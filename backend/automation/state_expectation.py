@@ -61,23 +61,26 @@ class ExpectationResult:
 
 
 def _verify_popup_dismissed(before, after, ctx) -> bool:
-    """tap close_x 后画面应有变化.
+    """tap close_x 后弹窗结构应该有质变.
 
-    旧逻辑只看 close_x 计数减少 → 误判: 实际游戏里点了一个 close_x
-    紧接着新弹窗冒出来(也有 close_x), 计数可能不变, 但 *画面已变*.
+    设计迭代:
+      v1 (旧): 只看 close_x 计数减少 → 误判: 新弹窗替代旧弹窗时 count 不变
+      v2 (放过头): count 减少 OR phash > 5 → 误判反向: 微动画也算成功,
+         漏掉真正的 'YOLO false positive (X 形状但不响应)' 场景
+      v3 (现): 弹窗总数 (close_x + action_btn) 减少 OR phash > 15 (高阈值过滤微动画)
 
-    新逻辑: 计数减少 OR phash 显著变化(> 5) 任一即算成功.
+    若仍判失败, 调用方应把那坐标加黑名单, 下轮换目标 (这是防线 2 的设计目的).
     """
     yb = ctx.get("yolo_before", []) or []
     ya = ctx.get("yolo_after", []) or []
-    cx_b = sum(1 for d in yb if getattr(d, "cls", "") == "close_x")
-    cx_a = sum(1 for d in ya if getattr(d, "cls", "") == "close_x")
-    if cx_a < cx_b:
+    pop_b = sum(1 for d in yb if getattr(d, "cls", "") in ("close_x", "action_btn"))
+    pop_a = sum(1 for d in ya if getattr(d, "cls", "") in ("close_x", "action_btn"))
+    if pop_a < pop_b:
         return True
-    # fallback: 画面变了也算成功 (新弹窗替代旧弹窗)
+    # 高阈值 phash fallback: 只有画面 *大变* 才算成功 (避免微动画 / 状态栏闪烁)
     from .adb_lite import phash, phash_distance
     try:
-        return phash_distance(phash(before), phash(after)) > 5
+        return phash_distance(phash(before), phash(after)) > 15
     except Exception:
         return False
 

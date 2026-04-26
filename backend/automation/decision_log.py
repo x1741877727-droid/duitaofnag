@@ -490,10 +490,11 @@ class Decision:
         self.tap = TapRecord(int(x), int(y), method, target_class, target_text,
                               float(target_conf))
         if screenshot is not None:
+            # 1) 独立 tap 图 (兼容旧路径)
             annot = screenshot.copy()
             cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
             cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
-            label = f"TAP {method}"
+            label = f"TAP {method} ({int(x)},{int(y)})"
             if target_text:
                 label += f" '{target_text[:10]}'"
             cv2.putText(annot, label, (int(x) + 40, int(y) - 12),
@@ -504,6 +505,22 @@ class Decision:
                 self.tap.annot_image = "tap_annot.jpg"
             except Exception:
                 pass
+
+            # 2) 把 tap 圆点叠加到 yolo_annot 图上 (用户要求: 一图同时看 bbox + tap)
+            yolo_annot_path = self.path / "yolo_annot.jpg"
+            if yolo_annot_path.exists():
+                try:
+                    img = cv2.imread(str(yolo_annot_path))
+                    if img is not None:
+                        cv2.circle(img, (int(x), int(y)), 36, (0, 255, 255), 3)  # 黄色外圈
+                        cv2.circle(img, (int(x), int(y)), 6, (0, 255, 255), -1)  # 黄色实心
+                        cv2.putText(img, f"TAP ({int(x)},{int(y)})",
+                                    (int(x) + 40, int(y) + 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        cv2.imwrite(str(yolo_annot_path), img,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 70])
+                except Exception:
+                    pass
         return self
 
     # ────── 验证 ──────
