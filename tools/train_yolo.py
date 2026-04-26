@@ -104,14 +104,20 @@ def write_data_yaml(data_dir: Path, classes: list[str]):
 
 def _patch_torch_save_retry():
     """
-    workaround torch 2.11 + Windows 偶发 ValueError: I/O operation on closed file
-    给 torch.save / ultralytics._torch_save 加 retry，崩了等一下再试
+    workaround torch 2.11 + Windows 的两个 bug:
+      1. RuntimeError: enforce fail unexpected pos (zip EOCDR truncate, ~12MB+ 文件)
+      2. ValueError: I/O operation on closed file
+    都是新 zipfile serialization 路径的 bug。
+    修法: 强制走 _use_new_zipfile_serialization=False (旧 pickle 单遍写)
+         + retry 5 次兜底
     """
     import torch as _t
     _orig = _t.save
 
     def _safe_save(*a, **kw):
         import time as _time
+        # 强制走旧 pickle 格式 — Windows 上稳很多
+        kw["_use_new_zipfile_serialization"] = False
         last = None
         for i in range(5):
             try:
@@ -123,7 +129,6 @@ def _patch_torch_save_retry():
         raise last
 
     _t.save = _safe_save
-    # ultralytics 在 import 时就 alias 了 torch.save，需要再覆盖一次
     try:
         import ultralytics.utils.patches as _p
         _p._torch_save = _safe_save
