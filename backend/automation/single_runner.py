@@ -99,6 +99,10 @@ class SingleInstanceRunner:
         self._on_phase_change = on_phase_change
         self.popup_dismisser = PopupDismisser(matcher)
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
+        # YOLO 视觉识别（替代 OCR/模板/形状的层叠链）
+        # 模型不存在时 dismiss_all 自动 fallback 到 OcrDismisser
+        from .yolo_dismisser import YoloDismisser
+        self.yolo_dismisser = YoloDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
         self._last_phash: int = 0  # 帧差跳过：上一帧的 pHash
         self.dbg = DebugLogger(enabled=bool(log_dir), save_dir=log_dir or "logs")
@@ -472,7 +476,10 @@ class SingleInstanceRunner:
     async def phase_dismiss_popups(self) -> bool:
         """清理所有弹窗直到大厅（OCR驱动）"""
         self.phase = Phase.DISMISS_POPUPS
-        logger.info("[阶段3] 开始弹窗清理 (OCR模式)")
+        # 优先 YOLO；ONNX 不存在时 yolo_dismisser 内部 fallback 到 OCR
+        from .yolo_dismisser import YoloDismisser
+        use_yolo = YoloDismisser.is_available()
+        logger.info(f"[阶段3] 开始弹窗清理 ({'YOLO' if use_yolo else 'OCR fallback'})")
 
         # 关闭守卫：这个阶段自己完整处理弹窗，避免和守卫冲突
         if hasattr(self.adb, 'guard_enabled'):
@@ -481,7 +488,10 @@ class SingleInstanceRunner:
         shot = await self.adb.screenshot()
         self.dbg.log_screenshot(shot, tag="popups_before")
 
-        result = await self.ocr_dismisser.dismiss_all(self.adb, self.matcher)
+        if use_yolo:
+            result = await self.yolo_dismisser.dismiss_all(self.adb, self.matcher)
+        else:
+            result = await self.ocr_dismisser.dismiss_all(self.adb, self.matcher)
 
         shot = await self.adb.screenshot()
         self.dbg.log_screenshot(shot, tag="popups_after")
