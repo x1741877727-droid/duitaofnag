@@ -55,6 +55,72 @@ def _live_rules() -> dict:
     return RulesLoader.get()
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 禁点 ROI（永远不该 tap 的区域，用相对坐标防分辨率漂移）
+# 这些位置对应 PUBG/和平精英 的固定 native UI：
+#   - 右侧栏：公告/静音/帮助/修复/注销/上报日志（一直可见）
+#   - 顶部防沉迷广播条
+#   - 右下"16+ 适龄提示"
+# 模板/OCR/形状任何一路命中这里都会被 _is_never_tap 拒绝
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_NEVER_TAP_RECTS = [
+    (0.91, 0.0, 1.0, 0.95),   # 右侧栏（公告/静音/帮助/修复/注销/上报日志）
+    (0.0, 0.0, 1.0, 0.07),    # 顶部防沉迷广播
+    (0.94, 0.86, 1.0, 1.0),   # 右下角龄标
+]
+
+
+def _is_never_tap(x: int, y: int, screen_w: int, screen_h: int) -> bool:
+    """判断 (x,y) 是否落在禁点 ROI"""
+    if screen_w <= 0 or screen_h <= 0:
+        return False
+    rx, ry = x / screen_w, y / screen_h
+    for x1, y1, x2, y2 in _NEVER_TAP_RECTS:
+        if x1 <= rx <= x2 and y1 <= ry <= y2:
+            return True
+    return False
+
+
+def _find_dialog_rect(screenshot: np.ndarray) -> "tuple[int, int, int, int] | None":
+    """
+    检测中央"亮色 dialog"矩形（公告/活动/确认弹窗的共同结构）。
+    前提：背景被半透明蒙层压暗（_has_overlay True 时调用最稳）。
+
+    返回 (x, y, w, h)，找不到 → None。
+
+    工作原理：
+      1. 二值化 gray > 170（dialog 主体白底/淡色）
+      2. 形态学闭运算合并文字间隙
+      3. 找最大的"中央"contour（不贴边、不全屏）
+    """
+    h, w = screenshot.shape[:2]
+    gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+
+    _, bright = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    best_area = 0
+    for c in contours:
+        x, y, cw, ch = cv2.boundingRect(c)
+        # 过滤：dialog 必须够大（占屏 30%+ 任一边）、不贴边（不超 92%）、形状合理
+        if cw < w * 0.30 or ch < h * 0.30:
+            continue
+        if cw > w * 0.92 or ch > h * 0.92:  # 全屏不算 dialog
+            continue
+        cx = x + cw // 2
+        # 横向居中（左右各 15% 余量）
+        if not (w * 0.15 < cx < w * 0.85):
+            continue
+        area = cw * ch
+        if area > best_area:
+            best_area = area
+            best = (x, y, cw, ch)
+    return best
+
+
 @dataclass
 class DismissResult:
     success: bool
@@ -358,13 +424,18 @@ class OcrDismisser:
     def _find_close_target(self, screenshot: np.ndarray, matcher=None) -> tuple[int, int, str] | None:
         """
         找弹窗的关闭目标，返回 (x, y, 方法描述) 或 None
-        优先级：模板X → OCR关闭文字 → OCR确认文字
+        优先级：模板X → OCR关闭文字 → OCR确认文字 → 几何形状
+        所有命中都过 _is_never_tap 过滤（右侧栏/广播条/角龄标永远不点）
         """
-        # 级别1: 模板匹配找X按钮 (~20ms)
+        sh, sw = screenshot.shape[:2]
+
+        # 级别1: 模板匹配找X按钮 (~20ms) — threshold 0.72（旧 0.80 太严，UI 微变易失配）
         if matcher:
             x_hit = matcher.find_close_button(screenshot)
-            if x_hit and x_hit.confidence > 0.80:
-                return (x_hit.cx, x_hit.cy, f"模板:{x_hit.name}")
+            if x_hit and x_hit.confidence > 0.72:
+                if not _is_never_tap(x_hit.cx, x_hit.cy, sw, sh):
+                    return (x_hit.cx, x_hit.cy, f"模板:{x_hit.name}({x_hit.confidence:.2f})")
+                logger.debug(f"[dismiss] 模板 {x_hit.name} 命中禁点 ROI ({x_hit.cx},{x_hit.cy})，跳过")
 
         # 级别2: OCR找关闭类文字 (~200ms)
         hits = self._ocr_all(screenshot)
@@ -372,52 +443,95 @@ class OcrDismisser:
 
         # 先勾选复选框
         for h in hits:
+            if _is_never_tap(h.cx, h.cy, sw, sh):
+                continue
             for kw in rules["checkbox_text"]:
                 if kw in h.text:
                     return (h.cx, h.cy, f"勾选:{h.text}")
 
         # 找关闭按钮
         for h in hits:
+            if _is_never_tap(h.cx, h.cy, sw, sh):
+                continue
             for kw in rules["close_text"]:
                 if kw in h.text:
                     return (h.cx, h.cy, f"关闭:{h.text}")
 
         # 找确认按钮
         for h in hits:
+            if _is_never_tap(h.cx, h.cy, sw, sh):
+                continue
             for kw in rules["confirm_text"]:
                 if kw in h.text:
                     # "点击屏幕"类 → 点击屏幕中央而不是文字位置
                     if "屏幕" in kw or "继续" in kw:
-                        sh, sw = screenshot.shape[:2]
                         return (sw // 2, sh // 2, f"点击屏幕:{h.text}")
                     return (h.cx, h.cy, f"确认:{h.text}")
 
         # 级别3: 形状检测 — 仅在确认有遮罩层时才用（防止大厅页面误触）
         if self._has_overlay(screenshot):
             pos = self._find_x_shape(screenshot)
-            if pos:
+            if pos and not _is_never_tap(pos[0], pos[1], sw, sh):
                 return (pos[0], pos[1], "形状检测X")
 
         return None
 
     def _find_x_shape(self, screenshot: np.ndarray) -> tuple[int, int] | None:
         """
-        在右上区域找关闭按钮（X 形状或圆形 ⊗ 按钮）。
-        搜索范围：右半屏幕的上半部分。
-        两种模式：
-          1. 方形 X 交叉线条（游戏内常见）
-          2. 圆形深色按钮（系统/SDK弹窗常见，如"家长提示"的 ⊗）
+        找关闭按钮（X 形状或圆形 ⊗）。
+        策略：
+          1. 优先检测中央 dialog rect → 在 dialog 右上角内 100x80 的小 ROI 搜 X
+             这是抗 UI 变化的关键：不管公告/活动/确认弹窗，结构都一样
+          2. dialog 找到但 X 没扫到 → 兜底点 dialog 右上角内偏 (rect.right-30, rect.top+30)
+          3. 没检测到 dialog → 退回旧逻辑（右半屏上 2/3）但加禁点 ROI 过滤
         """
         h, w = screenshot.shape[:2]
-        # 搜索右半屏幕上 2/3 区域
-        roi = screenshot[0:h*2//3, w//3:]
+
+        # 优先：dialog rect 引导的精准搜
+        dialog = _find_dialog_rect(screenshot)
+        if dialog is not None:
+            dx, dy, dw, dh = dialog
+            sub_x = max(0, dx + dw - 100)
+            sub_y = max(0, dy)
+            sub_w = min(w - sub_x, 100)
+            sub_h = min(80, dh // 4)
+            if sub_w > 20 and sub_h > 20:
+                pos = self._scan_x_in_roi(
+                    screenshot[sub_y:sub_y + sub_h, sub_x:sub_x + sub_w],
+                    sub_x, sub_y,
+                )
+                if pos and not _is_never_tap(pos[0], pos[1], w, h):
+                    logger.info(f"[shape] dialog 内 X: ({pos[0]},{pos[1]}) "
+                                f"dialog=({dx},{dy},{dw}x{dh})")
+                    return pos
+            # X 没扫到 → 兜底点 dialog 右上角
+            fb_x, fb_y = dx + dw - 30, dy + 30
+            if not _is_never_tap(fb_x, fb_y, w, h):
+                logger.info(f"[shape] dialog 兜底点右上角 ({fb_x},{fb_y}) "
+                            f"dialog=({dx},{dy},{dw}x{dh})")
+                return (fb_x, fb_y)
+
+        # 兜底：旧逻辑（右半屏上 2/3）
+        roi = screenshot[0:h * 2 // 3, w // 3:]
+        pos = self._scan_x_in_roi(roi, w // 3, 0)
+        if pos and not _is_never_tap(pos[0], pos[1], w, h):
+            return pos
+        return None
+
+    def _scan_x_in_roi(
+        self, roi: np.ndarray, ox: int, oy: int,
+    ) -> tuple[int, int] | None:
+        """
+        在给定 ROI 里扫 X / 圆 ⊗，返回全屏坐标 (x, y) 或 None。
+        ox, oy: ROI 在原图中的左上角偏移
+        """
+        if roi is None or roi.size == 0:
+            return None
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        roi_offset_x = w // 3
 
         # ── 方法1: 边缘轮廓找方形X ──
         edges = cv2.Canny(gray, 100, 200)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         for c in contours:
             area = cv2.contourArea(c)
             x, y, cw, ch = cv2.boundingRect(c)
@@ -427,15 +541,16 @@ class OcrDismisser:
                 continue
             if not (0.5 < cw / max(ch, 1) < 2.0):
                 continue
-
             cx_local = x + cw // 2
             cy_local = y + ch // 2
-            center_val = gray[cy_local, cx_local] if cy_local < gray.shape[0] and cx_local < gray.shape[1] else 255
-            surround = gray[max(0,y):y+ch, max(0,x):x+cw].mean()
+            if cy_local >= gray.shape[0] or cx_local >= gray.shape[1]:
+                continue
+            center_val = gray[cy_local, cx_local]
+            surround = gray[max(0, y):y + ch, max(0, x):x + cw].mean()
             if center_val < surround - 20:
-                return (roi_offset_x + cx_local, cy_local)
+                return (ox + cx_local, oy + cy_local)
 
-        # ── 方法2: 霍夫圆检测找圆形关闭按钮 ──
+        # ── 方法2: 霍夫圆找圆形关闭按钮 ──
         blurred = cv2.GaussianBlur(gray, (9, 9), 2)
         circles = cv2.HoughCircles(
             blurred, cv2.HOUGH_GRADIENT, dp=1.2,
@@ -445,19 +560,15 @@ class OcrDismisser:
         if circles is not None:
             for circle in circles[0]:
                 cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
-                # 圆形X按钮特征：圆内整体较暗（深色按钮），或者圆内有X纹理
-                region = gray[max(0,cy-r):cy+r, max(0,cx-r):cx+r]
+                region = gray[max(0, cy - r):cy + r, max(0, cx - r):cx + r]
                 if region.size == 0:
                     continue
                 inner_mean = region.mean()
-                # 取圆周围一圈的平均亮度
-                outer_y1, outer_y2 = max(0, cy-r*2), min(gray.shape[0], cy+r*2)
-                outer_x1, outer_x2 = max(0, cx-r*2), min(gray.shape[1], cx+r*2)
-                outer_mean = gray[outer_y1:outer_y2, outer_x1:outer_x2].mean()
-                # 圆内比周围明显暗 = 深色关闭按钮
+                oy1, oy2 = max(0, cy - r * 2), min(gray.shape[0], cy + r * 2)
+                ox1, ox2 = max(0, cx - r * 2), min(gray.shape[1], cx + r * 2)
+                outer_mean = gray[oy1:oy2, ox1:ox2].mean()
                 if inner_mean < outer_mean - 30:
-                    logger.info(f"圆形X检测: 圆心=({roi_offset_x+cx},{cy}) r={r} 内{inner_mean:.0f} 外{outer_mean:.0f}")
-                    return (roi_offset_x + cx, cy)
+                    return (ox + cx, oy + cy)
 
         return None
 
@@ -483,16 +594,24 @@ class OcrDismisser:
                 continue
 
             # ━━ 快速路径: 模板匹配找X (~20ms) ━━
+            # threshold 0.72（旧 0.80 太严，公告/活动 UI 微变就失配）
+            # 加 _is_never_tap 过滤，防止模板误匹到右侧栏
             if matcher:
                 x_hit = matcher.find_close_button(shot)
-                if x_hit and x_hit.confidence > 0.80:
-                    logger.info(f"[R{rnd+1}] 快速关闭: {x_hit.name} @ ({x_hit.cx},{x_hit.cy})")
-                    await device.tap(x_hit.cx, x_hit.cy)
-                    popups_closed += 1
-                    stuck_count = 0
-                    lobby_confirm = 0
-                    await asyncio.sleep(0.5)
-                    continue
+                if x_hit and x_hit.confidence > 0.72:
+                    sh, sw = shot.shape[:2]
+                    if _is_never_tap(x_hit.cx, x_hit.cy, sw, sh):
+                        logger.debug(f"[R{rnd+1}] 模板 {x_hit.name} 命中禁点 ROI "
+                                     f"({x_hit.cx},{x_hit.cy})，跳过")
+                    else:
+                        logger.info(f"[R{rnd+1}] 快速关闭: {x_hit.name}({x_hit.confidence:.2f}) "
+                                    f"@ ({x_hit.cx},{x_hit.cy})")
+                        await device.tap(x_hit.cx, x_hit.cy)
+                        popups_closed += 1
+                        stuck_count = 0
+                        lobby_confirm = 0
+                        await asyncio.sleep(0.5)
+                        continue
 
             # ━━ 快速路径: 模板匹配大厅 + 无遮罩 (~30ms) ━━
             if matcher and matcher.is_at_lobby(shot) and not self._has_overlay(shot):
