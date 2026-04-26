@@ -81,6 +81,17 @@ class YoloDismisser:
 
     def __init__(self, max_rounds: int = 20):
         self.max_rounds = max_rounds
+        self._ocr_for_cta = None  # 懒初始化, CTA 检测在 ROI 内 OCR 用
+
+    def _get_ocr_for_cta(self):
+        """懒初始化, 复用 OcrDismisser 的 _ocr_all (调 OcrPool)"""
+        if self._ocr_for_cta is None:
+            try:
+                from .ocr_dismisser import OcrDismisser
+                self._ocr_for_cta = OcrDismisser(max_rounds=1)
+            except Exception:
+                self._ocr_for_cta = False  # 标记失败, 不重试
+        return self._ocr_for_cta if self._ocr_for_cta else None
 
     # ─────────── 模型加载 ───────────
 
@@ -264,6 +275,18 @@ class YoloDismisser:
         last_tap = (0, 0)
         same_target_count = 0
         empty_dets_streak = 0  # 连续多少轮 YOLO 没检到 close_x/action_btn
+
+        # ── v2-4 Memory L1: 见过这个画面 → 直接 tap 历史成功坐标 ──
+        # 跨实例共享 (同 PC), 用户教 / YOLO 成功 / CTA 成功 都自动入库
+        memory = None
+        try:
+            from .memory_l1 import FrameMemory
+            from .user_paths import user_data_dir
+            memory_db = user_data_dir() / "memory" / "dismiss_popups.db"
+            memory = FrameMemory(memory_db)
+        except Exception as _e:
+            logger.warning(f"[memory] 初始化失败 (非致命): {_e}")
+        memory_target = "dismiss_popups"  # 主循环统一用这个 target_name
 
         # v2-4 细粒度时间记录: 从 dismiss_all 开始的累计 ms
         _phase_start_ts = time.perf_counter()
@@ -450,15 +473,38 @@ class YoloDismisser:
             target_conf = 0.0
             ocr_text = ""
 
+            # ─── 优先级 0: Memory L1 (见过这画面就直接复用) ───
+            if memory is not None and tap_xy is None:
+                try:
+                    mem_hit = memory.query(shot, target_name=memory_target, max_dist=5)
+                except Exception as _e:
+                    mem_hit = None
+                    logger.debug(f"[memory] query err: {_e}")
+                if mem_hit:
+                    tap_xy = (mem_hit.cx, mem_hit.cy,
+                              f"Memory(conf={mem_hit.confidence:.2f})")
+                    target_class = "memory_hit"
+                    target_conf = mem_hit.confidence
+                    logger.info(
+                        f"[Y{rnd + 1}] 🧠 Memory 命中 → tap "
+                        f"({mem_hit.cx},{mem_hit.cy}) {mem_hit.note}"
+                    )
+                    mem_tier = _TR(
+                        tier=1, name="Memory L1",
+                        duration_ms=0.0, early_exit=True,
+                        note=f"phash 复用: {mem_hit.note}",
+                    )
+                    decision.add_tier(mem_tier)
+
             # 优先级 1：close_x（最安全，纯关弹窗）
-            if close_xs:
+            if tap_xy is None and close_xs:
                 tgt = close_xs[0]
                 tap_xy = (tgt.cx, tgt.cy, f"close_x({tgt.conf:.2f})")
                 target_class = "close_x"
                 target_conf = tgt.conf
 
             # 优先级 2：action_btn — 但要 OCR 排除 nav 按钮
-            elif actions:
+            elif tap_xy is None and actions:
                 tgt = actions[0]
                 roi_box = [max(0, tgt.x1), max(0, tgt.y1), tgt.x2, tgt.y2]
                 roi = shot[roi_box[1]:roi_box[3], roi_box[0]:roi_box[2]]
@@ -479,10 +525,10 @@ class YoloDismisser:
                     target_conf = tgt.conf
 
             if tap_xy is None:
-                # 啥都没识别 → 可能加载中, 也可能就是干净的大厅
+                # 啥都没识别 → 可能加载中 / 干净大厅 / outside_lobby 强引导
                 empty_dets_streak += 1
-                # v2-4 兜底: 连续 3 轮 YOLO 没找到任何弹窗 + 模板命中 lobby_start_btn
-                # → 直接判大厅成功. 这是 use_quad=True 下 phash 不稳定无法过四元的兜底.
+
+                # 兜底 A: 大厅模板命中 + 连续 3 轮无弹窗 → 大厅成功
                 if empty_dets_streak >= 3 and lobby_hit is not None:
                     logger.info(
                         f"[Y{rnd + 1}] 大厅 (兜底: 连续 {empty_dets_streak} 轮无弹窗 + 模板命中) → 完成 · 关闭 {popups_closed}"
@@ -492,10 +538,49 @@ class YoloDismisser:
                         note=f"连续 {empty_dets_streak} 轮 YOLO 无目标 + 模板命中 lobby_start_btn",
                     )
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
-                logger.debug(f"[Y{rnd + 1}] 无目标 (dets={len(dets)}, 连续{empty_dets_streak}轮)，等待")
-                decision.finalize(outcome="no_target", note=f"YOLO 检 {len(dets)} 个目标但都不达标")
-                await asyncio.sleep(0.6)
-                continue
+
+                # 兜底 B: outside_lobby (lobby 模板未命中) + X 找不到 → 必须找 CTA 才能回大厅
+                # 强引导活动 (砍价 / 立即领取) 设计上只有 CTA 出路, 必须点
+                # popup_in_lobby (lobby 模板命中) 时不进, 等下一轮 (避免误参与活动)
+                if lobby_hit is None:
+                    try:
+                        from .cta_detector import find_main_cta, NAV_BLACKLIST
+                        ocr_inst = self._get_ocr_for_cta()
+                        ocr_fn_local = (
+                            (lambda roi: ocr_inst._ocr_all(roi)) if ocr_inst else None
+                        )
+                        cta = find_main_cta(
+                            shot, ocr_fn=ocr_fn_local, nav_blacklist=NAV_BLACKLIST,
+                        )
+                    except Exception as _e:
+                        logger.debug(f"[cta] err: {_e}")
+                        cta = None
+                    if cta:
+                        tap_xy = (cta.cx, cta.cy,
+                                  f"CTA('{cta.text[:8]}',sat={cta.saturation:.0f})")
+                        target_class = "cta"
+                        target_conf = min(0.99, max(0.6, cta.score / 100))
+                        ocr_text = cta.text
+                        logger.warning(
+                            f"[Y{rnd + 1}] CTA 兜底 (outside_lobby) → tap '{cta.text}' "
+                            f"@ ({cta.cx},{cta.cy}) sat={cta.saturation:.0f} area={cta.area}"
+                        )
+                        cta_tier = _TR(
+                            tier=2, name="CTA 兜底",
+                            duration_ms=0.0, early_exit=True,
+                            note=f"text='{cta.text}' sat={cta.saturation:.0f} area={cta.area}",
+                        )
+                        decision.add_tier(cta_tier)
+                        # fallthrough 到 tap 路径
+                if tap_xy is None:
+                    logger.debug(
+                        f"[Y{rnd + 1}] 无目标 (dets={len(dets)}, 连续{empty_dets_streak}轮, "
+                        f"mode={'outside_lobby' if lobby_hit is None else 'popup_in_lobby'})"
+                    )
+                    decision.finalize(outcome="no_target",
+                                      note=f"YOLO 检 {len(dets)} 个目标都不达标 + CTA 兜底也没找到")
+                    await asyncio.sleep(0.6)
+                    continue
             else:
                 empty_dets_streak = 0  # 重置: 这轮有目标
 
@@ -565,6 +650,16 @@ class YoloDismisser:
                                 f"[Y{rnd + 1}] State Expectation 失败 [{expect_label}]: "
                                 f"{exp_r.note}"
                             )
+                            # ── Memory L1 写入 (失败) ──
+                            if memory is not None:
+                                try:
+                                    memory.remember(
+                                        shot, target_name=memory_target,
+                                        action_xy=(tap_xy[0], tap_xy[1]),
+                                        success=False,
+                                    )
+                                except Exception:
+                                    pass
                         else:
                             # 时间埋点: 第一次成功关闭弹窗 (verify 通过)
                             if _t_first_dismiss_ok_ms < 0:
@@ -573,6 +668,21 @@ class YoloDismisser:
                                     f"[时间] dismiss_popups: 第一次成功关闭 "
                                     f"+{_t_first_dismiss_ok_ms:.0f}ms"
                                 )
+                            # ── Memory L1 写入 (成功) ──
+                            # 任何成功 tap 都入库, 下次见同 phash 直接秒过
+                            if memory is not None:
+                                try:
+                                    memory.remember(
+                                        shot, target_name=memory_target,
+                                        action_xy=(tap_xy[0], tap_xy[1]),
+                                        success=True,
+                                    )
+                                    logger.info(
+                                        f"[Y{rnd + 1}] 🧠 Memory 写入 "
+                                        f"({tap_xy[0]},{tap_xy[1]}) method={target_class}"
+                                    )
+                                except Exception as _me:
+                                    logger.debug(f"[memory] write err: {_me}")
                     except Exception as _ee:
                         logger.debug(f"[Y{rnd + 1}] expectation verify err: {_ee}")
             except Exception:
