@@ -193,6 +193,8 @@ a = Analysis(
         'backend.automation.ocr_cache', 'backend.automation.roi_config',
         'backend.automation.yolo_detector', 'backend.automation.ocr_pool',
         'backend.automation.screenshot_collector',
+        'backend.automation.recognizer', 'backend.automation.memory_l1',
+        'backend.automation.watchdogs',
         'yaml', 'psutil', 'multiprocessing',
     ] + av_hidden,
 )
