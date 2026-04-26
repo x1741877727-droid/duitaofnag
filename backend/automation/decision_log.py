@@ -169,6 +169,113 @@ class _Recorder:
                 items = [x for x in items if x.get("instance") == instance]
             return items[:limit]
 
+    # ─── 历史会话浏览（扫磁盘）───
+
+    def _logs_root(self) -> Optional[Path]:
+        """logs/ 根目录, 包含所有 session 子目录"""
+        if self._root is None:
+            return None
+        return self._root.parent.parent  # decisions → session → logs
+
+    def list_sessions(self) -> list[dict]:
+        """列出所有有决策记录的 session, 按时间倒序"""
+        root = self._logs_root()
+        if root is None or not root.is_dir():
+            return []
+        out = []
+        for sess in sorted(root.iterdir(), reverse=True):
+            if not sess.is_dir():
+                continue
+            d_dir = sess / "decisions"
+            if not d_dir.is_dir():
+                continue
+            try:
+                cnt = sum(1 for _ in d_dir.iterdir() if _.is_dir())
+            except Exception:
+                cnt = 0
+            if cnt == 0:
+                continue
+            out.append({
+                "session": sess.name,
+                "decision_count": cnt,
+                "is_current": (self._root is not None and sess == self._root.parent),
+                "mtime": sess.stat().st_mtime,
+            })
+        return out
+
+    def list_session_decisions(self, session_name: str, limit: int = 200,
+                                offset: int = 0,
+                                instance: Optional[int] = None) -> list[dict]:
+        """扫指定 session 的所有决策, 按时间倒序"""
+        root = self._logs_root()
+        if root is None:
+            return []
+        sess_dir = root / session_name / "decisions"
+        if not sess_dir.is_dir():
+            return []
+        # 当前 session 直接读内存索引
+        if self._root is not None and sess_dir == self._root:
+            return self.list_recent(limit=limit + offset, instance=instance)[offset:]
+        # 历史 session 扫磁盘
+        items = []
+        try:
+            dirs = sorted(sess_dir.iterdir(), reverse=True, key=lambda p: p.stat().st_mtime)
+        except Exception:
+            dirs = []
+        for d in dirs:
+            if not d.is_dir():
+                continue
+            json_p = d / "decision.json"
+            if not json_p.is_file():
+                continue
+            try:
+                data = json.loads(json_p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if instance is not None and data.get("instance") != instance:
+                continue
+            items.append({
+                "id": data.get("id", d.name),
+                "instance": data.get("instance"),
+                "phase": data.get("phase"),
+                "round": data.get("round"),
+                "created": data.get("created"),
+                "outcome": data.get("outcome"),
+                "tap_method": (data.get("tap") or {}).get("method", "") if data.get("tap") else "",
+                "tap_target": (data.get("tap") or {}).get("target_class", "") if data.get("tap") else "",
+                "verify_success": (data.get("verify") or {}).get("success") if data.get("verify") else None,
+                "tier_count": len(data.get("tiers") or []),
+                "session": session_name,
+            })
+            if len(items) >= offset + limit:
+                break
+        return items[offset:offset + limit]
+
+    def get_session_decision_data(self, session_name: str, decision_id: str) -> Optional[dict]:
+        """读历史 session 的某条决策详情"""
+        root = self._logs_root()
+        if root is None:
+            return None
+        p = root / session_name / "decisions" / decision_id / "decision.json"
+        if not p.is_file():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def get_session_image_path(self, session_name: str, decision_id: str,
+                               image_name: str) -> Optional[Path]:
+        """读历史 session 决策图片的磁盘路径"""
+        root = self._logs_root()
+        if root is None:
+            return None
+        # 简单清洗（防止路径穿越）
+        if "/" in image_name or "\\" in image_name or ".." in image_name:
+            return None
+        p = root / session_name / "decisions" / decision_id / image_name
+        return p if p.is_file() else None
+
 
 _recorder = _Recorder()
 

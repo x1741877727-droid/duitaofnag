@@ -498,53 +498,88 @@ async def decisions_page():
     })
 
 
-@app.get("/api/decisions")
-async def api_decisions(limit: int = 100, instance: int = -1):
-    """列出最近的决策（从 Recorder 内存索引拿，最快）"""
+@app.get("/api/sessions")
+async def api_sessions():
+    """列出所有有决策记录的 session（含历史）"""
     from .automation.decision_log import get_recorder
+    return {
+        "sessions": get_recorder().list_sessions(),
+        "current_session": Path(_session_dir).name if _session_dir else None,
+    }
+
+
+@app.get("/api/decisions")
+async def api_decisions(limit: int = 200, instance: int = -1, session: str = ""):
+    """
+    列出决策。
+      session 空 → 当前 session（用内存索引最快）
+      session 给定 → 扫磁盘历史 session
+    """
+    from .automation.decision_log import get_recorder
+    rec = get_recorder()
     inst_filter = instance if instance >= 0 else None
-    items = get_recorder().list_recent(limit=limit, instance=inst_filter)
+    if session:
+        items = rec.list_session_decisions(session, limit=limit, instance=inst_filter)
+        return {
+            "count": len(items),
+            "items": items,
+            "session_dir": str((rec._logs_root() or Path()) / session) if rec._logs_root() else "",
+            "session": session,
+            "enabled": rec.is_enabled(),
+        }
+    items = rec.list_recent(limit=limit, instance=inst_filter)
     return {
         "count": len(items),
         "items": items,
         "session_dir": _session_dir,
-        "enabled": get_recorder().is_enabled(),
+        "session": Path(_session_dir).name if _session_dir else "",
+        "enabled": rec.is_enabled(),
     }
 
 
-@app.get("/api/decision/{decision_id}/data")
-async def api_decision_data(decision_id: str):
-    """单条决策的完整 JSON"""
+def _resolve_decision_dir(decision_id: str, session: str = "") -> Optional[Path]:
+    """根据 session 找决策所在目录。session 空则用当前。"""
     from .automation.decision_log import get_recorder
-    root = get_recorder().root()
+    rec = get_recorder()
+    if session:
+        root = rec._logs_root()
+        if root is None:
+            return None
+        return root / session / "decisions" / decision_id
+    # 当前 session
+    root = rec.root()
     if root is None:
+        return None
+    return root / decision_id
+
+
+@app.get("/api/decision/{decision_id}/data")
+async def api_decision_data(decision_id: str, session: str = ""):
+    """单条决策的完整 JSON"""
+    p = _resolve_decision_dir(_safe_id(decision_id), session)
+    if p is None:
         raise HTTPException(404, "no active session")
-    p = root / _safe_id(decision_id) / "decision.json"
-    if not p.is_file():
+    json_p = p / "decision.json"
+    if not json_p.is_file():
         raise HTTPException(404, "decision not found")
     try:
-        return JSONResponse(json.loads(p.read_text(encoding="utf-8")))
+        return JSONResponse(json.loads(json_p.read_text(encoding="utf-8")))
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
 @app.get("/api/decision/{decision_id}/image/{filename}")
-async def api_decision_image(decision_id: str, filename: str):
+async def api_decision_image(decision_id: str, filename: str, session: str = ""):
     """决策目录下的任意图片（input.jpg / yolo_annot.jpg / tmpl_*.png ...）"""
-    from .automation.decision_log import get_recorder
-    root = get_recorder().root()
-    if root is None:
+    d_dir = _resolve_decision_dir(_safe_id(decision_id), session)
+    if d_dir is None:
         raise HTTPException(404)
-    safe_name = _safe_id(filename.split(".")[0]) + "." + filename.split(".")[-1]
-    p = root / _safe_id(decision_id) / safe_name
+    # 安全检查：filename 不能包含路径
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "invalid filename")
+    p = d_dir / filename
     if not p.is_file():
-        # 兼容多种文件名变体
-        for f in (root / _safe_id(decision_id)).iterdir() if (root / _safe_id(decision_id)).is_dir() else []:
-            if f.name == filename:
-                p = f
-                break
-        if not p.is_file():
-            raise HTTPException(404, f"image not found: {filename}")
+        raise HTTPException(404, f"image not found: {filename}")
     media_type = "image/png" if p.suffix == ".png" else "image/jpeg"
     return FileResponse(p, media_type=media_type)
 
@@ -2365,6 +2400,9 @@ DECISIONS_HTML = r"""<!doctype html>
   <h1>决策剧场</h1>
   <span class="pulse" id="pulse" title="实时刷新中"></span>
   <span class="meta" id="status">loading...</span>
+  <select id="session-select" style="background:#2a3140;color:#e3e6eb;border:1px solid #3a4252;padding:6px 10px;border-radius:5px;font-size:12px;">
+    <option value="">当前 session（实时）</option>
+  </select>
   <input id="filter-inst" type="number" placeholder="只看实例 #" min="0" max="9" style="width:120px;">
   <button onclick="expandAll()">全部展开</button>
   <button onclick="collapseAll()">全部折叠</button>
@@ -2392,10 +2430,16 @@ DECISIONS_HTML = r"""<!doctype html>
 
 <script>
 let allItems = [];
-let knownIds = new Set();
+let knownIds = new Set();     // 已渲染的决策 id（增量渲染用）
 let openCards = new Set();    // 展开的决策 id
 let openGroups = new Set();   // 展开的实例号
+let cachedDetails = {};        // id → 已加载的详情 HTML
 let autoRefresh = true;
+let currentSession = "";       // 空 = 当前 session 实时, 否则 = 历史 session 名
+
+function getSession() {
+  return document.getElementById('session-select').value;
+}
 
 const PHASE_CN = {
   'dismiss_popups': '弹窗清理',
@@ -2438,25 +2482,117 @@ function outcomeBadgeClass(o) {
 }
 function phaseText(p) { return PHASE_CN[p] || p; }
 
-async function reload() {
+async function reloadSessions() {
+  try {
+    const r = await fetch('/api/sessions');
+    const d = await r.json();
+    const sel = document.getElementById('session-select');
+    const cur = sel.value;
+    let html = '<option value="">当前 session（实时）</option>';
+    for (const s of d.sessions) {
+      if (s.is_current) continue;
+      const date = new Date(s.mtime * 1000).toLocaleString('zh-CN', {hour12:false});
+      html += `<option value="${s.session}">${s.session} · ${s.decision_count} 条 · ${date}</option>`;
+    }
+    sel.innerHTML = html;
+    sel.value = cur;
+  } catch (e) {}
+}
+
+async function reload(forceRedraw = false) {
   let url = '/api/decisions?limit=300';
   const inst = document.getElementById('filter-inst').value;
   if (inst !== '') url += '&instance=' + inst;
+  const sess = getSession();
+  if (sess) url += '&session=' + encodeURIComponent(sess);
+  // session 切换 → 强制全量重渲染
+  if (sess !== currentSession) {
+    forceRedraw = true;
+    currentSession = sess;
+    knownIds.clear();
+    cachedDetails = {};
+  }
   try {
     const r = await fetch(url);
     const d = await r.json();
     document.getElementById('status').textContent =
-      `共 ${d.count} 条决策 · session=${(d.session_dir || '-').split(/[\\\/]/).pop()}`;
+      `共 ${d.count} 条决策 · ${sess ? '历史 session: ' + sess : '当前 session'}`;
     document.getElementById('pulse').style.background = d.enabled ? '#4ade80' : '#6e7685';
     allItems = d.items;
-    renderFeed();
+    if (forceRedraw) {
+      knownIds.clear();
+      renderFeed();
+    } else {
+      renderIncremental();
+    }
   } catch (e) {
     document.getElementById('status').textContent = '加载失败: ' + e.message;
   }
 }
 
+// 增量渲染: 只插入新决策, 不动已有 DOM
+function renderIncremental() {
+  if (allItems.length === 0) {
+    if (document.getElementById('feed').children.length === 0 ||
+        document.querySelector('#feed .empty')) {
+      renderFeed();
+    }
+    return;
+  }
+  // 找新决策
+  const newOnes = allItems.filter(it => !knownIds.has(it.id));
+  if (newOnes.length === 0) return;
+  // 第一次或结构变化大时全量重画
+  if (knownIds.size === 0 || newOnes.length > 30) {
+    renderFeed();
+    return;
+  }
+  // 增量插入: 找到对应实例 group, 把新卡插入到该 group 第一个测试场次的最前面
+  const byInst = {};
+  for (const it of newOnes) {
+    if (!byInst[it.instance]) byInst[it.instance] = [];
+    byInst[it.instance].push(it);
+    knownIds.add(it.id);
+  }
+  for (const inst of Object.keys(byInst)) {
+    const groupBody = document.querySelector(`[data-key="inst_${inst}"] .group-body`);
+    if (!groupBody) {
+      // 新实例出现 → 全量重画
+      renderFeed();
+      return;
+    }
+    // 找该 group 第一条卡（紧跟在场次分隔条之后）
+    const firstCard = groupBody.querySelector('.card');
+    const fragment = document.createElement('div');
+    let html = '';
+    for (const it of byInst[inst].sort((a, b) => b.created - a.created)) {
+      html += renderCard(it, true);   // true = 标记为新（动画闪一下）
+    }
+    fragment.innerHTML = html;
+    if (firstCard) {
+      while (fragment.firstChild) firstCard.parentNode.insertBefore(fragment.firstChild, firstCard);
+    } else {
+      groupBody.appendChild(fragment);
+    }
+    // 更新 group 头统计
+    updateGroupSummary(inst);
+  }
+}
+
+function updateGroupSummary(inst) {
+  const groupItems = allItems.filter(x => x.instance === parseInt(inst));
+  const lobbyDone = groupItems.filter(x => x.outcome === 'lobby_confirmed').length;
+  const summaryEl = document.querySelector(`[data-key="inst_${inst}"] .group-head .summary`);
+  if (summaryEl) {
+    summaryEl.textContent = `共 ${groupItems.length} 条决策 · lobby 完成 ${lobbyDone} 次`;
+  }
+}
+
 function renderFeed() {
   const c = document.getElementById('feed');
+  // 全量重画时, 当前 DOM 里所有 ID 进 knownIds
+  knownIds.clear();
+  for (const it of allItems) knownIds.add(it.id);
   if (allItems.length === 0) {
     c.innerHTML = '<div class="empty">暂无决策记录<br><span style="font-size:11px">在 GameBot 主界面点开始, 跑实例触发 dismiss_popups</span></div>';
     return;
@@ -2538,7 +2674,7 @@ function groupIntoSessions(items) {
   return sessions;
 }
 
-function renderCard(it) {
+function renderCard(it, isNew = false) {
   const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false}) +
                '.' + String(Math.floor((it.created % 1) * 1000)).padStart(3, '0');
   const isOpen = openCards.has(it.id);
@@ -2546,7 +2682,9 @@ function renderCard(it) {
   let vlabel = '';
   if (v === true) vlabel = '<span class="v-ok">✓ 画面变了</span>';
   else if (v === false) vlabel = '<span class="v-fail">✗ 画面没变</span>';
-  return `<div class="card ${isOpen ? 'open' : ''}" data-card-id="${it.id}">
+  const cachedBody = cachedDetails[it.id];
+  const bodyHtml = cachedBody || '<div class="empty" style="padding:20px;">加载详情...</div>';
+  return `<div class="card ${isOpen ? 'open' : ''} ${isNew ? 'new-glow' : ''}" data-card-id="${it.id}">
     <div class="card-head" onclick="toggleCard('${it.id}')">
       <span class="toggle">▶</span>
       <span class="time">${time}</span>
@@ -2555,7 +2693,7 @@ function renderCard(it) {
       ${vlabel}
     </div>
     <div class="card-body" id="body-${it.id}">
-      <div class="empty" style="padding:20px;">加载详情...</div>
+      ${bodyHtml}
     </div>
   </div>`;
 }
@@ -2567,15 +2705,19 @@ async function toggleCard(id) {
   el.classList.toggle('open');
   if (opening) {
     openCards.add(id);
-    // 加载详情
     const body = document.getElementById('body-' + id);
-    if (body && body.querySelector('.empty')) {
+    if (body && (!cachedDetails[id] || body.querySelector('.empty'))) {
       body.innerHTML = '<div class="empty" style="padding:10px;">loading...</div>';
       try {
-        const r = await fetch('/api/decision/' + encodeURIComponent(id) + '/data');
+        const sess = getSession();
+        let url = '/api/decision/' + encodeURIComponent(id) + '/data';
+        if (sess) url += '?session=' + encodeURIComponent(sess);
+        const r = await fetch(url);
         if (!r.ok) { body.innerHTML = '<div class="empty">加载失败</div>'; return; }
         const d = await r.json();
-        body.innerHTML = renderDetailHtml(d);
+        const html = renderDetailHtml(d);
+        cachedDetails[id] = html;
+        body.innerHTML = html;
       } catch (e) {
         body.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
       }
@@ -2612,7 +2754,10 @@ function toggleAuto() {
 }
 
 function renderDetailHtml(d) {
-  const imgUrl = (name) => '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name);
+  const sess = getSession();
+  const sessParam = sess ? '?session=' + encodeURIComponent(sess) : '';
+  const imgUrl = (name) =>
+    '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name) + sessParam;
   let html = '';
 
   // 1. 输入截图 + 点击位置
@@ -2757,11 +2902,23 @@ function escapeHtml(s) {
 }
 
 document.getElementById('filter-inst').addEventListener('input', () => {
-  reload();
+  knownIds.clear();
+  reload(true);
+});
+document.getElementById('session-select').addEventListener('change', () => {
+  reload(true);
+  // 选了历史 session, 暂停自动刷新
+  const sess = getSession();
+  if (sess) {
+    autoRefresh = false;
+    document.getElementById('btn-auto').textContent = '自动刷新: 关 (历史)';
+  }
 });
 
-reload();
+reloadSessions();
+reload(true);
 setInterval(() => { if (autoRefresh) reload(); }, 800);
+setInterval(() => { reloadSessions(); }, 10000);   // 每 10s 检查一次新 session
 </script>
 </body>
 </html>
