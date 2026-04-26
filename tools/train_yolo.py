@@ -102,8 +102,38 @@ def write_data_yaml(data_dir: Path, classes: list[str]):
     return yaml_path
 
 
+def _patch_torch_save_retry():
+    """
+    workaround torch 2.11 + Windows 偶发 ValueError: I/O operation on closed file
+    给 torch.save / ultralytics._torch_save 加 retry，崩了等一下再试
+    """
+    import torch as _t
+    _orig = _t.save
+
+    def _safe_save(*a, **kw):
+        import time as _time
+        last = None
+        for i in range(5):
+            try:
+                return _orig(*a, **kw)
+            except (RuntimeError, ValueError, OSError) as e:
+                last = e
+                print(f"  [torch.save retry {i+1}/5] {type(e).__name__}: {e}")
+                _time.sleep(0.5 * (i + 1))
+        raise last
+
+    _t.save = _safe_save
+    # ultralytics 在 import 时就 alias 了 torch.save，需要再覆盖一次
+    try:
+        import ultralytics.utils.patches as _p
+        _p._torch_save = _safe_save
+    except Exception:
+        pass
+
+
 def train(yaml_path: Path, epochs: int, imgsz: int, batch: int) -> Path:
     """跑训练。返回 best.pt 路径"""
+    _patch_torch_save_retry()
     from ultralytics import YOLO
 
     print(f"[4/6] 训练 yolov8n.pt epochs={epochs} imgsz={imgsz} batch={batch}")
