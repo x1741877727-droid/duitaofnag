@@ -617,6 +617,15 @@ class OcrDismisser:
                 await asyncio.sleep(0.3)
                 continue
 
+            # YOLO 训练数据采集：每轮开头采一次（pHash dedup 自动去重）
+            # 这是关键：公告/活动这种模板快速命中的弹窗，OCR 路径不会跑到，
+            # 之前没采集，所以训练集缺了这类样本。在循环顶部采就能覆盖。
+            try:
+                from .screenshot_collector import collect as _yolo_collect
+                _yolo_collect(shot, tag=f"dismiss_R{rnd+1:02d}")
+            except Exception:
+                pass
+
             # ━━ 快速路径: 模板匹配找X (~20ms) ━━
             # threshold 0.72（旧 0.80 太严，公告/活动 UI 微变就失配）
             # 加 _is_never_tap 过滤，防止模板误匹到右侧栏

@@ -448,12 +448,16 @@ class SingleInstanceRunner:
                 await asyncio.sleep(1)
                 continue
 
+            # YOLO 训练数据采集：登录中也可能弹"上次未登录"对话框等
+            try:
+                from .screenshot_collector import collect as _yolo_collect
+                _yolo_collect(shot, tag="wait_login")
+            except Exception:
+                pass
+
             if self.matcher.is_at_lobby(shot):
                 logger.info("[阶段2] 登录成功，已在大厅 ✓")
                 return True
-
-            # 检测登录页面停留太久 → 告警
-            # TODO: 用模板匹配检测"微信登录"/"QQ登录"按钮
 
             await asyncio.sleep(1)
 
