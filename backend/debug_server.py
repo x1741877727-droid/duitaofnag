@@ -2294,6 +2294,40 @@ DECISIONS_HTML = r"""<!doctype html>
   .badge.loop_blocked { background:#3d1d1d; color:#ef4444; }
   .badge.unknown { background:#252a33; color:#8b95a5; }
   .card-head .summary { color:#aab2bf; font-size:12px; flex: 1; }
+  .card-head .r-num { color:#6e7685; font-size:11px; font-family:monospace; min-width:36px; }
+  .card-head .story-icon {
+    width:18px; height:18px; border-radius:50%;
+    display:inline-flex; align-items:center; justify-content:center;
+    font-size:11px; font-weight:bold; flex-shrink:0;
+  }
+  .card-head .story-icon.ok { background:#1e4034; color:#4ade80; }
+  .card-head .story-icon.fail { background:#3d1d1d; color:#ef4444; }
+  .card-head .story-icon.warn { background:#3d2f1a; color:#fbbf24; }
+  .card-head .story-icon.neutral { background:#252a33; color:#8b95a5; }
+  .card-head .story { color:#e3e6eb; font-size:13px; flex:1; }
+
+  .divider {
+    padding: 8px 14px;
+    font-size: 11px; text-align:center;
+    border-top: 1px solid #252a33; border-bottom: 1px solid #252a33;
+  }
+  .divider.success { background:#0f2014; color:#4ade80; }
+  .divider.phase { background:#1a1f28; color:#fbbf24; }
+
+  .img-card.big img { max-height: 600px; }
+  .main-view { padding: 0; background: transparent; border: none; margin-bottom: 12px; }
+
+  .story-section { background: #1a1f28; border-color: #2563eb40; }
+  .story-title {
+    color:#6fa8ff; font-size:12px; font-weight:600;
+    margin-bottom:8px;
+  }
+  .story-list {
+    margin: 0; padding-left: 22px; line-height: 1.85;
+    font-size: 13px; color:#e3e6eb;
+  }
+  .story-list li { margin-bottom: 3px; }
+  .story-list b { color:#fbbf24; }
   .card-head .v-ok { color:#4ade80; font-size:11px; }
   .card-head .v-fail { color:#ef4444; font-size:11px; }
   .card-head .duration { color:#6e7685; font-size:11px; }
@@ -2612,36 +2646,41 @@ function renderFeed() {
   let html = '';
   for (const inst of instances) {
     const items = byInst[inst].sort((a, b) => b.created - a.created);  // 新的在前
-    // 按 phase + 大间隔(>10s)断成"测试场次"
-    const sessions = groupIntoSessions(items);
 
-    // 默认展开所有实例（除非用户手动折叠了）
     if (!openGroups.has('inst_' + inst) && openGroups.size === 0) {
-      openGroups.add('inst_' + inst);  // 首次默认展开
+      openGroups.add('inst_' + inst);
     }
     const isOpen = openGroups.has('inst_' + inst);
 
     const totalDecisions = items.length;
     const lobbyDone = items.filter(x => x.outcome === 'lobby_confirmed').length;
+    const summary = `共 ${totalDecisions} 条 · 到大厅 ${lobbyDone} 次`;
     html += `<div class="group ${isOpen ? 'open' : ''}" data-key="inst_${inst}">
       <div class="group-head" onclick="toggleGroup('inst_${inst}')">
         <span class="toggle">▶</span>
         <span class="name">实例 #${inst}</span>
-        <span class="summary">共 ${totalDecisions} 条决策 · ${sessions.length} 个测试场次 · lobby 完成 ${lobbyDone} 次</span>
+        <span class="summary">${summary}</span>
       </div>
       <div class="group-body">`;
 
-    for (let si = 0; si < sessions.length; si++) {
-      const sess = sessions[si];
-      const start = new Date(sess[sess.length - 1].created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
-      const end = new Date(sess[0].created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
-      const phase = sess[0].phase;
-      html += `<div style="padding:6px 14px; background:#1a1f28; color:#fbbf24; font-size:11px; border-bottom:1px solid #252a33;">
-        ━━━ 测试场次 ${sessions.length - si} · ${phaseText(phase)} · ${start} → ${end} · 共 ${sess.length} 条 ━━━
-      </div>`;
-      for (const it of sess) {
-        html += renderCard(it);
+    // 时间线：在 phase 切换 / lobby_confirmed 处插分隔条
+    let prevItem = null;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      // 上一条是 lobby_confirmed (代表"上一轮清弹窗结束") 或 phase 切换 → 插分隔
+      if (prevItem && (
+          prevItem.outcome === 'lobby_confirmed' ||
+          prevItem.phase !== it.phase
+        )) {
+        const t = new Date(prevItem.created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+        if (prevItem.outcome === 'lobby_confirmed') {
+          html += `<div class="divider success">━━━ ${t} 清弹窗完成 → 已到大厅 ━━━</div>`;
+        } else {
+          html += `<div class="divider phase">━━━ ${t} 切换到 ${phaseText(it.phase)} ━━━</div>`;
+        }
       }
+      html += renderCard(it);
+      prevItem = it;
     }
 
     html += `</div></div>`;
@@ -2674,23 +2713,51 @@ function groupIntoSessions(items) {
   return sessions;
 }
 
-function renderCard(it, isNew = false) {
-  const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false}) +
-               '.' + String(Math.floor((it.created % 1) * 1000)).padStart(3, '0');
-  const isOpen = openCards.has(it.id);
+// 故事化总结：一句话讲清楚 bot 在干啥
+function storySummary(it) {
+  const o = it.outcome || '';
+  const target = it.tap_target || '';
   const v = it.verify_success;
-  let vlabel = '';
-  if (v === true) vlabel = '<span class="v-ok">✓ 画面变了</span>';
-  else if (v === false) vlabel = '<span class="v-fail">✗ 画面没变</span>';
+  if (o === 'lobby_confirmed') return '✓ 看到「开始游戏」按钮 → 判定到大厅，清弹窗结束';
+  if (o.startsWith('lobby_pending')) return '看到「开始游戏」按钮，再确认一次（防误判）';
+  if (o === 'no_target') return '没看到弹窗按钮（画面在加载/动画中）';
+  if (o === 'loop_blocked') return '⚠️ 同位置点了 3 次没反应，等等再说';
+  if (o === 'tapped') {
+    if (target === 'close_x') {
+      return '看到 X 关闭按钮 → 点了' + (v === true ? '，✓ 弹窗消失了' : v === false ? '，✗ 弹窗没消失' : '');
+    }
+    if (target === 'action_btn') {
+      return '看到操作按钮 → 点了' + (v === true ? '，✓ 画面变了' : v === false ? '，✗ 画面没变' : '');
+    }
+    return '点了一下' + (v === true ? '，✓ 有效' : '');
+  }
+  return outcomeText(o);
+}
+
+function renderCard(it, isNew = false) {
+  const time = new Date(it.created * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+  const isOpen = openCards.has(it.id);
+  const story = storySummary(it);
   const cachedBody = cachedDetails[it.id];
-  const bodyHtml = cachedBody || '<div class="empty" style="padding:20px;">加载详情...</div>';
+  const bodyHtml = cachedBody || '<div class="empty" style="padding:20px;">加载中...</div>';
+
+  // 单行图标提示：成功/警告/错误
+  let icon = '·';
+  let iconCls = 'neutral';
+  if (it.outcome === 'lobby_confirmed') { icon = '✓'; iconCls = 'ok'; }
+  else if (it.outcome === 'tapped' && it.verify_success === true) { icon = '✓'; iconCls = 'ok'; }
+  else if (it.outcome === 'tapped' && it.verify_success === false) { icon = '✗'; iconCls = 'fail'; }
+  else if (it.outcome === 'loop_blocked') { icon = '⚠'; iconCls = 'warn'; }
+  else if (it.outcome === 'no_target') { icon = '○'; iconCls = 'neutral'; }
+  else if (it.outcome && it.outcome.startsWith('lobby_pending')) { icon = '◔'; iconCls = 'neutral'; }
+
   return `<div class="card ${isOpen ? 'open' : ''} ${isNew ? 'new-glow' : ''}" data-card-id="${it.id}">
     <div class="card-head" onclick="toggleCard('${it.id}')">
       <span class="toggle">▶</span>
       <span class="time">${time}</span>
-      <span class="badge ${outcomeBadgeClass(it.outcome)}">R${it.round}</span>
-      <span class="summary">${outcomeText(it.outcome)}${it.tap_target ? ' · 点 ' + it.tap_target : ''}</span>
-      ${vlabel}
+      <span class="r-num">R${it.round}</span>
+      <span class="story-icon ${iconCls}">${icon}</span>
+      <span class="story">${story}</span>
     </div>
     <div class="card-body" id="body-${it.id}">
       ${bodyHtml}
@@ -2760,47 +2827,114 @@ function renderDetailHtml(d) {
     '/api/decision/' + encodeURIComponent(d.id) + '/image/' + encodeURIComponent(name) + sessParam;
   let html = '';
 
-  // 1. 输入截图 + 点击位置
-  const hasInput = !!d.input_image;
-  const hasTap = d.tap && d.tap.annot_image;
-  if (hasInput || hasTap) {
-    html += `<div class="section">
-      <h3>① 机器看见的画面 ${hasTap ? '+ 点击位置标注' : ''}</h3>
-      <div class="desc">这是 bot 截到的原始画面。如果 bot 点了什么，红圈+文字标在第二张图上。</div>
-      <div class="img-grid ${hasTap ? '' : 'single'}">
-        ${hasInput ? `<div class="img-card"><div class="label">原始截图 ${d.input_w}×${d.input_h}</div><img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>` : ''}
-        ${hasTap ? `<div class="img-card"><div class="label">点击位置 (来自 ${d.tap.method})</div><img src="${imgUrl(d.tap.annot_image)}" onclick="zoom(this.src)"></div>` : ''}
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 极简模式（默认显示）
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // 选最有信息量的一张图作为主图（优先 tap_annot > yolo_annot > lobby_annot > input）
+  let mainImg = '';
+  let mainLabel = '';
+  if (d.tap && d.tap.annot_image) {
+    mainImg = d.tap.annot_image;
+    mainLabel = '红圈 = bot 点击位置';
+  } else {
+    for (const t of (d.tiers || [])) {
+      if (t.yolo_annot_image) {
+        mainImg = t.yolo_annot_image;
+        mainLabel = t.name && t.name.includes('大厅')
+          ? '绿框 = 模板命中位置（lobby_start_btn）'
+          : '红框 = 关闭按钮 X · 黄框 = 操作按钮';
+        break;
+      }
+    }
+  }
+  if (!mainImg && d.input_image) {
+    mainImg = d.input_image;
+    mainLabel = '机器原始截图';
+  }
+
+  if (mainImg) {
+    html += `<div class="section main-view">
+      <div class="img-card big">
+        <div class="label">${mainLabel}</div>
+        <img src="${imgUrl(mainImg)}" onclick="zoom(this.src)">
       </div>
-      ${d.tap ? `<div class="kv" style="margin-top:8px;">
+    </div>`;
+  }
+
+  // 故事性总结（人话）
+  const storyParts = buildStory(d);
+  if (storyParts.length > 0) {
+    html += `<div class="section story-section">
+      <div class="story-title">bot 是这么想的：</div>
+      <ol class="story-list">${storyParts.map(s => '<li>' + s + '</li>').join('')}</ol>
+    </div>`;
+  }
+
+  // 验证结果（成功 / 失败的彩条）
+  if (d.verify) {
+    const ok = d.verify.success;
+    const stateCls = ok===true ? 'ok' : (ok===false ? 'fail' : 'unknown');
+    const statusText = ok===true ? '✓ 画面变了 → 大概率点中了'
+                     : ok===false ? '✗ 画面没变 → 点错或目标无效'
+                     : '? 没做验证';
+    html += `<div class="verify-bar ${stateCls}" style="margin-bottom:12px;">
+      <span class="result" style="font-size:14px;">${statusText}</span>
+      <span style="margin-left:auto;color:#6e7685;font-size:11px;">画面变化度 ${d.verify.distance}</span>
+    </div>`;
+  }
+
+  // [显示技术细节 ▼] 折叠按钮 + 下面隐藏的全套 Tier 详情
+  html += `<div style="text-align:center;margin:14px 0;">
+    <button onclick="toggleTech('${d.id}')" id="tech-btn-${d.id}"
+            style="background:#1f2530;border:1px solid #3a4252;color:#aab2bf;
+                   padding:7px 16px;border-radius:5px;cursor:pointer;font-size:12px;">
+      显示技术细节 ▼
+    </button>
+  </div>
+  <div id="tech-${d.id}" style="display:none;">`;
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 技术细节模式（点开才看）
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // 完整原图
+  if (d.input_image) {
+    html += `<div class="section">
+      <h3>原始截图（机器看见的画面）</h3>
+      <div class="img-card"><div class="label">${d.input_w}×${d.input_h} · phash=${d.input_phash}</div>
+        <img src="${imgUrl(d.input_image)}" onclick="zoom(this.src)"></div>
+    </div>`;
+  }
+
+  // tap 详情
+  if (d.tap) {
+    html += `<div class="section">
+      <h3>点击详情</h3>
+      <div class="kv">
         <span class="k">点击坐标</span><span class="v">(${d.tap.x}, ${d.tap.y})</span>
         <span class="k">来自识别层</span><span class="v">${d.tap.method}</span>
         ${d.tap.target_class ? `<span class="k">目标类别</span><span class="v">${d.tap.target_class}</span>` : ''}
         ${d.tap.target_text ? `<span class="k">目标文字 (OCR)</span><span class="v">${escapeHtml(d.tap.target_text)}</span>` : ''}
         ${d.tap.target_conf ? `<span class="k">置信度</span><span class="v">${d.tap.target_conf}</span>` : ''}
-      </div>` : ''}
+      </div>
     </div>`;
   }
 
-  // 2. 验证条
+  // 验证详情
   if (d.verify) {
-    const ok = d.verify.success;
-    const stateCls = ok===true ? 'ok' : (ok===false ? 'fail' : 'unknown');
     html += `<div class="section">
-      <h3>② tap 后验证</h3>
-      <div class="desc">点完后等 500ms 重截图，对比 phash。距离大说明画面变了 = 大概率点中。</div>
-      <div class="verify-bar ${stateCls}">
-        <span class="label">phash 距离 =</span>
-        <span style="font-family:monospace;font-size:14px;font-weight:600;">${d.verify.distance}</span>
-        <span class="result">${ok===true ? '✓ 画面变了，大概率点中' : (ok===false ? '✗ 画面没变，点错或目标无效' : '? 未验证')}</span>
-      </div>
-      <div class="kv" style="margin-top:6px; font-size:11px;">
+      <h3>验证细节（phash 比对）</h3>
+      <div class="kv" style="font-size:11px;">
         <span class="k">phash 之前</span><span class="v">${d.verify.phash_before || '-'}</span>
         <span class="k">phash 之后</span><span class="v">${d.verify.phash_after || '-'}</span>
+        <span class="k">距离</span><span class="v">${d.verify.distance}</span>
+        <span class="k">结论</span><span class="v">${d.verify.success === true ? '画面变了' : d.verify.success === false ? '画面没变' : '未判'}</span>
       </div>
     </div>`;
   }
 
-  // 3. 各 Tier
+  // 各 Tier 详细
   (d.tiers || []).forEach((t, idx) => {
     html += `<div class="section">
       <h3>③.${idx+1} Tier ${t.tier} · ${t.name}
@@ -2882,12 +3016,99 @@ function renderDetailHtml(d) {
   // note 备注
   if (d.note) {
     html += `<div class="section" style="background:#1a1f28;border-color:#3a4252;">
-      <h3>④ 决策备注</h3>
+      <h3>决策备注</h3>
       <div style="color:#e3e6eb;font-size:13px;">${escapeHtml(d.note)}</div>
     </div>`;
   }
 
+  // 关闭技术细节 div
+  html += `</div>`;
   return html;
+}
+
+// 构造故事化文字总结（人话, 不带技术名词）
+function buildStory(d) {
+  const parts = [];
+  let templateHit = null;
+  let yoloHits = [];
+  let ocrText = '';
+
+  for (const t of (d.tiers || [])) {
+    if (t.templates && t.templates.length > 0) {
+      const hit = t.templates.find(x => x.hit);
+      if (hit && !templateHit) templateHit = { name: hit.name, score: hit.score };
+    }
+    if (t.yolo_detections && t.yolo_detections.length > 0) {
+      for (const det of t.yolo_detections) {
+        if (det.conf > 0.5) yoloHits.push(det);
+      }
+    }
+    if (t.ocr_hits && t.ocr_hits.length > 0) {
+      ocrText = t.ocr_hits.map(x => x.text).join(' ');
+    }
+  }
+
+  // 模板命中
+  if (templateHit) {
+    let label = templateHit.name;
+    if (label.includes('lobby_start_btn') || label.includes('lobby_start_game')) {
+      label = '「开始游戏」按钮';
+    }
+    parts.push(`看到 <b>${label}</b>（模板分数 ${templateHit.score}）`);
+  }
+
+  // YOLO 看到
+  if (yoloHits.length > 0) {
+    const closeXs = yoloHits.filter(x => x.cls === 'close_x');
+    const actions = yoloHits.filter(x => x.cls === 'action_btn');
+    const seg = [];
+    if (closeXs.length > 0) seg.push(`<b>${closeXs.length} 个 X 关闭按钮</b>（信心 ${closeXs[0].conf}）`);
+    if (actions.length > 0) seg.push(`<b>${actions.length} 个文字按钮</b>（信心 ${actions[0].conf}）`);
+    if (seg.length > 0) parts.push(`YOLO 模型识别出 ${seg.join(' + ')}`);
+  } else {
+    // 大厅检测有命中但 YOLO 啥都没看到 → 说明到大厅了
+    if (templateHit && d.tiers.some(t => t.name && t.name.includes('YOLO'))) {
+      parts.push(`YOLO 模型没识别到任何弹窗按钮（说明画面干净）`);
+    }
+  }
+
+  // OCR 文字
+  if (ocrText) {
+    parts.push(`按钮上的文字识别为「<b>${escapeHtml(ocrText)}</b>」`);
+  }
+
+  // 决策结果
+  if (d.tap) {
+    let action = '';
+    if (d.tap.target_class === 'close_x') action = '点了关闭按钮';
+    else if (d.tap.target_class === 'action_btn') action = '点了操作按钮';
+    else action = '点了一下';
+    parts.push(`<b>决定：${action}</b> @ (${d.tap.x}, ${d.tap.y})`);
+  } else if (d.outcome === 'lobby_confirmed') {
+    parts.push(`<b>判定：已到大厅，结束清弹窗</b>`);
+  } else if (d.outcome && d.outcome.startsWith('lobby_pending')) {
+    parts.push(`<b>判定：可能到大厅了，再确认一次防误判</b>`);
+  } else if (d.outcome === 'no_target') {
+    parts.push(`<b>判定：暂时没目标，等下一轮</b>（画面可能在加载）`);
+  } else if (d.outcome === 'loop_blocked') {
+    parts.push(`<b>判定：同位置点了 3 次没反应，等等再说</b>`);
+  }
+
+  return parts;
+}
+
+// 折叠/展开技术细节
+function toggleTech(id) {
+  const el = document.getElementById('tech-' + id);
+  const btn = document.getElementById('tech-btn-' + id);
+  if (!el) return;
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    btn.textContent = '隐藏技术细节 ▲';
+  } else {
+    el.style.display = 'none';
+    btn.textContent = '显示技术细节 ▼';
+  }
 }
 
 function zoom(src) {
