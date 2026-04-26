@@ -81,6 +81,7 @@ class YoloDismisser:
 
     def __init__(self, max_rounds: int = 20):
         self.max_rounds = max_rounds
+        self._ocr_fallback = None  # 懒初始化, 兜底用
 
     # ─────────── 模型加载 ───────────
 
@@ -479,10 +480,10 @@ class YoloDismisser:
                     target_conf = tgt.conf
 
             if tap_xy is None:
-                # 啥都没识别 → 可能加载中, 也可能就是干净的大厅
+                # 啥都没识别 → 可能加载中, 也可能就是干净的大厅, 也可能 YOLO 漏检
                 empty_dets_streak += 1
-                # v2-4 兜底: 连续 3 轮 YOLO 没找到任何弹窗 + 模板命中 lobby_start_btn
-                # → 直接判大厅成功. 这是 use_quad=True 下 phash 不稳定无法过四元的兜底.
+
+                # 兜底 A: 连续 3 轮无弹窗 + 模板命中 lobby_start_btn → 大厅成功
                 if empty_dets_streak >= 3 and lobby_hit is not None:
                     logger.info(
                         f"[Y{rnd + 1}] 大厅 (兜底: 连续 {empty_dets_streak} 轮无弹窗 + 模板命中) → 完成 · 关闭 {popups_closed}"
@@ -492,6 +493,36 @@ class YoloDismisser:
                         note=f"连续 {empty_dets_streak} 轮 YOLO 无目标 + 模板命中 lobby_start_btn",
                     )
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
+
+                # 兜底 B: 连续 5 轮无弹窗 + 模板未命中 (不在大厅) → 可能 YOLO 漏检
+                # 调 OcrDismisser 的形状/OCR 兜底找关闭目标 (修 '砍价活动' / 新弹窗 漏检)
+                if empty_dets_streak >= 5 and lobby_hit is None:
+                    if self._ocr_fallback is None:
+                        from .ocr_dismisser import OcrDismisser
+                        self._ocr_fallback = OcrDismisser(max_rounds=1)
+                    try:
+                        target = self._ocr_fallback._find_close_target(shot, matcher)
+                    except Exception as e:
+                        logger.debug(f"[Y{rnd + 1}] OCR 兜底异常: {e}")
+                        target = None
+                    if target:
+                        fcx, fcy, method = target
+                        logger.warning(
+                            f"[Y{rnd + 1}] YOLO 漏检兜底 ({method}) tap @ ({fcx},{fcy})"
+                        )
+                        decision.set_tap(fcx, fcy, method=f"OCR-fallback({method})",
+                                         target_class="fallback", target_text="",
+                                         target_conf=0.0, screenshot=shot)
+                        if _t_first_tap_ms < 0:
+                            _t_first_tap_ms = _ms_since_start()
+                        await device.tap(fcx, fcy)
+                        popups_closed += 1
+                        empty_dets_streak = 0
+                        decision.finalize(outcome="ocr_fallback_tap",
+                                          note=f"YOLO 5 轮漏检, OCR 兜底命中: {method}")
+                        await asyncio.sleep(0.5)
+                        continue
+
                 logger.debug(f"[Y{rnd + 1}] 无目标 (dets={len(dets)}, 连续{empty_dets_streak}轮)，等待")
                 decision.finalize(outcome="no_target", note=f"YOLO 检 {len(dets)} 个目标但都不达标")
                 await asyncio.sleep(0.6)
