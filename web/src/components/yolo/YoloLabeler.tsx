@@ -32,6 +32,11 @@ export function YoloLabeler({
   const [saving, setSaving] = useState(false)
   const [drag, setDrag] = useState<{ startNx: number; startNy: number; box: LabelBox } | null>(null)
 
+  // 缩放 / 平移 (transform 套在 <img> 上, 不影响 normalized 坐标计算)
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })   // 平移 px (transform translate)
+  const [pannning, setPanning] = useState<{ startClientX: number; startClientY: number; startPanX: number; startPanY: number } | null>(null)
+
   const imgRef = useRef<HTMLImageElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
@@ -51,6 +56,9 @@ export function YoloLabeler({
   useEffect(() => {
     if (!name) return
     setBoxes([])
+    // 切图时复位缩放/平移
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
     fetchLabels(name).then((r) => setBoxes(r.boxes)).catch(() => {})
   }, [name])
 
@@ -77,6 +85,18 @@ export function YoloLabeler({
 
   function onMouseDown(e: React.MouseEvent) {
     if (!naturalSize) return
+    // 中键 (button=1) 或 Shift+左键 → 平移
+    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+      e.preventDefault()
+      setPanning({
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startPanX: pan.x,
+        startPanY: pan.y,
+      })
+      return
+    }
+    if (e.button !== 0) return
     const p = clientToNorm(e.clientX, e.clientY)
     if (!p) return
     const newBox: LabelBox = {
@@ -86,6 +106,13 @@ export function YoloLabeler({
     setDrag({ startNx: p.nx, startNy: p.ny, box: newBox })
   }
   function onMouseMove(e: React.MouseEvent) {
+    if (pannning) {
+      setPan({
+        x: pannning.startPanX + (e.clientX - pannning.startClientX),
+        y: pannning.startPanY + (e.clientY - pannning.startClientY),
+      })
+      return
+    }
     if (!drag) return
     const p = clientToNorm(e.clientX, e.clientY)
     if (!p) return
@@ -105,10 +132,41 @@ export function YoloLabeler({
     })
   }
   function onMouseUp() {
+    if (pannning) {
+      setPanning(null)
+      return
+    }
     if (drag && drag.box.w > 0.005 && drag.box.h > 0.005) {
       setBoxes((bs) => [...bs, drag.box])
     }
     setDrag(null)
+  }
+  function onWheel(e: React.WheelEvent) {
+    if (!naturalSize) return
+    // 滚轮 / 中键滚动 → 缩放. 不阻塞页面滚动除非真在画布上.
+    e.preventDefault()
+    const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15
+    const newZoom = Math.max(0.3, Math.min(8, zoom * delta))
+    // 以鼠标光标为缩放中心: 调整 pan 让光标下的图位置不变
+    const wrap = wrapRef.current?.getBoundingClientRect()
+    if (wrap) {
+      const mx = e.clientX - wrap.left
+      const my = e.clientY - wrap.top
+      const cx = wrap.width / 2 + pan.x
+      const cy = wrap.height / 2 + pan.y
+      const dx = mx - cx
+      const dy = my - cy
+      const ratio = newZoom / zoom
+      setPan({
+        x: pan.x - dx * (ratio - 1),
+        y: pan.y - dy * (ratio - 1),
+      })
+    }
+    setZoom(newZoom)
+  }
+  function resetZoom() {
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
   }
 
   function removeBox(idx: number) {
@@ -228,7 +286,9 @@ export function YoloLabeler({
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
-        style={{ cursor: name ? 'crosshair' : 'default' }}
+        onWheel={onWheel}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{ cursor: pannning ? 'grabbing' : (name ? 'crosshair' : 'default') }}
       >
         {!name ? (
           <div className="text-sm text-zinc-400">从左侧选一张图开始标注</div>
@@ -239,11 +299,34 @@ export function YoloLabeler({
             alt={name}
             draggable={false}
             className="max-w-full max-h-full object-contain"
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: 'center center',
+              transition: pannning ? 'none' : 'transform 0.05s',
+            }}
             onLoad={(e) => {
               const img = e.currentTarget
               setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight })
             }}
           />
+        )}
+        {/* 缩放指示 + 重置 */}
+        {name && (
+          <div className="absolute top-2 left-2 flex items-center gap-2 bg-black/60 text-white text-[11px] px-2 py-1 rounded">
+            <span className="font-mono">{Math.round(zoom * 100)}%</span>
+            <button
+              onClick={resetZoom}
+              className="text-blue-300 hover:text-blue-100"
+              title="重置 (1:1)"
+            >
+              ⟲
+            </button>
+          </div>
+        )}
+        {name && (
+          <div className="absolute bottom-2 left-2 bg-black/60 text-white/80 text-[10px] px-2 py-1 rounded font-mono">
+            滚轮 缩放 · 中键拖 / Shift+左键拖 平移 · 左键 画框
+          </div>
         )}
         {boxes.map((b, i) => {
           const style = renderBoxStyle(b)
