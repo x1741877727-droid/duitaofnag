@@ -296,7 +296,7 @@ class YoloDismisser:
         #   离开登录页 (看到大厅 / 弹窗 / dets > 0) → 重置 (=登录成功)
         #   20s 后仍在登录页 → P2 fail return → runner_service 走重试 → 3 次后 game_restart
         login_first_seen_ts: Optional[float] = None
-        LOGIN_WAIT_SECONDS = 20.0
+        LOGIN_WAIT_SECONDS = 60.0
 
         # v2-4 细粒度时间记录: 从 dismiss_all 开始的累计 ms
         _phase_start_ts = time.perf_counter()
