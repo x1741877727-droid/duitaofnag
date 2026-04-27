@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp } from 'lucide-react'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export function Header() {
@@ -43,7 +43,43 @@ export function Header() {
             className="gap-2"
           >
             <LayoutDashboard className="h-4 w-4" />
-            控制台
+            运行控制
+          </Button>
+          <Button
+            variant={currentView === 'console' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('console')}
+            className="gap-2"
+          >
+            <Activity className="h-4 w-4" />
+            中控台
+          </Button>
+          <Button
+            variant={currentView === 'archive' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('archive')}
+            className="gap-2"
+          >
+            <Archive className="h-4 w-4" />
+            决策档案
+          </Button>
+          <Button
+            variant={currentView === 'templates' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('templates')}
+            className="gap-2"
+          >
+            <Image className="h-4 w-4" />
+            模版库
+          </Button>
+          <Button
+            variant={currentView === 'perf' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('perf')}
+            className="gap-2"
+          >
+            <BarChart3 className="h-4 w-4" />
+            性能
           </Button>
           <Button
             variant={currentView === 'settings' ? 'secondary' : 'ghost'}

@@ -1,13 +1,19 @@
 import { useEffect } from 'react'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import { useLiveStream } from '@/lib/useLiveStream'
 import { useAppStore, type TeamGroup, type TeamRole } from '@/lib/store'
 import { Header } from '@/components/Header'
 import { Dashboard } from '@/components/dashboard'
 import { SettingsView } from '@/components/settings-view'
 import { LogDrawer } from '@/components/log-panel'
+import { Console } from '@/components/console/Console'
+import { Archive } from '@/components/archive/Archive'
+import { TemplateLibrary } from '@/components/templates/TemplateLibrary'
+import { PerfView } from '@/components/perf/PerfView'
 
 function App() {
   useWebSocket()
+  useLiveStream()
   const { currentView, showLogPanel, setAccounts, setEmulators } = useAppStore()
 
   // 启动时加载账号和模拟器（不用等进设置页）
@@ -45,8 +51,20 @@ function App() {
       <div className="flex-1 flex min-h-0">
         {/* 主内容 */}
         <main className="flex-1 overflow-y-auto p-4">
-          <div className="max-w-5xl mx-auto animate-page" key={currentView}>
-            {currentView === 'dashboard' ? <Dashboard /> : <SettingsView />}
+          <div
+            className={
+              currentView === 'console'
+                ? 'h-full animate-page'
+                : 'max-w-5xl mx-auto animate-page'
+            }
+            key={currentView}
+          >
+            {currentView === 'dashboard' && <Dashboard />}
+            {currentView === 'console' && <Console />}
+            {currentView === 'archive' && <Archive />}
+            {currentView === 'templates' && <TemplateLibrary />}
+            {currentView === 'perf' && <PerfView />}
+            {currentView === 'settings' && <SettingsView />}
           </div>
         </main>
 

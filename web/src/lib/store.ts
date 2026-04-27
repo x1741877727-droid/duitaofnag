@@ -90,12 +90,53 @@ export interface AccelInstanceState {
   error: string | null
 }
 
+// ─── 中控台 v3 — 实时事件 / 决策 ───
+
+export type ConsoleView =
+  | 'dashboard'      // 运行控制 (现有 squad/start/stop)
+  | 'console'        // 中控台 (实时观察 + 反向控制)
+  | 'archive'        // 决策档案 (历史会话)
+  | 'templates'      // 模版库
+  | 'perf'           // 性能
+  | 'settings'
+
+export interface LiveDecisionEvent {
+  // 单条决策摘要 (从 /ws/live decision 事件来)
+  id: string
+  type: 'decision'
+  ts: number
+  instance: number
+  phase: string
+  round: number
+  outcome: string
+  tap_method?: string
+  tap_target?: string
+  tap_xy?: [number, number] | null
+  verify_success?: boolean | null
+  tier_count?: number
+}
+
+export interface PhaseChangeEvent {
+  type: 'phase_change'
+  instance: number
+  from: string
+  to: string
+  ts: number
+}
+
+export type LiveEvent =
+  | LiveDecisionEvent
+  | PhaseChangeEvent
+  | { type: 'hello' | 'pong'; ts: number; version?: string }
+  | { type: 'intervene_ack'; command: string; instance: number; token: string; result: string; ts: number }
+  | { type: 'perf'; ts: number; global?: Record<string, number>; instances?: Record<number, Record<string, unknown>> }
+
 interface AppState {
   isRunning: boolean
   setIsRunning: (running: boolean) => void
 
-  currentView: 'dashboard' | 'settings'
-  setCurrentView: (view: 'dashboard' | 'settings') => void
+  currentView: ConsoleView
+  setCurrentView: (view: ConsoleView) => void
 
   showLogPanel: boolean
   setShowLogPanel: (show: boolean) => void
@@ -131,9 +172,28 @@ interface AppState {
   // 运行时长
   runningDuration: number
   setRunningDuration: (d: number) => void
+
+  // ── 中控台 v3 ──
+  liveConnected: boolean
+  setLiveConnected: (c: boolean) => void
+
+  // 每实例最近 N 条决策事件 (中控台 ActionLog / 实时观察台用)
+  liveDecisions: Record<number, LiveDecisionEvent[]>
+  pushLiveDecision: (ev: LiveDecisionEvent) => void
+
+  // 每实例阶段变迁列表 (PhaseTimeline 用)
+  phaseHistory: Record<number, { from: string; to: string; ts: number }[]>
+  pushPhaseChange: (ev: PhaseChangeEvent) => void
+
+  // 选中实例 (中控台聚焦哪一个)
+  focusedInstance: number | null
+  setFocusedInstance: (idx: number | null) => void
 }
 
+const MAX_LIVE_PER_INSTANCE = 50
+
 const MAX_LOGS = 500
+// MAX_LIVE_PER_INSTANCE defined above near interface
 
 export const useAppStore = create<AppState>((set) => ({
   isRunning: false,
@@ -195,6 +255,39 @@ export const useAppStore = create<AppState>((set) => ({
 
   runningDuration: 0,
   setRunningDuration: (d) => set({ runningDuration: d }),
+
+  // ── 中控台 v3 ──
+  liveConnected: false,
+  setLiveConnected: (c) => set({ liveConnected: c }),
+
+  liveDecisions: {},
+  pushLiveDecision: (ev) => set((state) => {
+    const cur = state.liveDecisions[ev.instance] || []
+    const next = [...cur, ev]
+    if (next.length > MAX_LIVE_PER_INSTANCE) next.splice(0, next.length - MAX_LIVE_PER_INSTANCE)
+    return {
+      liveDecisions: {
+        ...state.liveDecisions,
+        [ev.instance]: next,
+      },
+    }
+  }),
+
+  phaseHistory: {},
+  pushPhaseChange: (ev) => set((state) => {
+    const cur = state.phaseHistory[ev.instance] || []
+    const next = [...cur, { from: ev.from, to: ev.to, ts: ev.ts }]
+    if (next.length > 30) next.splice(0, next.length - 30)
+    return {
+      phaseHistory: {
+        ...state.phaseHistory,
+        [ev.instance]: next,
+      },
+    }
+  }),
+
+  focusedInstance: null,
+  setFocusedInstance: (idx) => set({ focusedInstance: idx }),
 }))
 
 // 状态配置
