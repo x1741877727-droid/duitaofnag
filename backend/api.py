@@ -26,6 +26,9 @@ from .runner_service import MultiRunnerService
 
 logger = logging.getLogger(__name__)
 
+# 模块级 service 引用 (api_templates 等 router 用)
+_active_service = None
+
 
 # =====================
 # WebSocket 连接管理
@@ -203,6 +206,9 @@ def create_app(config: ConfigManager) -> FastAPI:
     )
 
     service = MultiRunnerService()
+    # 暴露给其他 router (api_templates 抓实例帧用)
+    global _active_service
+    _active_service = service
 
     # 调试 web UI（独立 0.0.0.0:8901，Mac 浏览器可访问，不影响桌面 webview）
     try:
@@ -229,6 +235,14 @@ def create_app(config: ConfigManager) -> FastAPI:
         logger.info("[api] /api/decisions /api/sessions 已挂载")
     except Exception as _e:
         logger.warning(f"[api] api_decisions 挂载失败: {_e}")
+
+    # 模版库 + 模版测试
+    try:
+        from .api_templates import router as _templates_router
+        app.include_router(_templates_router)
+        logger.info("[api] /api/templates/* 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_templates 挂载失败: {_e}")
 
     @app.on_event("startup")
     async def startup():
