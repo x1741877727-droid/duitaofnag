@@ -20,6 +20,7 @@ import { PhaseTimeline } from './PhaseTimeline'
 import { LiveInspector } from './LiveInspector'
 import { RecognitionEvidence } from './RecognitionEvidence'
 import { ActionLog } from './ActionLog'
+import { PhaseTester } from './PhaseTester'
 
 export function Console() {
   const liveConnected = useAppStore((s) => s.liveConnected)
@@ -41,6 +42,9 @@ export function Console() {
           </span>
         )}
       </div>
+
+      {/* 阶段测试 (无需启动整套, 选实例 + 阶段跑一次) */}
+      <PhaseTester />
 
       {/* 顶部: 实例总览 */}
       <InstancesOverview />

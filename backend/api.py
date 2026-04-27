@@ -262,6 +262,14 @@ def create_app(config: ConfigManager) -> FastAPI:
     except Exception as _e:
         logger.warning(f"[api] api_yolo_labeler 挂载失败: {_e}")
 
+    # 单阶段 dryrun
+    try:
+        from .api_runner_test import router as _rt_router
+        app.include_router(_rt_router)
+        logger.info("[api] /api/runner/test_phase 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_runner_test 挂载失败: {_e}")
+
     @app.on_event("startup")
     async def startup():
         ws_manager.start_drain()
