@@ -137,17 +137,17 @@ function DatasetCard({
       ? 'border-amber-300 bg-amber-50/30'
       : 'border-zinc-200 bg-zinc-50/40'
   const stateLabel = item.labeled ? '已标' : item.skipped ? '跳过' : '未标'
-  const stateColor = item.labeled
-    ? 'text-emerald-700'
+  const stateBadge = item.labeled
+    ? 'bg-emerald-500 text-white'
     : item.skipped
-      ? 'text-amber-700'
-      : 'text-zinc-500'
+      ? 'bg-amber-500 text-white'
+      : 'bg-zinc-400 text-white'
 
   return (
-    <div className={`rounded border p-1.5 ${stateCls}`}>
+    <div className={`group relative rounded border p-1.5 ${stateCls}`}>
       <button
         onClick={onLabel}
-        className="block w-full bg-zinc-200 rounded h-28 overflow-hidden mb-1 hover:opacity-90"
+        className="block w-full bg-zinc-200 rounded h-28 overflow-hidden mb-1 hover:opacity-90 relative"
       >
         <img
           src={datasetImgSrc(item.name)}
@@ -155,17 +155,19 @@ function DatasetCard({
           className="w-full h-full object-cover"
           loading="lazy"
         />
+        <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${stateBadge}`}>
+          {stateLabel}
+        </span>
       </button>
       <div className="text-[10px] font-mono truncate" title={item.name}>{item.name}</div>
-      <div className="flex items-center justify-between text-[10px] mt-0.5">
-        <span className={stateColor}>{stateLabel}</span>
-        <button
-          onClick={onDelete}
-          className="text-red-600 hover:text-red-700"
-        >
-          废弃
-        </button>
-      </div>
+      {/* 删除按钮: 默认隐藏, hover 才出来 */}
+      <button
+        onClick={(e) => { e.stopPropagation(); onDelete() }}
+        className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 bg-black/60 text-white text-[10px] w-6 h-6 rounded-full leading-6 transition"
+        title="废弃 (移到 .trash/)"
+      >
+        ✕
+      </button>
     </div>
   )
 }
