@@ -76,13 +76,19 @@ class WatchState:
             )
 
     def game_signal(self, pid: int) -> None:
+        was_running = self.game_running
         if pid > 0:
             self.game_running = True
             self.game_pid = pid
+            # 从"消失"恢复成"在跑" → INFO 状态变化
+            if not was_running:
+                logger.info(f"[watchdog#{self.instance_idx}] 游戏进程恢复 (pid={pid})")
         else:
             self.game_running = False
             self.game_pid = -1
-            logger.warning(f"[watchdog#{self.instance_idx}] 游戏进程消失")
+            # 只在状态从"在跑→消失"变化时才 warn, 避免每 5s 刷屏
+            if was_running:
+                logger.warning(f"[watchdog#{self.instance_idx}] 游戏进程消失")
         self.game_last_check_ts = time.time()
 
     def phash_signal(self, ph: int, interval_s: float) -> None:

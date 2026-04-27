@@ -147,9 +147,17 @@ class DebugLogger:
             texts = [(h.text, h.cx, h.cy) for h in candidates[:15]]
             logger.warning(f"  候选项: {texts}")
 
+    _last_vpn_connected: Optional[bool] = None  # 类级缓存: 上次 VPN 状态
+
     def log_vpn(self, connected: bool, detail: str = ""):
-        """记录 VPN 检测结果"""
+        """记录 VPN 检测结果. 仅状态变化时打 INFO (避免 watchdog 每 5s 刷屏)."""
         if not self.enabled:
             return
         status = "已连接" if connected else "未连接"
-        logger.info(f"  VPN: {status} {detail}")
+        # 状态变化 (None 初始 / True↔False) → INFO
+        # 状态不变 → DEBUG (默认不输出)
+        if connected != DebugLogger._last_vpn_connected:
+            logger.info(f"  VPN: {status} {detail}")
+            DebugLogger._last_vpn_connected = connected
+        else:
+            logger.debug(f"  VPN: {status} {detail}")
