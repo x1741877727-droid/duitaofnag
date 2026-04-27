@@ -291,15 +291,12 @@ class YoloDismisser:
         # v2-7 Memory 延迟写入
         pending_memory_writes: list = []  # list[(frame_copy, action_xy, method)]
 
-        # v2-8 登录页状态机 (用户方案):
-        #   看到登录页 → 不 tap, 开始 20s 计时
-        #   20s 后还在登录页 → 自动登录失效 → tap 微信登录
-        #   登录失效 tap 3 次都不进大厅 → P2 fail (runner_service 会 kill 重启游戏)
-        login_first_seen_ts: Optional[float] = None      # 第一次见登录页时间戳
-        login_consecutive_seen: int = 0                  # 连续多少帧见登录页 (≥2 才算稳定)
-        login_failed_tap_count: int = 0                  # 主动 tap 微信登录次数
-        LOGIN_WAIT_SECONDS = 20.0                        # 等待自动登录的时间
-        LOGIN_MAX_RETAP = 3                              # 最多主动 tap 几次后放弃
+        # v2-8 登录失败检测 (独立, 不影响主链路):
+        #   第一次见登录页 → 开始 20s 计时
+        #   离开登录页 (看到大厅 / 弹窗 / dets > 0) → 重置 (=登录成功)
+        #   20s 后仍在登录页 → P2 fail return → runner_service 走重试 → 3 次后 game_restart
+        login_first_seen_ts: Optional[float] = None
+        LOGIN_WAIT_SECONDS = 20.0
 
         # v2-4 细粒度时间记录: 从 dismiss_all 开始的累计 ms
         _phase_start_ts = time.perf_counter()
@@ -349,6 +346,39 @@ class YoloDismisser:
             except Exception:
                 pass
             decision.set_input(shot, ph_before)
+
+            # ── v2-8 登录失败检测 (独立, 不影响主链路) ──
+            # 第一次见登录页 → 开始 20s 计时
+            # 离开登录页 (主流程下面会看到大厅 / 弹窗 / dets > 0) → 重置 = 登录成功
+            # 20s 后仍在登录页 → P2 fail return → runner_service 走重试 → 3 次 game_restart
+            if matcher is not None:
+                _login_seen_now = False
+                for _tn in ("lobby_login_btn", "lobby_login_btn_qq"):
+                    if matcher.match_one(shot, _tn, threshold=0.80) is not None:
+                        _login_seen_now = True
+                        break
+                if _login_seen_now:
+                    if login_first_seen_ts is None:
+                        login_first_seen_ts = time.time()
+                        logger.info(
+                            f"[Y{rnd + 1}] 见登录页 → 开始 {LOGIN_WAIT_SECONDS:.0f}s 计时"
+                        )
+                    else:
+                        elapsed = time.time() - login_first_seen_ts
+                        if elapsed >= LOGIN_WAIT_SECONDS:
+                            logger.error(
+                                f"[Y{rnd + 1}] 自动登录 {elapsed:.0f}s 仍在登录页 → "
+                                f"P2 fail (runner_service 会重试 / 重启游戏)"
+                            )
+                            decision.finalize(
+                                outcome="login_timeout_fail",
+                                note=f"等 {elapsed:.0f}s 还在登录页, 抛 P2 fail",
+                            )
+                            return DismissResult(False, popups_closed, "login_failed", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=-1.0)
+                else:
+                    if login_first_seen_ts is not None:
+                        logger.info(f"[Y{rnd + 1}] 离开登录页 (登录成功) → 重置计时器")
+                        login_first_seen_ts = None
 
             # 顺手采集训练数据（持续投喂未来训练用）
             try:
@@ -604,69 +634,6 @@ class YoloDismisser:
                         logger.info(f"[Y{rnd + 1}] 🧠 Memory commit {_n_commit} 条 (P2 success)")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
 
-                # ── 兜底 B0: 登录页状态机 (用户方案 v2-8) ──
-                # 看到登录页不立即 tap, 给游戏 20s 自动登录时间.
-                # 20s 后还在登录页 → 自动登录失效 → tap 微信登录.
-                # 多次 tap 失败 → P2 fail (runner_service 走 game_restart).
-                #
-                # 登录页判定 (连续 2 帧才算稳定, 防瞬态误检):
-                _login_btn_hit = None
-                if lobby_hit is None and matcher is not None:
-                    for tn in ("lobby_login_btn", "lobby_login_btn_qq"):
-                        h = matcher.match_one(shot, tn, threshold=0.80)
-                        if h:
-                            _login_btn_hit = (h, tn)
-                            break
-
-                if _login_btn_hit is not None:
-                    login_consecutive_seen += 1
-                    if login_first_seen_ts is None and login_consecutive_seen >= 2:
-                        login_first_seen_ts = time.time()
-                        logger.info(
-                            f"[Y{rnd + 1}] 见登录页 (稳定 {login_consecutive_seen} 帧) → "
-                            f"开始 {LOGIN_WAIT_SECONDS:.0f}s 等待自动登录"
-                        )
-
-                    # 已开始计时 + 20s 已过 → 主动 tap
-                    if (login_first_seen_ts is not None
-                            and time.time() - login_first_seen_ts >= LOGIN_WAIT_SECONDS):
-                        if login_failed_tap_count >= LOGIN_MAX_RETAP:
-                            # 主动 tap 多次都没用 → P2 fail
-                            logger.error(
-                                f"[Y{rnd + 1}] 登录失效 tap {login_failed_tap_count} 次仍在登录页 "
-                                f"→ P2 fail (game_restart)"
-                            )
-                            decision.finalize(
-                                outcome="login_persistent_fail",
-                                note=f"主动 tap {login_failed_tap_count} 次后仍在登录页",
-                            )
-                            return DismissResult(False, popups_closed, "timeout", self.max_rounds, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=-1.0)
-
-                        h, tn = _login_btn_hit
-                        tap_xy = (h.cx, h.cy, f"登录失效兜底 {tn}({h.confidence:.2f})")
-                        target_class = "login_btn"
-                        target_conf = h.confidence
-                        login_failed_tap_count += 1
-                        elapsed = time.time() - login_first_seen_ts
-                        logger.warning(
-                            f"[Y{rnd + 1}] 自动登录 {elapsed:.0f}s 仍在登录页 → "
-                            f"主动 tap {tn} ({login_failed_tap_count}/{LOGIN_MAX_RETAP})"
-                        )
-                        login_tier = _TR(
-                            tier=0, name=f"登录失效兜底·{tn}",
-                            duration_ms=0.0, early_exit=True,
-                            note=f"等 {elapsed:.0f}s 还在登录页, 主动 tap (#{login_failed_tap_count})",
-                        )
-                        decision.add_tier(login_tier)
-                        # 重置计时器, 给这次 tap 又 20s 加载时间
-                        login_first_seen_ts = time.time()
-                else:
-                    # 不在登录页, 重置状态
-                    if login_first_seen_ts is not None:
-                        logger.info(f"[Y{rnd + 1}] 离开登录页, 重置计时器")
-                    login_first_seen_ts = None
-                    login_consecutive_seen = 0
-                    login_failed_tap_count = 0
 
                 # 兜底 B: outside_lobby (lobby 模板未命中) + X 找不到 → 必须找 CTA 才能回大厅
                 # 强引导活动 (砍价 / 立即领取) 设计上只有 CTA 出路, 必须点
@@ -738,14 +705,7 @@ class YoloDismisser:
             await device.tap(tap_xy[0], tap_xy[1])
             popups_closed += 1
             lobby_confirm = 0
-            # tap 登录按钮后游戏要 3-8 秒加载, 期间 P2 sleep 不动作避免重复 tap
-            if target_class == "login_btn":
-                logger.info(
-                    f"[Y{rnd + 1}] 登录 tap 完成, sleep 8s 等游戏加载 (避免重复点)"
-                )
-                await asyncio.sleep(8.0)
-            else:
-                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
 
             # tap 后验证：防线 1 phash 比对 + 防线 2 State Expectation
             outcome = "tapped"
