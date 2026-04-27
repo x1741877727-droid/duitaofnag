@@ -97,6 +97,7 @@ export type ConsoleView =
   | 'console'        // 中控台 (实时观察 + 反向控制)
   | 'archive'        // 决策档案 (历史会话)
   | 'templates'      // 模版库
+  | 'yolo'           // YOLO (测试 / 数据集 / 标注 / 采集 / 模型)
   | 'perf'           // 性能
   | 'settings'
 

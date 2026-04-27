@@ -26,7 +26,6 @@ import {
   type TemplateDetail,
   type TemplateTestResult,
 } from '@/lib/templatesApi'
-import { fetchYoloInfo, runYoloTest, type YoloInfo, type YoloTestResult } from '@/lib/yoloApi'
 import { TemplateCropper } from './TemplateCropper'
 
 const CAT_ORDER = [
@@ -64,14 +63,6 @@ export function TemplateLibrary() {
   const [cropperOpen, setCropperOpen] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
   const [loading, setLoading] = useState(false)
-  // 右侧 tab: detail (模版详情) | yolo (YOLO 测试)
-  const [rightTab, setRightTab] = useState<'detail' | 'yolo'>('detail')
-  const [yoloInfo, setYoloInfo] = useState<YoloInfo | null>(null)
-  const [yoloResult, setYoloResult] = useState<YoloTestResult | null>(null)
-  const [yoloRunning, setYoloRunning] = useState(false)
-  const [yoloConf, setYoloConf] = useState(0.4)
-  const [yoloInst, setYoloInst] = useState<number | null>(null)
-  const origImgRef = useRef<HTMLImageElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -96,11 +87,6 @@ export function TemplateLibrary() {
     return () => { cancelled = true }
   }, [selected])
 
-  // 切到 yolo tab 时拉一次 info
-  useEffect(() => {
-    if (rightTab !== 'yolo' || yoloInfo) return
-    fetchYoloInfo().then(setYoloInfo).catch(() => setYoloInfo(null))
-  }, [rightTab, yoloInfo])
 
   const cats = useMemo(() => {
     const cnt = new Map<string, number>()
@@ -142,24 +128,6 @@ export function TemplateLibrary() {
       })
     } finally {
       setTesting(false)
-    }
-  }
-
-  async function runYolo() {
-    setYoloRunning(true)
-    setYoloResult(null)
-    try {
-      const tgt = yoloInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index ?? 0
-      const r = await runYoloTest({ instance: tgt, conf_thr: yoloConf })
-      setYoloResult(r)
-    } catch (e) {
-      setYoloResult({
-        ok: false, source: '', source_image_size: [0, 0],
-        conf_thr: yoloConf, duration_ms: 0,
-        detections: [], annotated_b64: '', error: String(e),
-      })
-    } finally {
-      setYoloRunning(false)
     }
   }
 
@@ -257,34 +225,13 @@ export function TemplateLibrary() {
           )}
         </div>
 
-        {/* 右: 详情 + 测试 + YOLO */}
+        {/* 右: 详情 + 测试 (YOLO 已迁到独立 yolo 页) */}
         <div className="rounded-lg border border-border bg-card flex flex-col overflow-hidden">
-          {/* tab 切换 */}
-          <div className="flex border-b border-border">
-            <button
-              onClick={() => setRightTab('detail')}
-              className={`flex-1 text-xs py-2 ${
-                rightTab === 'detail' ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-muted-foreground'
-              }`}
-            >
-              模版详情 / 测试
-            </button>
-            <button
-              onClick={() => setRightTab('yolo')}
-              className={`flex-1 text-xs py-2 border-l border-border ${
-                rightTab === 'yolo' ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-muted-foreground'
-              }`}
-            >
-              YOLO 测试
-            </button>
-          </div>
-
-          {rightTab === 'detail' && (
-            !selected ? (
-              <div className="p-6 text-xs text-muted-foreground text-center">
-                选个模版看详情和测试
-              </div>
-            ) : (
+          {!selected ? (
+            <div className="p-6 text-xs text-muted-foreground text-center">
+              选个模版看详情和测试
+            </div>
+          ) : (
               <div className="flex flex-col overflow-hidden">
                 <div className="p-3 border-b border-border space-y-2">
                   <div className="flex items-center gap-2">
@@ -395,93 +342,7 @@ export function TemplateLibrary() {
                 )}
               </div>
             )
-          )}
-
-          {rightTab === 'yolo' && (
-            <div className="p-3 space-y-2 overflow-y-auto">
-              <div className="rounded border border-border bg-zinc-50 p-2 text-[11px] space-y-0.5">
-                <div className="font-semibold">YOLO 状态</div>
-                {!yoloInfo ? (
-                  <div className="text-muted-foreground">加载中…</div>
-                ) : (
-                  <>
-                    <div>可用: <span className={yoloInfo.available ? 'text-emerald-700 font-bold' : 'text-red-700 font-bold'}>
-                      {yoloInfo.available ? '✓' : '✗'}
-                    </span></div>
-                    <div className="font-mono break-all text-[10px]">{yoloInfo.model_path || '—'}</div>
-                    <div>类别 ({yoloInfo.classes.length}): {yoloInfo.classes.join(', ') || '—'}</div>
-                    <div>输入尺寸: {yoloInfo.input_size}</div>
-                    {yoloInfo.error && <div className="text-red-700">{yoloInfo.error}</div>}
-                  </>
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <div className="text-xs font-semibold">选实例 (无需启动 runner)</div>
-                <div className="flex flex-wrap gap-1">
-                  {availableInstances.map((inst) => (
-                    <Button
-                      key={inst.index}
-                      variant={yoloInst === inst.index ? 'secondary' : 'outline'}
-                      size="sm"
-                      onClick={() => setYoloInst(inst.index)}
-                      title={inst.name + (inst.running ? ' (运行中)' : ' (未启动)')}
-                      className={!inst.running ? 'opacity-60' : ''}
-                    >
-                      #{inst.index}{inst.running ? '' : '·停'}
-                    </Button>
-                  ))}
-                  {availableInstances.length === 0 && (
-                    <div className="text-[11px] text-muted-foreground">没检测到模拟器</div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 text-[11px]">
-                  <span>置信度阈值:</span>
-                  <input
-                    type="number" step="0.05" min="0" max="1"
-                    value={yoloConf}
-                    onChange={(e) => setYoloConf(Number(e.target.value) || 0.4)}
-                    className="w-16 h-7 px-1 border border-border rounded text-xs font-mono"
-                  />
-                </div>
-                <Button
-                  size="sm"
-                  disabled={yoloRunning || !yoloInfo?.available}
-                  onClick={runYolo}
-                  className="w-full"
-                >
-                  {yoloRunning ? '推理中…' : '抓帧跑 YOLO'}
-                </Button>
-              </div>
-              {yoloResult && (
-                <div className="space-y-2 pt-2 border-t border-border">
-                  {!yoloResult.ok ? (
-                    <div className="text-[11px] text-red-700">{yoloResult.error || '失败'}</div>
-                  ) : (
-                    <>
-                      <div className="text-xs font-semibold">
-                        {yoloResult.detections.length} 个检测 · <span className="font-mono">{yoloResult.duration_ms.toFixed(1)}ms</span>
-                      </div>
-                      {yoloResult.annotated_b64 && (
-                        <img src={yoloResult.annotated_b64} alt="yolo" className="w-full rounded border" />
-                      )}
-                      {yoloResult.detections.length > 0 && (
-                        <ul className="space-y-0.5">
-                          {yoloResult.detections.slice(0, 12).map((d, i) => (
-                            <li key={i} className="font-mono text-[10px] flex items-center gap-2">
-                              <span className="text-blue-600">▣</span>
-                              <span className="flex-1">{d.name}</span>
-                              <span className="text-muted-foreground">{d.score.toFixed(3)}</span>
-                              <span className="text-muted-foreground">@({d.cx},{d.cy})</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
+          }
         </div>
       </div>
 

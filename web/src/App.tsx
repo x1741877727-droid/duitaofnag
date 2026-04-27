@@ -9,6 +9,7 @@ import { LogDrawer } from '@/components/log-panel'
 import { Console } from '@/components/console/Console'
 import { Archive } from '@/components/archive/Archive'
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary'
+import { YoloView } from '@/components/yolo/YoloView'
 import { PerfView } from '@/components/perf/PerfView'
 
 function App() {
@@ -53,7 +54,7 @@ function App() {
         <main className="flex-1 overflow-y-auto p-4">
           <div
             className={
-              currentView === 'console'
+              currentView === 'console' || currentView === 'yolo' || currentView === 'templates'
                 ? 'h-full animate-page'
                 : 'max-w-5xl mx-auto animate-page'
             }
@@ -63,6 +64,7 @@ function App() {
             {currentView === 'console' && <Console />}
             {currentView === 'archive' && <Archive />}
             {currentView === 'templates' && <TemplateLibrary />}
+            {currentView === 'yolo' && <YoloView />}
             {currentView === 'perf' && <PerfView />}
             {currentView === 'settings' && <SettingsView />}
           </div>

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3 } from 'lucide-react'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export function Header() {
@@ -71,6 +71,15 @@ export function Header() {
           >
             <Image className="h-4 w-4" />
             模版库
+          </Button>
+          <Button
+            variant={currentView === 'yolo' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('yolo')}
+            className="gap-2"
+          >
+            <Crosshair className="h-4 w-4" />
+            YOLO
           </Button>
           <Button
             variant={currentView === 'perf' ? 'secondary' : 'ghost'}

@@ -56,3 +56,95 @@ export async function runYoloTest(args: YoloTestArgs): Promise<YoloTestResult> {
   if (!r.ok) throw new Error(`yolo test ${r.status} ${(await r.text()).slice(0, 300)}`)
   return await r.json()
 }
+
+
+// ─── 数据集 / 标注 / 采集 / 模型 (api_yolo_labeler) ───
+
+export interface DatasetItem {
+  name: string
+  size: number
+  mtime: number
+  labeled: boolean
+  skipped: boolean
+}
+
+export interface PerClassStat {
+  id: number
+  name: string
+  instances: number
+  images: number
+}
+
+export interface DatasetList {
+  total: number
+  labeled: number
+  skipped: number
+  remaining: number
+  classes: string[]
+  per_class: PerClassStat[]
+  items: DatasetItem[]
+}
+
+export async function fetchDataset(): Promise<DatasetList> {
+  const r = await fetch('/api/labeler/list')
+  if (!r.ok) throw new Error(`dataset ${r.status}`)
+  return await r.json()
+}
+
+export function datasetImgSrc(name: string): string {
+  return `/api/labeler/image/${encodeURIComponent(name)}`
+}
+
+export interface LabelBox {
+  class_id: number
+  cx: number      // normalized 0-1
+  cy: number
+  w: number
+  h: number
+}
+
+export async function fetchLabels(name: string): Promise<{ boxes: LabelBox[]; exists: boolean }> {
+  const r = await fetch(`/api/labeler/labels/${encodeURIComponent(name)}`)
+  if (!r.ok) throw new Error(`labels ${r.status}`)
+  return await r.json()
+}
+
+export async function saveLabels(name: string, boxes: LabelBox[]): Promise<{ ok: boolean; count: number }> {
+  const r = await fetch(`/api/labeler/labels/${encodeURIComponent(name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boxes }),
+  })
+  if (!r.ok) throw new Error(`save ${r.status}`)
+  return await r.json()
+}
+
+export async function deleteDatasetImage(name: string): Promise<{ ok: boolean; moved: string[] }> {
+  const r = await fetch(`/api/labeler/image/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  if (!r.ok) throw new Error(`delete ${r.status}`)
+  return await r.json()
+}
+
+export async function captureFromInstance(
+  instance: number, tag = 'manual',
+): Promise<{ ok: boolean; name: string; size: number; width: number; height: number }> {
+  const r = await fetch('/api/labeler/capture', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instance, tag }),
+  })
+  if (!r.ok) throw new Error(`capture ${r.status} ${(await r.text()).slice(0, 200)}`)
+  return await r.json()
+}
+
+export async function uploadModel(file: Blob): Promise<{ ok: boolean; saved: string; size: number; latest: string }> {
+  const fd = new FormData()
+  fd.append('file', file, (file as File).name || 'model.onnx')
+  const r = await fetch('/api/labeler/upload_model', { method: 'POST', body: fd })
+  if (!r.ok) throw new Error(`upload model ${r.status}`)
+  return await r.json()
+}
+
+export function exportZipUrl(): string {
+  return '/api/labeler/export.zip'
+}
