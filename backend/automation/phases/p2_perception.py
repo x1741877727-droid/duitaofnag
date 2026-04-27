@@ -35,6 +35,15 @@ CLOSE_X_TEMPLATE_NAMES = (
     "close_x_return", "close_x_white_big",
 )
 
+# 关弹窗类按钮模板 (没右上 X 但有底部"确定/同意/不需要"按钮的弹窗)
+# 这些都是关闭意图明确, 不会跳出大厅. 不能放: btn_confirm_map (P4 用), btn_join* (P3 用)
+DISMISS_BTN_TEMPLATE_NAMES = (
+    "btn_confirm",         # 通用"确定"
+    "btn_confirm_privacy", # 隐私同意确定
+    "btn_agree",           # 同意
+    "btn_no_need",         # 不需要
+)
+
 # YOLO conf 阈值 (跟 yolo_dismisser 保持一致)
 TAP_CONF_CLOSE = 0.50
 TAP_CONF_ACTION = 0.50
@@ -58,6 +67,7 @@ class Perception:
     yolo_close_xs: list = field(default_factory=list)     # [Detection], conf>0.5
     yolo_action_btns: list = field(default_factory=list)  # [Detection], conf>0.5
     template_close_x: Optional[Any] = None      # (template_name, MatchHit) — YOLO 漏检兜底
+    template_dismiss_btn: Optional[Any] = None  # (template_name, MatchHit) — 无 X 但有"确定/同意"按钮的弹窗
 
     # 登录页信号
     login_template_hit: Optional[Any] = None    # MatchHit, lobby_login_btn
@@ -144,6 +154,17 @@ async def perceive(ctx: RunContext) -> Perception:
                 h = None
             if h is not None:
                 p.template_close_x = (tn, h)
+                break
+
+    # 5.5 模板 btn_confirm_* / btn_agree / btn_no_need 兜底 (没 X 但有底部"确定"按钮的弹窗)
+    if matcher is not None and p.template_close_x is None and not p.yolo_close_xs:
+        for tn in DISMISS_BTN_TEMPLATE_NAMES:
+            try:
+                h = matcher.match_one(shot, tn, threshold=0.80)
+            except Exception:
+                h = None
+            if h is not None:
+                p.template_dismiss_btn = (tn, h)
                 break
 
     # 6. Memory L1 查询

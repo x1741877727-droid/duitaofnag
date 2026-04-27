@@ -91,4 +91,21 @@ def decide(p: Perception, ctx: RunContext) -> Optional[PhaseAction]:
                 },
             )
 
+    # ── 优先级 5: 模板 btn_confirm_* / btn_agree / btn_no_need 兜底 ──
+    # (没 X 但有"确定/同意/不需要"按钮的弹窗, 比如"系统内存过低提醒")
+    if p.template_dismiss_btn is not None:
+        tn, h = p.template_dismiss_btn
+        if not ctx.is_blacklisted(h.cx, h.cy):
+            return PhaseAction(
+                kind="tap",
+                x=h.cx, y=h.cy,
+                seconds=0.5,                  # 多等 100ms (这类弹窗按掉后画面切换稍慢)
+                label="template_dismiss_btn",
+                expectation="popup_dismissed",
+                payload={
+                    "yolo_before": p.yolo_dets_raw,
+                    "template_name": tn,
+                },
+            )
+
     return None

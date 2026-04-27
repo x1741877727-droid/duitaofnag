@@ -91,6 +91,24 @@ def _tier_template_from_perception(p: Any, started: float) -> TierRecord:
         except Exception:
             pass
 
+    # 3.5) btn_confirm_* / btn_agree / btn_no_need 兜底 (无 X 弹窗)
+    tdb = getattr(p, "template_dismiss_btn", None)
+    if tdb is not None:
+        try:
+            tn, h = tdb
+            score = float(getattr(h, "confidence", getattr(h, "score", 0.0)))
+            t.templates.append(TemplateMatch(
+                name=tn,
+                score=round(score, 3),
+                threshold=0.80,
+                hit=True,
+                bbox=_hit_bbox(h),
+                scale=float(getattr(h, "scale", 1.0)),
+            ))
+            hit_any = True
+        except Exception:
+            pass
+
     quad = getattr(p, "quad_lobby_confirmed", False)
     quad_note = getattr(p, "quad_note", "")
     if quad:
