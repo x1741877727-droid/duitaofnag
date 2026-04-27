@@ -409,6 +409,8 @@ class SingleInstanceRunner:
             "close_x_gold", "close_x_signin", "close_x_newplay",
             "close_x_return", "close_x_white_big",
         ]
+        # v2-6 登录页模板 (微信登录 / QQ登录) — 看到登录页 = 加载完成 P1 done
+        login_template_names = ["lobby_login_btn", "lobby_login_btn_qq"]
 
         for attempt in range(60):  # 60 × 1.5s = 90s
             await asyncio.sleep(1.5)
@@ -429,9 +431,9 @@ class SingleInstanceRunner:
                 self.dbg.log_screenshot(shot, tag="p1_done_lobby")
                 return True
 
-            # ② 模板检测 close_x 系列 (~15ms)
+            # ② 模板检测 close_x 系列 + 登录页 (~20ms)
             if self.matcher:
-                for tn in close_x_template_names:
+                for tn in close_x_template_names + login_template_names:
                     h = self.matcher.match_one(shot, tn, threshold=0.80)
                     if h:
                         logger.info(

@@ -564,37 +564,56 @@ class YoloDismisser:
                     )
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
 
-                # 兜底 B0: outside_lobby + 卡 5 轮 → 检查是不是登录页
-                # (自动登录失败兜底: 公告关掉后回到登录页, 必须 tap 微信登录)
-                # 用 OCR 一次找 "微信登录/QQ登录" 文字 (卡住才跑 OCR, 不影响日常)
-                if lobby_hit is None and empty_dets_streak >= 5:
-                    try:
-                        ocr_inst = self._get_ocr_for_cta()
-                        if ocr_inst is not None:
-                            hits = ocr_inst._ocr_all(shot) or []
-                            for h in hits:
-                                t = getattr(h, "text", "")
-                                if "微信登录" in t or "QQ登录" in t or "扫码登录" in t:
-                                    cx = getattr(h, "cx", 0)
-                                    cy = getattr(h, "cy", 0)
-                                    if cx and cy:
-                                        tap_xy = (cx, cy, f"登录兜底('{t[:8]}')")
-                                        target_class = "login_btn"
-                                        target_conf = 0.85
-                                        ocr_text = t
-                                        logger.warning(
-                                            f"[Y{rnd + 1}] 登录页兜底 → tap '{t}' "
-                                            f"@ ({cx},{cy}) (自动登录失败)"
-                                        )
-                                        login_tier = _TR(
-                                            tier=3, name="登录页兜底",
-                                            duration_ms=0.0, early_exit=True,
-                                            note=f"OCR 找到登录按钮: {t}",
-                                        )
-                                        decision.add_tier(login_tier)
-                                        break
-                    except Exception as _e:
-                        logger.debug(f"[login] err: {_e}")
+                # 兜底 B0: outside_lobby + 卡 5 轮 → 检查是不是登录页 (自动登录失败兜底)
+                # 优先模板 (5ms), 模板都没命中再退到 OCR (200ms)
+                if lobby_hit is None and empty_dets_streak >= 5 and matcher is not None:
+                    # 模板路径: lobby_login_btn (微信) / lobby_login_btn_qq (QQ)
+                    for tn in ("lobby_login_btn", "lobby_login_btn_qq"):
+                        h = matcher.match_one(shot, tn, threshold=0.80)
+                        if h:
+                            tap_xy = (h.cx, h.cy, f"登录模板 {tn}({h.confidence:.2f})")
+                            target_class = "login_btn"
+                            target_conf = h.confidence
+                            logger.warning(
+                                f"[Y{rnd + 1}] 登录页兜底 (模板 {tn}) → tap "
+                                f"@ ({h.cx},{h.cy}) (自动登录失败)"
+                            )
+                            login_tier = _TR(
+                                tier=0, name=f"登录模板·{tn}",
+                                duration_ms=0.0, early_exit=True,
+                                note=f"模板兜底登录: conf={h.confidence:.2f}",
+                            )
+                            decision.add_tier(login_tier)
+                            break
+                    # 模板都没命中, OCR 二级兜底 (兼容老/新版本游戏 UI 变化)
+                    if tap_xy is None:
+                        try:
+                            ocr_inst = self._get_ocr_for_cta()
+                            if ocr_inst is not None:
+                                hits = ocr_inst._ocr_all(shot) or []
+                                for h in hits:
+                                    t = getattr(h, "text", "")
+                                    if "微信登录" in t or "QQ登录" in t or "扫码登录" in t:
+                                        cx = getattr(h, "cx", 0)
+                                        cy = getattr(h, "cy", 0)
+                                        if cx and cy:
+                                            tap_xy = (cx, cy, f"登录OCR('{t[:8]}')")
+                                            target_class = "login_btn"
+                                            target_conf = 0.85
+                                            ocr_text = t
+                                            logger.warning(
+                                                f"[Y{rnd + 1}] 登录页兜底 (OCR) → tap "
+                                                f"'{t}' @ ({cx},{cy})"
+                                            )
+                                            login_tier = _TR(
+                                                tier=3, name="登录OCR兜底",
+                                                duration_ms=0.0, early_exit=True,
+                                                note=f"OCR 找到登录按钮: {t}",
+                                            )
+                                            decision.add_tier(login_tier)
+                                            break
+                        except Exception as _e:
+                            logger.debug(f"[login] err: {_e}")
 
                 # 兜底 B: outside_lobby (lobby 模板未命中) + X 找不到 → 必须找 CTA 才能回大厅
                 # 强引导活动 (砍价 / 立即领取) 设计上只有 CTA 出路, 必须点
