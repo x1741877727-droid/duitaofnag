@@ -82,19 +82,35 @@ def _draw_dets(img: np.ndarray, dets) -> np.ndarray:
 # ─── /api/yolo/info ───
 
 
+_test_yolo_dismisser = None
+
+
+def _get_test_dismisser():
+    """测试用 YoloDismisser 单例 (跟生产 per-instance 隔离, 复用同模型 latest.onnx)."""
+    global _test_yolo_dismisser
+    if _test_yolo_dismisser is None:
+        try:
+            from .automation.yolo_dismisser import YoloDismisser
+            _test_yolo_dismisser = YoloDismisser(max_rounds=1)
+        except Exception as e:
+            logger.warning(f"[yolo_test] init dismisser err: {e}")
+            _test_yolo_dismisser = None
+    return _test_yolo_dismisser
+
+
 @router.get("/api/yolo/info")
 async def yolo_info():
-    """报告当前 YOLO 模型加载状态 + 类名列表."""
+    """报告 YOLO 模型加载状态 + 类名 (用 YoloDismisser, 跟生产同源)."""
     try:
-        from .automation import yolo_detector as yd
-        ok = yd.is_available()
-        model_path = getattr(yd, "_DEFAULT_MODEL", "")
-        classes = yd._class_names if hasattr(yd, "_class_names") else []
+        from .automation.yolo_dismisser import _model_path, CLASSES
+        path = _model_path()
+        d = _get_test_dismisser()
+        ok = bool(d and d.is_available())
         return {
-            "available": bool(ok),
-            "model_path": str(model_path).replace("\\", "/"),
-            "classes": list(classes),
-            "input_size": int(getattr(yd, "_input_size", 640) or 640),
+            "available": ok,
+            "model_path": str(path).replace("\\", "/"),
+            "classes": list(CLASSES),
+            "input_size": int(d._input_shape[0]) if (d and d._session) else 640,
         }
     except Exception as e:
         return {"available": False, "model_path": "", "classes": [],
@@ -150,14 +166,17 @@ async def yolo_test(req: YoloTestReq):
     if shot is None:
         raise HTTPException(400, "未提供有效的源 (image_b64 / decision_id / instance)")
 
-    try:
-        from .automation.yolo_detector import detect_buttons
-    except Exception as e:
-        raise HTTPException(500, f"YOLO 不可用: {e}")
+    d_inst = _get_test_dismisser()
+    if d_inst is None or not d_inst.is_available():
+        return JSONResponse({
+            "ok": False, "error": "YOLO 模型未加载 (检查 %APPDATA%\\GameBot\\data\\yolo\\models\\latest.onnx)",
+            "source": src_kind, "duration_ms": 0,
+            "detections": [], "annotated_b64": "",
+        })
 
     t0 = time.perf_counter()
     try:
-        dets = detect_buttons(shot, names=req.classes, conf_thr=float(req.conf_thr))
+        dets = d_inst.detect(shot)
     except Exception as e:
         logger.warning(f"[yolo_test] detect err: {e}")
         return JSONResponse({
@@ -167,13 +186,29 @@ async def yolo_test(req: YoloTestReq):
         })
     dur_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-    annotated = _encode_jpeg_b64(_draw_dets(shot, dets))
-    out = []
+    # conf_thr / classes 后置过滤
+    conf_thr = float(req.conf_thr)
+    cls_filter = req.classes
+    filtered = []
     for d in dets:
+        if d.conf < conf_thr:
+            continue
+        if cls_filter and d.name not in cls_filter:
+            continue
+        filtered.append(d)
+
+    # 适配 _draw_dets (它期待 .x1 .y1 .x2 .y2 .name .score)
+    class _DetView:
+        def __init__(self, d):
+            self.x1 = d.x1; self.y1 = d.y1; self.x2 = d.x2; self.y2 = d.y2
+            self.name = d.name; self.score = d.conf
+    annotated = _encode_jpeg_b64(_draw_dets(shot, [_DetView(d) for d in filtered]))
+    out = []
+    for d in filtered:
         out.append({
             "name": d.name,
-            "class_id": int(d.class_id),
-            "score": round(float(d.score), 4),
+            "class_id": int(d.cls),
+            "score": round(float(d.conf), 4),
             "x1": int(d.x1), "y1": int(d.y1),
             "x2": int(d.x2), "y2": int(d.y2),
             "cx": int((d.x1 + d.x2) // 2),
@@ -183,7 +218,7 @@ async def yolo_test(req: YoloTestReq):
         "ok": True,
         "source": src_kind,
         "source_image_size": [int(shot.shape[1]), int(shot.shape[0])],
-        "conf_thr": float(req.conf_thr),
+        "conf_thr": conf_thr,
         "duration_ms": dur_ms,
         "detections": out,
         "annotated_b64": annotated,
