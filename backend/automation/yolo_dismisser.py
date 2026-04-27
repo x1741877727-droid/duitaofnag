@@ -75,6 +75,15 @@ NAV_WORDS = (
     "查看", "查看活动", "去看看", "去活动",
 )
 
+# 错误/网络对话框关键词 — 用于识别"操作确认型"弹窗 (区分于普通"取消+确定")
+# 这种弹窗"取消"=放弃恢复, "确定"=重试恢复, ACCEPT 必须反向优先
+# 用户原话: "只有提示网络才这样 不要成对的取消+确定就反向"
+ERROR_DIALOG_WORDS = (
+    "无法连接", "连接失败", "连接断开", "网络", "断网", "断开",
+    "出错", "错误", "失败", "重试", "超时", "异常", "服务器",
+    "请检查", "无法访问",
+)
+
 
 def _classify_button_text(text: str) -> str:
     """按钮文字分类. 返回 'close' | 'accept' | 'nav' | 'unknown'.
@@ -716,9 +725,11 @@ class YoloDismisser:
                     decision.save_ocr_roi(tier_ocr, shot, roi=roi_box, hits=ocr_hits_log)
                     decision.add_tier(tier_ocr)
 
-                # 特殊规则 (P0): 成对 "取消" + "确定" = 系统操作确认型对话框
+                # 特殊规则 (P0): 错误对话框 → ACCEPT 反向优先
+                # 仅当: 成对 "确定+取消" + 弹窗本体含错误词 (无法连接/网络/失败 等)
                 # 例: "无法连接服务器" → 取消=放弃卡死, 确定=重试恢复 → 必点确定
-                # 其他 case 仅 CLOSE 或 ACCEPT 之一出现, 不触发此规则.
+                # 普通"确认开通会员 取消+确定" 不命中 ERROR_WORDS → 走默认 CLOSE 优先
+                # 用户原话: "只有提示网络才这样, 不要成对取消+确定就反向"
                 texts = [t for _, t, _ in classified]
                 has_queding = any("确定" in t for t in texts)
                 has_quxiao = any("取消" in t for t in texts)
@@ -727,12 +738,32 @@ class YoloDismisser:
                 chosen_reason = ""
 
                 if has_queding and has_quxiao and len(classified) >= 2:
-                    # 操作确认型 → 点"确定"
-                    for d, t, _c in classified:
-                        if "确定" in t:
-                            chosen = (d, t)
-                            chosen_reason = "confirm_dialog"
-                            break
+                    # OCR 弹窗本体 (用 YOLO dialog 框 ROI), 看是否错误对话框
+                    dialogs = [d for d in dets if d.name == "dialog"]
+                    is_error_dialog = False
+                    if dialogs:
+                        # 取最大 dialog 框 (最外层弹窗本体)
+                        d = max(dialogs, key=lambda x: (x.x2 - x.x1) * (x.y2 - x.y1))
+                        dlg_roi_box = [max(0, d.x1), max(0, d.y1), d.x2, d.y2]
+                        dlg_roi = shot[dlg_roi_box[1]:dlg_roi_box[3], dlg_roi_box[0]:dlg_roi_box[2]]
+                        try:
+                            dlg_text, _ = self._ocr_bbox_with_hits(dlg_roi, dlg_roi_box)
+                        except Exception:
+                            dlg_text = ""
+                        is_error_dialog = any(w in dlg_text for w in ERROR_DIALOG_WORDS)
+                        logger.info(
+                            f"[Y{rnd + 1}] 取消+确定 模式 → dialog OCR='{dlg_text[:40]}' "
+                            f"error_dialog={is_error_dialog}"
+                        )
+                    # 没检到 dialog 框时, 保守走默认 CLOSE 优先 (不反向 — 避免误点)
+
+                    if is_error_dialog:
+                        # 错误对话框 → 点"确定"重试
+                        for d_btn, t, _c in classified:
+                            if "确定" in t:
+                                chosen = (d_btn, t)
+                                chosen_reason = "error_dialog_confirm"
+                                break
 
                 # 默认优先级: CLOSE > ACCEPT > (单按钮非 NAV 兜底)
                 if chosen is None:
