@@ -98,17 +98,17 @@ export function Archive() {
               <li key={s.session}>
                 <button
                   onClick={() => setActiveSession(s.session)}
-                  className={`w-full text-left px-4 py-3 hover:bg-zinc-50 transition flex items-center gap-3 ${
-                    s.is_current ? 'bg-emerald-50/40' : ''
+                  className={`w-full text-left px-4 py-3 hover:bg-muted transition flex items-center gap-3 ${
+                    s.is_current ? 'bg-success-muted' : ''
                   }`}
                 >
                   <span
                     className={`inline-block w-2 h-2 rounded-full ${
-                      s.is_current ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-300'
+                      s.is_current ? 'bg-success animate-pulse' : 'bg-muted-foreground/30'
                     }`}
                   />
                   <span className="font-mono text-sm flex-1">
-                    {s.session}{s.is_current && <span className="ml-2 text-emerald-700 text-xs">(当前)</span>}
+                    {s.session}{s.is_current && <span className="ml-2 text-success text-xs">(当前)</span>}
                   </span>
                   <span className="text-xs text-muted-foreground">
                     {s.decision_count} 决策
@@ -206,13 +206,13 @@ function SessionView({
       <div className="flex items-center gap-2 flex-wrap">
         <Button variant="ghost" size="sm" onClick={onBack}>← 会话列表</Button>
         <span className="font-mono text-sm font-semibold">{session}</span>
-        {isCurrent && <span className="text-emerald-700 text-xs">● 实时</span>}
+        {isCurrent && <span className="text-success text-xs">● 实时</span>}
         <span className="text-xs text-muted-foreground">{items.length} 决策</span>
         <span className="ml-2 text-xs text-muted-foreground">实例过滤:</span>
         <button
           onClick={() => setFilterInst(null)}
           className={`text-xs px-2 py-0.5 rounded border ${
-            filterInst === null ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-border'
+            filterInst === null ? 'bg-info/10 border-info/30 text-info' : 'border-border'
           }`}
         >
           全部
@@ -222,7 +222,7 @@ function SessionView({
             key={idx}
             onClick={() => setFilterInst(idx === filterInst ? null : idx)}
             className={`text-xs px-2 py-0.5 rounded border font-mono ${
-              filterInst === idx ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-border'
+              filterInst === idx ? 'bg-info/10 border-info/30 text-info' : 'border-border'
             }`}
           >
             #{idx}
@@ -296,19 +296,19 @@ function SessionView({
                     <li key={it.id}>
                       <button
                         onClick={() => setSelectedId(it.id)}
-                        className={`w-full text-left px-3 py-1.5 hover:bg-zinc-50 ${
-                          selectedId === it.id ? 'bg-blue-50' : ''
+                        className={`w-full text-left px-3 py-1.5 hover:bg-muted ${
+                          selectedId === it.id ? 'bg-info/10' : ''
                         }`}
                       >
                         <div className="flex items-center gap-2 text-[11px]">
                           <OutcomeIcon outcome={it.outcome} verifySuccess={it.verify_success ?? null} />
-                          <span className="font-mono text-zinc-500">{fmtTimeShort(it.created)}</span>
+                          <span className="font-mono text-muted-foreground">{fmtTimeShort(it.created)}</span>
                           <span className="font-mono">{it.phase}</span>
                           <span className="text-muted-foreground">R{it.round}</span>
                         </div>
-                        <div className="text-[11px] text-zinc-600 truncate mt-0.5">
+                        <div className="text-[11px] text-muted-foreground truncate mt-0.5">
                           {outcomeText(it.outcome)}
-                          {it.tap_target && <span className="ml-2 text-blue-600">→ {it.tap_target}</span>}
+                          {it.tap_target && <span className="ml-2 text-info">→ {it.tap_target}</span>}
                         </div>
                       </button>
                     </li>
@@ -328,28 +328,28 @@ function SessionView({
 
 
 function OutcomeIcon({ outcome, verifySuccess }: { outcome: string; verifySuccess: boolean | null }) {
-  let cls = 'bg-zinc-300'
+  let cls = 'bg-muted-foreground/30'
   let icon = '·'
   if (outcome.startsWith('lobby_confirmed') || outcome === 'phase_next' || outcome === 'phase_done') {
-    cls = 'bg-emerald-500 text-white'
+    cls = 'bg-success text-white'
     icon = '✓'
   } else if (verifySuccess === true) {
-    cls = 'bg-emerald-500 text-white'
+    cls = 'bg-success text-white'
     icon = '✓'
   } else if (verifySuccess === false || outcome === 'phase_fail') {
-    cls = 'bg-red-500 text-white'
+    cls = 'bg-destructive text-white'
     icon = '✗'
   } else if (outcome === 'loop_blocked') {
-    cls = 'bg-red-500 text-white'
+    cls = 'bg-destructive text-white'
     icon = '⚠'
   } else if (outcome.startsWith('lobby_pending')) {
-    cls = 'bg-amber-400 text-white'
+    cls = 'bg-warning text-white'
     icon = '◔'
   } else if (outcome === 'no_target') {
-    cls = 'bg-zinc-400 text-white'
+    cls = 'bg-muted-foreground/50 text-white'
     icon = '○'
   } else if (outcome === 'tapped') {
-    cls = 'bg-blue-500 text-white'
+    cls = 'bg-info text-white'
     icon = '⊕'
   }
   return (
@@ -417,7 +417,7 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
         <span className="font-mono">{data.phase}</span>
         <span className="text-muted-foreground">{phaseLab}</span>
         <span className="text-muted-foreground">实例 #{data.instance} · R{data.round}</span>
-        <span className="font-mono text-[11px] text-zinc-400 ml-auto">{data.id}</span>
+        <span className="font-mono text-[11px] text-muted-foreground ml-auto">{data.id}</span>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -444,13 +444,13 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
         </div>
 
         {/* 总览 */}
-        <div className="rounded border border-border bg-zinc-50 p-2 text-[11px] space-y-0.5">
+        <div className="rounded border border-border bg-muted p-2 text-[11px] space-y-0.5">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>结果: <b>{outcomeText(data.outcome)}</b></span>
             {data.tap && (
               <span>
                 点击: <span className="font-mono">{data.tap.method}</span> @ ({data.tap.x}, {data.tap.y})
-                {data.tap.target_class && <span className="ml-1 text-blue-700">[{data.tap.target_class}]</span>}
+                {data.tap.target_class && <span className="ml-1 text-info">[{data.tap.target_class}]</span>}
               </span>
             )}
             {data.verify && data.verify.success !== null && (
@@ -557,22 +557,22 @@ function TierRow({ t }: { t: DecisionTier }) {
   const winner = t.early_exit
   return (
     <div className={`rounded border p-2 text-xs ${
-      winner ? 'border-emerald-300 bg-emerald-50/60' : 'border-zinc-200 bg-zinc-50/40'
+      winner ? 'border-success/30 bg-success-muted' : 'border-border bg-muted/40'
     }`}>
       <div className="flex items-center gap-2">
-        <span className={`inline-block w-1.5 h-1.5 rounded-full ${winner ? 'bg-emerald-500' : 'bg-zinc-300'}`} />
+        <span className={`inline-block w-1.5 h-1.5 rounded-full ${winner ? 'bg-success' : 'bg-muted-foreground/30'}`} />
         <span className="font-semibold">{t.name}</span>
-        {winner && <span className="text-emerald-700 text-[10px] font-bold">[赢]</span>}
-        <span className="ml-auto font-mono text-[10px] text-zinc-500">{t.duration_ms.toFixed(1)}ms</span>
+        {winner && <span className="text-success text-[10px] font-bold">[赢]</span>}
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground">{t.duration_ms.toFixed(1)}ms</span>
       </div>
-      {t.note && <div className="text-[11px] text-zinc-600 mt-0.5">{t.note}</div>}
+      {t.note && <div className="text-[11px] text-muted-foreground mt-0.5">{t.note}</div>}
       {t.templates && t.templates.length > 0 && (
         <ul className="mt-1 space-y-0.5">
           {t.templates.map((tp, i) => (
             <li key={i} className="flex items-center gap-2 font-mono text-[10px]">
-              <span className={tp.hit ? 'text-emerald-600' : 'text-zinc-400'}>{tp.hit ? '✓' : '·'}</span>
+              <span className={tp.hit ? 'text-success' : 'text-muted-foreground'}>{tp.hit ? '✓' : '·'}</span>
               <span className="flex-1 truncate">{tp.name}</span>
-              <span className="text-zinc-500">{tp.score.toFixed(3)}</span>
+              <span className="text-muted-foreground">{tp.score.toFixed(3)}</span>
             </li>
           ))}
         </ul>
@@ -581,15 +581,15 @@ function TierRow({ t }: { t: DecisionTier }) {
         <ul className="mt-1 space-y-0.5">
           {t.yolo_detections.slice(0, 6).map((d, i) => (
             <li key={i} className="flex items-center gap-2 font-mono text-[10px]">
-              <span className="text-blue-600">▣</span>
+              <span className="text-info">▣</span>
               <span className="flex-1">{d.cls}</span>
-              <span className="text-zinc-500">{d.conf.toFixed(3)}</span>
+              <span className="text-muted-foreground">{d.conf.toFixed(3)}</span>
             </li>
           ))}
         </ul>
       )}
       {t.memory_hit && (
-        <div className="mt-1 font-mono text-[10px] text-amber-700">
+        <div className="mt-1 font-mono text-[10px] text-warning">
           ◆ phash {t.memory_phash_query} → ({t.memory_hit.cx}, {t.memory_hit.cy})
         </div>
       )}

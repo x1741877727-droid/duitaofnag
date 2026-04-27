@@ -74,8 +74,8 @@ export function YoloDataset({ onLabel }: { onLabel: (name: string) => void }) {
           <>
             <span className="font-semibold">数据集</span>
             <span>总 <b className="font-mono">{data.total}</b></span>
-            <span>已标 <b className="font-mono text-emerald-700">{data.labeled}</b></span>
-            <span>跳过 <b className="font-mono text-amber-700">{data.skipped}</b></span>
+            <span>已标 <b className="font-mono text-success">{data.labeled}</b></span>
+            <span>跳过 <b className="font-mono text-warning">{data.skipped}</b></span>
             <span>剩余 <b className="font-mono">{data.remaining}</b></span>
             <span className="text-muted-foreground">|</span>
             {data.per_class.map((c) => (
@@ -90,7 +90,7 @@ export function YoloDataset({ onLabel }: { onLabel: (name: string) => void }) {
         <a
           href={exportZipUrl()}
           download
-          className="ml-auto text-xs text-blue-600 underline hover:text-blue-700"
+          className="ml-auto text-xs text-info underline hover:text-info"
         >
           下载训练 zip ↓
         </a>
@@ -176,22 +176,22 @@ function DatasetCard({
   onDelete: () => void
 }) {
   const stateCls = item.labeled
-    ? 'border-emerald-300 bg-emerald-50/30'
+    ? 'border-success/30 bg-success-muted'
     : item.skipped
-      ? 'border-amber-300 bg-amber-50/30'
-      : 'border-zinc-200 bg-zinc-50/40'
+      ? 'border-warning/30 bg-warning-muted'
+      : 'border-border bg-muted/40'
   const stateLabel = item.labeled ? '已标' : item.skipped ? '跳过' : '未标'
   const stateBadge = item.labeled
-    ? 'bg-emerald-500 text-white'
+    ? 'bg-success text-white'
     : item.skipped
-      ? 'bg-amber-500 text-white'
-      : 'bg-zinc-400 text-white'
+      ? 'bg-warning text-white'
+      : 'bg-muted-foreground/50 text-white'
 
   return (
     <div className={`group relative rounded border p-1.5 ${stateCls}`}>
       <button
         onClick={onLabel}
-        className="block w-full bg-zinc-200 rounded h-28 overflow-hidden mb-1 hover:opacity-90 relative"
+        className="block w-full bg-muted rounded h-28 overflow-hidden mb-1 hover:opacity-90 relative"
       >
         <img
           src={datasetImgSrc(item.name)}

@@ -83,7 +83,7 @@ export function PerfView() {
             key={w}
             onClick={() => setWindow(w)}
             className={`text-xs px-2 py-0.5 rounded border ${
-              window === w ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-border'
+              window === w ? 'bg-info/10 border-info/30 text-info' : 'border-border'
             }`}
           >
             {w}s
@@ -97,7 +97,7 @@ export function PerfView() {
           />
           自动刷新 (3s)
         </label>
-        {loading && <span className="text-xs text-blue-600">刷新中…</span>}
+        {loading && <span className="text-xs text-info">刷新中…</span>}
         <Button variant="ghost" size="sm" className="ml-auto" onClick={load}>立刻刷新</Button>
       </div>
 
@@ -109,7 +109,7 @@ export function PerfView() {
           <div className="rounded-lg border border-border bg-card p-3">
             <div className="text-xs font-semibold mb-2">整机</div>
             {snap.global.error ? (
-              <div className="text-xs text-red-700">{snap.global.error}</div>
+              <div className="text-xs text-destructive">{snap.global.error}</div>
             ) : (
               <div className="grid gap-3 text-sm" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
                 <Stat title="CPU" value={`${snap.global.cpu_percent ?? 0}%`}
@@ -156,9 +156,9 @@ export function PerfView() {
                     <span className="text-muted-foreground">{fmtTimeShort(b.ts)}</span>
                     <span>实例 #{b.instance}</span>
                     <span>{b.phase} R{b.round}</span>
-                    <span className="text-blue-700">{b.tier}</span>
+                    <span className="text-info">{b.tier}</span>
                     <span className={`ml-auto font-bold ${
-                      b.duration_ms > 200 ? 'text-red-700' : 'text-amber-700'
+                      b.duration_ms > 200 ? 'text-destructive' : 'text-warning'
                     }`}>
                       {b.duration_ms}ms
                     </span>
@@ -180,14 +180,14 @@ function Stat({ title, value, sub, barPct, color }: {
   barPct?: number
   color?: 'red' | 'amber' | 'emerald'
 }) {
-  const colorCls = color === 'red' ? 'bg-red-500' : color === 'amber' ? 'bg-amber-500' : 'bg-emerald-500'
+  const colorCls = color === 'red' ? 'bg-destructive' : color === 'amber' ? 'bg-warning' : 'bg-success'
   return (
     <div className="space-y-1">
       <div className="text-[11px] text-muted-foreground">{title}</div>
       <div className="text-lg font-bold font-mono">{value}</div>
       {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
       {barPct !== undefined && (
-        <div className="h-1 bg-zinc-100 rounded overflow-hidden">
+        <div className="h-1 bg-muted rounded overflow-hidden">
           <div className={colorCls} style={{ width: `${Math.min(100, barPct)}%`, height: '100%' }} />
         </div>
       )}
@@ -206,8 +206,8 @@ function InstancePerfCard({ idx, p }: {
     health: string
   }
 }) {
-  const healthCls = p.health === 'slow' ? 'text-amber-700' :
-                    p.health === 'stuck' ? 'text-red-700' : 'text-emerald-700'
+  const healthCls = p.health === 'slow' ? 'text-warning' :
+                    p.health === 'stuck' ? 'text-destructive' : 'text-success'
   const tiers = Object.entries(p.tier_ms).sort((a, b) => b[1].avg - a[1].avg)
   return (
     <div className="rounded border border-border p-2 text-xs space-y-1">
@@ -229,9 +229,9 @@ function InstancePerfCard({ idx, p }: {
               <span className="w-16 text-muted-foreground">{name}</span>
               <span className="flex-1">
                 avg <b>{t.avg}ms</b>
-                <span className="text-zinc-400 ml-1">p95 {t.p95} max {t.max}</span>
+                <span className="text-muted-foreground ml-1">p95 {t.p95} max {t.max}</span>
               </span>
-              <span className="text-zinc-400">×{t.count}</span>
+              <span className="text-muted-foreground">×{t.count}</span>
             </li>
           ))}
         </ul>

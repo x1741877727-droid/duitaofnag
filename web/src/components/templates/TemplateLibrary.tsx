@@ -158,7 +158,7 @@ export function TemplateLibrary() {
           <button
             onClick={() => setActiveCat('全部')}
             className={`text-xs px-2 py-1 rounded border ${
-              activeCat === '全部' ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-border text-muted-foreground'
+              activeCat === '全部' ? 'bg-info/10 border-info/30 text-info' : 'border-border text-muted-foreground'
             }`}
           >
             全部 ({items.length})
@@ -168,7 +168,7 @@ export function TemplateLibrary() {
               key={c.name}
               onClick={() => setActiveCat(c.name)}
               className={`text-xs px-2 py-1 rounded border ${
-                activeCat === c.name ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-border text-muted-foreground'
+                activeCat === c.name ? 'bg-info/10 border-info/30 text-info' : 'border-border text-muted-foreground'
               }`}
             >
               {c.name} ({c.count})
@@ -202,10 +202,10 @@ export function TemplateLibrary() {
                     key={it.name}
                     onClick={() => setSelected(it)}
                     className={`rounded border p-2 text-left transition-all hover:shadow ${
-                      sel ? 'border-blue-400 bg-blue-50/40 ring-1 ring-blue-300' : 'border-border bg-background'
+                      sel ? 'border-info bg-info/10 ring-1 ring-blue-300' : 'border-border bg-background'
                     }`}
                   >
-                    <div className="bg-zinc-100 rounded h-20 flex items-center justify-center overflow-hidden">
+                    <div className="bg-muted rounded h-20 flex items-center justify-center overflow-hidden">
                       <img
                         src={templateImgSrc(it.name)}
                         alt={it.name}
@@ -241,13 +241,13 @@ export function TemplateLibrary() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="text-red-600 text-[11px]"
+                      className="text-destructive text-[11px]"
                       onClick={() => doDelete(selected.name)}
                     >
                       删除
                     </Button>
                   </div>
-                  <div className="bg-zinc-100 rounded p-2 flex items-center justify-center max-h-[140px]">
+                  <div className="bg-muted rounded p-2 flex items-center justify-center max-h-[140px]">
                     <img
                       src={templateImgSrc(selected.name)}
                       alt={selected.name}
@@ -269,14 +269,14 @@ export function TemplateLibrary() {
                         bbox={detail.crop_bbox}
                       />
                     ) : (
-                      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                      <div className="text-[11px] text-warning bg-warning-muted border border-warning/30 rounded p-2">
                         原图丢失（早期模版未保存原图，新上传/裁剪的会保留）
                       </div>
                     )}
                   </div>
 
                   {stats && stats.match_count > 0 && (
-                    <div className="rounded border border-border p-2 bg-zinc-50 text-[11px] space-y-0.5">
+                    <div className="rounded border border-border p-2 bg-muted text-[11px] space-y-0.5">
                       <div className="font-semibold">命中率统计 (最近 {stats.sessions_scanned} 会话)</div>
                       <div>匹配/命中: <span className="font-mono">{stats.match_count}/{stats.hit_count}</span></div>
                       <div>命中率: <span className="font-mono">{(stats.hit_rate * 100).toFixed(1)}%</span></div>
@@ -318,7 +318,7 @@ export function TemplateLibrary() {
 
                 {testResult && (
                   <div className="p-3 flex-1 overflow-y-auto space-y-2">
-                    <div className={`text-xs font-semibold ${testResult.hit ? 'text-emerald-700' : 'text-red-700'}`}>
+                    <div className={`text-xs font-semibold ${testResult.hit ? 'text-success' : 'text-destructive'}`}>
                       {testResult.hit ? '✓ 命中' : '✗ 未命中'}
                       {' · '}得分 <span className="font-mono">{testResult.score.toFixed(3)}</span>
                       {' · '}<span className="font-mono">{testResult.duration_ms.toFixed(1)}ms</span>
@@ -408,7 +408,7 @@ function OriginalWithBox({ url, bbox }: { url: string; bbox: number[] | null }) 
   }
 
   return (
-    <div className="relative bg-zinc-900 rounded overflow-hidden">
+    <div className="relative bg-foreground rounded overflow-hidden">
       <img
         ref={imgRef}
         src={url}
@@ -422,7 +422,7 @@ function OriginalWithBox({ url, bbox }: { url: string; bbox: number[] | null }) 
       />
       {boxStyle && <div style={boxStyle} />}
       {bbox && (
-        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-blue-500 text-white text-[10px] font-mono">
+        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-info text-white text-[10px] font-mono">
           {bbox[0]},{bbox[1]} → {bbox[2]},{bbox[3]} ({bbox[2] - bbox[0]}×{bbox[3] - bbox[1]})
         </div>
       )}

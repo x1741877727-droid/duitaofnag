@@ -16,16 +16,16 @@ import { cn } from '@/lib/utils'
 
 function blockColor(d: LiveDecisionEvent): string {
   const o = d.outcome || ''
-  if (o.startsWith('lobby_confirmed')) return 'bg-emerald-500'
-  if (d.verify_success === true) return 'bg-emerald-500'
-  if (d.verify_success === false) return 'bg-red-500'
-  if (o === 'loop_blocked') return 'bg-red-500'
-  if (o.startsWith('lobby_pending')) return 'bg-amber-400'
-  if (o === 'no_target') return 'bg-zinc-400'
-  if (o === 'login_timeout_fail' || o === 'dead_screen' || o === 'phase_fail') return 'bg-rose-600'
-  if (o === 'phase_next' || o === 'phase_done') return 'bg-emerald-600'
-  if (o === 'tapped') return 'bg-blue-500'
-  return 'bg-zinc-300'
+  if (o.startsWith('lobby_confirmed')) return 'bg-success'
+  if (d.verify_success === true) return 'bg-success'
+  if (d.verify_success === false) return 'bg-destructive'
+  if (o === 'loop_blocked') return 'bg-destructive'
+  if (o.startsWith('lobby_pending')) return 'bg-warning'
+  if (o === 'no_target') return 'bg-muted-foreground/50'
+  if (o === 'login_timeout_fail' || o === 'dead_screen' || o === 'phase_fail') return 'bg-destructive'
+  if (o === 'phase_next' || o === 'phase_done') return 'bg-success'
+  if (o === 'tapped') return 'bg-info'
+  return 'bg-muted-foreground/30'
 }
 
 function fmtTime(ts: number): string {
@@ -64,7 +64,7 @@ export function ActionLog() {
               onClick={() => setFocused(focused === idx ? null : idx)}
               className={cn(
                 'shrink-0 w-12 text-left font-mono text-[11px]',
-                focused === idx ? 'text-blue-600 font-bold' : 'text-zinc-500'
+                focused === idx ? 'text-info font-bold' : 'text-muted-foreground'
               )}
             >
               #{idx}
@@ -85,7 +85,7 @@ export function ActionLog() {
                 )
               })}
             </div>
-            <span className="shrink-0 font-mono text-[10px] text-zinc-400">
+            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
               {decisions.length}
             </span>
           </div>

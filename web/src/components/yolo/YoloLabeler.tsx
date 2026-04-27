@@ -249,7 +249,7 @@ export function YoloLabeler({
                 key={f}
                 onClick={() => setFilter(f)}
                 className={`flex-1 text-[10px] px-1 py-0.5 rounded border ${
-                  filter === f ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-border'
+                  filter === f ? 'bg-info/10 border-info/30 text-info' : 'border-border'
                 }`}
               >
                 {({ remaining: '未标', labeled: '已标', all: '全部' } as const)[f]}
@@ -263,12 +263,12 @@ export function YoloLabeler({
               <button
                 onClick={() => { setName(it.name); onChangeName?.(it.name) }}
                 className={`w-full text-left px-2 py-1.5 ${
-                  name === it.name ? 'bg-blue-50 text-blue-700 font-semibold' : ''
+                  name === it.name ? 'bg-info/10 text-info font-semibold' : ''
                 }`}
               >
                 <div className="flex items-center gap-2">
                   <span className={`inline-block w-1.5 h-1.5 rounded-full ${
-                    it.labeled ? 'bg-emerald-500' : it.skipped ? 'bg-amber-400' : 'bg-zinc-300'
+                    it.labeled ? 'bg-success' : it.skipped ? 'bg-warning' : 'bg-muted-foreground/30'
                   }`} />
                   <span className="truncate flex-1 font-mono">{it.name}</span>
                 </div>
@@ -281,7 +281,7 @@ export function YoloLabeler({
       {/* 中: 画布 */}
       <div
         ref={wrapRef}
-        className="relative bg-zinc-900 rounded-lg overflow-hidden flex items-center justify-center"
+        className="relative bg-foreground rounded-lg overflow-hidden flex items-center justify-center"
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
@@ -291,7 +291,7 @@ export function YoloLabeler({
         style={{ cursor: pannning ? 'grabbing' : (name ? 'crosshair' : 'default') }}
       >
         {!name ? (
-          <div className="text-sm text-zinc-400">从左侧选一张图开始标注</div>
+          <div className="text-sm text-muted-foreground">从左侧选一张图开始标注</div>
         ) : (
           <img
             ref={imgRef}
@@ -316,7 +316,7 @@ export function YoloLabeler({
             <span className="font-mono">{Math.round(zoom * 100)}%</span>
             <button
               onClick={resetZoom}
-              className="text-blue-300 hover:text-blue-100"
+              className="text-info hover:text-info"
               title="重置 (1:1)"
             >
               ⟲
@@ -390,7 +390,7 @@ export function YoloLabeler({
                 </span>
                 <button
                   onClick={() => removeBox(i)}
-                  className="text-red-600 text-[10px]"
+                  className="text-destructive text-[10px]"
                 >
                   ✕
                 </button>

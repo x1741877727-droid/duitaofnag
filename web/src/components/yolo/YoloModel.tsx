@@ -70,13 +70,13 @@ export function YoloModel() {
           <div className="space-y-2 text-xs">
             <div className="flex items-center gap-2">
               <span>状态:</span>
-              <span className={`font-bold ${info.available ? 'text-emerald-700' : 'text-red-700'}`}>
+              <span className={`font-bold ${info.available ? 'text-success' : 'text-destructive'}`}>
                 {info.available ? '✓ 已加载' : '✗ 未加载'}
               </span>
             </div>
             <div>
               <div className="text-[11px] text-muted-foreground">模型路径:</div>
-              <div className="font-mono text-[11px] break-all bg-zinc-50 p-2 rounded border">
+              <div className="font-mono text-[11px] break-all bg-muted p-2 rounded border">
                 {info.model_path || '—'}
               </div>
             </div>
@@ -90,7 +90,7 @@ export function YoloModel() {
             </ul>
             <div>输入尺寸: <span className="font-mono">{info.input_size}×{info.input_size}</span></div>
             {info.error && (
-              <div className="text-[11px] text-red-700 bg-red-50 p-2 rounded">{info.error}</div>
+              <div className="text-[11px] text-destructive bg-destructive/10 p-2 rounded">{info.error}</div>
             )}
           </div>
         )}
@@ -101,7 +101,7 @@ export function YoloModel() {
         <div className="text-[11px] text-muted-foreground space-y-1">
           <div>训练完的 ONNX → 上传 → 自动覆盖 <span className="font-mono">latest.onnx</span></div>
           <div>下次主 runner 重启 + YOLO 测试会用新模型</div>
-          <div className="text-amber-700">⚠ 上传后会立即覆盖生产模型</div>
+          <div className="text-warning">⚠ 上传后会立即覆盖生产模型</div>
         </div>
         <label className="block">
           <input
@@ -121,7 +121,7 @@ export function YoloModel() {
         )}
         {msg && (
           <div className={`text-[11px] p-2 rounded ${
-            msg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
+            msg.startsWith('✓') ? 'bg-success-muted text-success' : 'bg-destructive/10 text-destructive'
           }`}>
             {msg}
           </div>

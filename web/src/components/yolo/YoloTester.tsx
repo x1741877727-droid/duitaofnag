@@ -52,21 +52,21 @@ export function YoloTester() {
     <div className="grid gap-3 h-full" style={{ gridTemplateColumns: '320px 1fr' }}>
       <div className="rounded-lg border border-border bg-card p-3 space-y-3 overflow-y-auto">
         <div className="text-xs font-semibold">YOLO 模型状态</div>
-        <div className="rounded border border-border bg-zinc-50 p-2 text-[11px] space-y-0.5">
+        <div className="rounded border border-border bg-muted p-2 text-[11px] space-y-0.5">
           {!info ? (
             <div className="text-muted-foreground">加载中…</div>
           ) : (
             <>
               <div>
                 可用:{' '}
-                <span className={info.available ? 'text-emerald-700 font-bold' : 'text-red-700 font-bold'}>
+                <span className={info.available ? 'text-success font-bold' : 'text-destructive font-bold'}>
                   {info.available ? '✓' : '✗'}
                 </span>
               </div>
               <div className="font-mono break-all text-[10px]">{info.model_path || '—'}</div>
               <div>类别 ({info.classes.length}): {info.classes.join(', ') || '—'}</div>
               <div>输入尺寸: {info.input_size}</div>
-              {info.error && <div className="text-red-700">{info.error}</div>}
+              {info.error && <div className="text-destructive">{info.error}</div>}
             </>
           )}
         </div>
@@ -112,7 +112,7 @@ export function YoloTester() {
         {result && (
           <div className="space-y-1 pt-2 border-t border-border">
             {!result.ok ? (
-              <div className="text-[11px] text-red-700">{result.error || '失败'}</div>
+              <div className="text-[11px] text-destructive">{result.error || '失败'}</div>
             ) : (
               <>
                 <div className="text-xs font-semibold">
@@ -123,7 +123,7 @@ export function YoloTester() {
                   <ul className="space-y-0.5 max-h-[260px] overflow-y-auto">
                     {result.detections.map((d, i) => (
                       <li key={i} className="font-mono text-[10px] flex items-center gap-2">
-                        <span className="text-blue-600">▣</span>
+                        <span className="text-info">▣</span>
                         <span className="flex-1">{d.name}</span>
                         <span className="text-muted-foreground">{d.score.toFixed(3)}</span>
                         <span className="text-muted-foreground">@({d.cx},{d.cy})</span>

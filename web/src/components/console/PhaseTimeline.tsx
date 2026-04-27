@@ -68,13 +68,13 @@ export function PhaseTimeline() {
               >
                 <span
                   className={`inline-block w-2 h-2 rounded-full ${
-                    last ? 'bg-blue-500 animate-pulse' : 'bg-zinc-300'
+                    last ? 'bg-info animate-pulse' : 'bg-muted-foreground/30'
                   }`}
                 />
                 <span className="font-mono">{it.phase}</span>
                 <span className="truncate">{PHASE_LABEL[it.phase] || ''}</span>
                 {it.rounds > 0 && (
-                  <span className="ml-auto text-[10px] font-mono text-zinc-400">
+                  <span className="ml-auto text-[10px] font-mono text-muted-foreground">
                     R{it.rounds}
                   </span>
                 )}

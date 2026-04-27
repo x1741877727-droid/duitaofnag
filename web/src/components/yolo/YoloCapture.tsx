@@ -152,7 +152,7 @@ export function YoloCapture() {
           </div>
         </div>
 
-        {err && <div className="text-[11px] text-red-700 bg-red-50 p-2 rounded">{err}</div>}
+        {err && <div className="text-[11px] text-destructive bg-destructive/10 p-2 rounded">{err}</div>}
       </div>
 
       {/* 右: 最近 */}
@@ -167,7 +167,7 @@ export function YoloCapture() {
                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))' }}>
             {recent.map((r) => (
               <div key={r.name} className="rounded border border-border p-1">
-                <div className="bg-zinc-200 rounded h-24 overflow-hidden">
+                <div className="bg-muted rounded h-24 overflow-hidden">
                   <img
                     src={datasetImgSrc(r.name)}
                     alt={r.name}

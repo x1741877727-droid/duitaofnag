@@ -160,7 +160,7 @@ export function AcceleratorView() {
                     )}
 
                     {st.error && (
-                      <div className="text-sm text-red-400 mt-2">{st.error}</div>
+                      <div className="text-sm text-destructive mt-2">{st.error}</div>
                     )}
                   </div>
                 )

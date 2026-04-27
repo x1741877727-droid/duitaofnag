@@ -39,8 +39,8 @@ export function YoloView() {
             onClick={() => setTab(t.key)}
             className={`px-3 py-1.5 rounded text-sm transition ${
               tab === t.key
-                ? 'bg-blue-50 text-blue-700 font-semibold border border-blue-200'
-                : 'text-muted-foreground hover:bg-zinc-50'
+                ? 'bg-info/10 text-info font-semibold border border-info/25'
+                : 'text-muted-foreground hover:bg-muted'
             }`}
             title={t.hint}
           >

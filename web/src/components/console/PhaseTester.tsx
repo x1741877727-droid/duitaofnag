@@ -112,7 +112,7 @@ export function PhaseTester() {
         <span className="font-semibold text-sm">阶段测试</span>
         <span className="text-[11px] text-muted-foreground">(dryrun · 不跑整套 · 多选按勾选顺序串跑)</span>
         {isRunning && (
-          <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+          <span className="text-[11px] text-warning bg-warning-muted border border-warning/30 px-2 py-0.5 rounded">
             主 runner 在跑 — 先停才能阶段测试
           </span>
         )}
@@ -130,17 +130,17 @@ export function PhaseTester() {
                 onClick={() => togglePhase(p.key)}
                 className={`px-2 py-1 rounded-l border text-xs flex items-center gap-1.5 transition ${
                   sel
-                    ? 'bg-blue-100 border-blue-400 text-blue-700 font-semibold'
-                    : 'border-border hover:bg-zinc-50'
+                    ? 'bg-info/15 border-info text-info font-semibold'
+                    : 'border-border hover:bg-muted'
                 }`}
               >
-                {sel && <span className="font-mono text-[10px] bg-blue-500 text-white rounded-full w-4 h-4 inline-flex items-center justify-center">{idx + 1}</span>}
+                {sel && <span className="font-mono text-[10px] bg-info text-white rounded-full w-4 h-4 inline-flex items-center justify-center">{idx + 1}</span>}
                 <span className="font-mono">{p.key}</span>
                 <span className="text-[10px] opacity-70">{p.name}</span>
               </button>
               <button
                 onClick={() => setExpanded(isExp ? null : p.key)}
-                className="px-1 py-1 rounded-r border-y border-r border-border text-xs hover:bg-zinc-50"
+                className="px-1 py-1 rounded-r border-y border-r border-border text-xs hover:bg-muted"
                 title="看流程文档"
               >
                 {isExp ? '▴' : '▾'}
@@ -215,16 +215,16 @@ export function PhaseTester() {
       </div>
 
       {results.length > 0 && (
-        <div className="rounded border border-border bg-zinc-50 p-2 space-y-1">
+        <div className="rounded border border-border bg-muted p-2 space-y-1">
           {results.map((r, i) => (
-            <div key={i} className={`flex items-center gap-2 text-[11px] ${r.ok ? 'text-emerald-800' : 'text-red-800'}`}>
+            <div key={i} className={`flex items-center gap-2 text-[11px] ${r.ok ? 'text-success' : 'text-destructive'}`}>
               <span>{r.ok ? '✓' : '✗'}</span>
               <span className="font-mono">{r.phase}</span>
               <span>{r.phase_name}</span>
               {r.duration_ms !== undefined && (
-                <span className="font-mono text-zinc-500">{r.duration_ms.toFixed(0)}ms</span>
+                <span className="font-mono text-muted-foreground">{r.duration_ms.toFixed(0)}ms</span>
               )}
-              {r.error && <span className="text-red-700">— {r.error}</span>}
+              {r.error && <span className="text-destructive">— {r.error}</span>}
             </div>
           ))}
         </div>
@@ -236,24 +236,24 @@ export function PhaseTester() {
 
 function PhaseDoc({ def }: { def: PhaseDef }) {
   return (
-    <div className="rounded border border-blue-200 bg-blue-50/40 p-3 text-xs space-y-2">
+    <div className="rounded border border-info/25 bg-info/10 p-3 text-xs space-y-2">
       <div className="flex items-center gap-2">
         <span className="font-mono font-bold">{def.key}</span>
-        <span className="font-semibold text-blue-700">{def.name}</span>
+        <span className="font-semibold text-info">{def.name}</span>
         <span className="ml-auto text-[10px] text-muted-foreground">
           max_rounds={def.max_rounds} · 间隔 {def.round_interval_s}s
         </span>
       </div>
       {def.description && (
-        <div className="text-zinc-700">{def.description}</div>
+        <div className="text-muted-foreground">{def.description}</div>
       )}
       {def.flow_steps && def.flow_steps.length > 0 && (
         <div>
-          <div className="text-[11px] font-semibold mb-1 text-zinc-600">执行流程:</div>
-          <ol className="space-y-0.5 text-[11px] text-zinc-700">
+          <div className="text-[11px] font-semibold mb-1 text-muted-foreground">执行流程:</div>
+          <ol className="space-y-0.5 text-[11px] text-muted-foreground">
             {def.flow_steps.map((s, i) => (
               <li key={i} className="flex gap-2">
-                <span className="text-blue-500 font-mono w-4 shrink-0">{i + 1}.</span>
+                <span className="text-info font-mono w-4 shrink-0">{i + 1}.</span>
                 <span>{s}</span>
               </li>
             ))}

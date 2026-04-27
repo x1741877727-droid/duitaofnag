@@ -99,34 +99,34 @@ function TierCard({ t }: { t: TierData }) {
     <div
       className={`rounded border p-2 text-xs ${
         winner
-          ? 'border-emerald-300 bg-emerald-50/70'
-          : 'border-zinc-200 bg-zinc-50/40'
+          ? 'border-success/30 bg-success-muted'
+          : 'border-border bg-muted/40'
       }`}
     >
       <div className="flex items-center gap-2">
         <span
           className={`inline-block w-1.5 h-1.5 rounded-full ${
-            winner ? 'bg-emerald-500' : 'bg-zinc-300'
+            winner ? 'bg-success' : 'bg-muted-foreground/30'
           }`}
         />
         <span className="font-semibold">{t.name}</span>
-        {winner && <span className="text-emerald-600 text-[10px] font-bold">[赢]</span>}
-        <span className="ml-auto font-mono text-[10px] text-zinc-500">
+        {winner && <span className="text-success text-[10px] font-bold">[赢]</span>}
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
           {t.duration_ms.toFixed(1)}ms
         </span>
       </div>
-      {t.note && <div className="mt-1 text-[11px] text-zinc-600">{t.note}</div>}
+      {t.note && <div className="mt-1 text-[11px] text-muted-foreground">{t.note}</div>}
 
       {/* 模板层细节 */}
       {t.templates && t.templates.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">
           {t.templates.map((tp, idx) => (
             <li key={idx} className="flex items-center gap-2 font-mono text-[10px]">
-              <span className={tp.hit ? 'text-emerald-600' : 'text-zinc-400'}>
+              <span className={tp.hit ? 'text-success' : 'text-muted-foreground'}>
                 {tp.hit ? '✓' : '·'}
               </span>
               <span className="truncate flex-1">{tp.name}</span>
-              <span className="text-zinc-500">{tp.score.toFixed(2)}</span>
+              <span className="text-muted-foreground">{tp.score.toFixed(2)}</span>
             </li>
           ))}
         </ul>
@@ -137,13 +137,13 @@ function TierCard({ t }: { t: TierData }) {
         <ul className="mt-1.5 space-y-0.5">
           {t.yolo_detections.slice(0, 6).map((d, idx) => (
             <li key={idx} className="flex items-center gap-2 font-mono text-[10px]">
-              <span className="text-blue-600">▣</span>
+              <span className="text-info">▣</span>
               <span className="truncate flex-1">{d.cls}</span>
-              <span className="text-zinc-500">{d.conf.toFixed(2)}</span>
+              <span className="text-muted-foreground">{d.conf.toFixed(2)}</span>
             </li>
           ))}
           {t.yolo_detections.length > 6 && (
-            <li className="text-[10px] text-zinc-400 ml-3">
+            <li className="text-[10px] text-muted-foreground ml-3">
               ... 还有 {t.yolo_detections.length - 6} 个
             </li>
           )}
@@ -152,7 +152,7 @@ function TierCard({ t }: { t: TierData }) {
 
       {/* 记忆层 */}
       {t.memory_hit && (
-        <div className="mt-1.5 font-mono text-[10px] text-amber-700">
+        <div className="mt-1.5 font-mono text-[10px] text-warning">
           ◆ phash {t.memory_phash_query || ''} → ({t.memory_hit.cx},{t.memory_hit.cy})
         </div>
       )}

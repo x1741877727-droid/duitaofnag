@@ -198,7 +198,7 @@ export function TemplateCropper({ open, onClose, onSaved, initialUrl, initialBlo
           {/* 左 - 图 + 框 */}
           <div
             ref={containerRef}
-            className="relative bg-zinc-900 overflow-auto"
+            className="relative bg-foreground overflow-auto"
             onMouseDown={onMouseDown}
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}
@@ -219,13 +219,13 @@ export function TemplateCropper({ open, onClose, onSaved, initialUrl, initialBlo
                 className="block max-w-full max-h-[70vh] mx-auto select-none"
               />
             ) : (
-              <div className="flex items-center justify-center h-[60vh] text-zinc-400 text-sm">
+              <div className="flex items-center justify-center h-[60vh] text-muted-foreground text-sm">
                 还没有源图 — 右侧选一种方式
               </div>
             )}
             {displayBox && box && box.w > 0 && (
               <div
-                className="absolute border-2 border-blue-400 bg-blue-400/15 pointer-events-none"
+                className="absolute border-2 border-info bg-info/15 pointer-events-none"
                 style={{
                   left: displayBox.left,
                   top: displayBox.top,
@@ -233,7 +233,7 @@ export function TemplateCropper({ open, onClose, onSaved, initialUrl, initialBlo
                   height: displayBox.height,
                 }}
               >
-                <div className="absolute -top-6 left-0 text-[11px] font-mono bg-blue-500 text-white px-1 rounded">
+                <div className="absolute -top-6 left-0 text-[11px] font-mono bg-info text-white px-1 rounded">
                   {Math.round(box.w)}×{Math.round(box.h)}
                 </div>
               </div>
@@ -322,7 +322,7 @@ export function TemplateCropper({ open, onClose, onSaved, initialUrl, initialBlo
               >
                 {saving ? '保存中…' : '保存到 fixtures/templates/'}
               </Button>
-              {err && <div className="text-[11px] text-amber-700 mt-1 break-words">{err}</div>}
+              {err && <div className="text-[11px] text-warning mt-1 break-words">{err}</div>}
             </div>
           </div>
         </div>
