@@ -36,6 +36,22 @@ const CAT_ORDER = [
 
 export function TemplateLibrary() {
   const instances = useAppStore((s) => s.instances)
+  const emulators = useAppStore((s) => s.emulators)
+  // 模版库 / YOLO 测试 用「实例号」就是模拟器号 (instance_idx == emulator.index).
+  // 优先用 emulators (无需 runner 启动); instances 是 runner 跑时的额外信息.
+  const availableInstances = useMemo(() => {
+    const ids = new Set<number>()
+    for (const e of emulators) ids.add(e.index)
+    for (const i of Object.values(instances)) ids.add(i.index)
+    return Array.from(ids).sort((a, b) => a - b).map((idx) => {
+      const emu = emulators.find((e) => e.index === idx)
+      return {
+        index: idx,
+        running: emu?.running ?? false,
+        name: emu?.name ?? `实例 #${idx}`,
+      }
+    })
+  }, [instances, emulators])
   const [items, setItems] = useState<TemplateMeta[]>([])
   const [search, setSearch] = useState('')
   const [activeCat, setActiveCat] = useState<string>('全部')
@@ -113,7 +129,7 @@ export function TemplateLibrary() {
       let args: { name: string; instance?: number; threshold?: number } = {
         name: selected.name,
       }
-      const tgt = testInst ?? Object.values(instances)[0]?.index
+      const tgt = testInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
       if (tgt !== undefined) args.instance = tgt
       const r = await testTemplate(args)
       setTestResult(r)
@@ -133,7 +149,7 @@ export function TemplateLibrary() {
     setYoloRunning(true)
     setYoloResult(null)
     try {
-      const tgt = yoloInst ?? Object.values(instances)[0]?.index ?? 0
+      const tgt = yoloInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index ?? 0
       const r = await runYoloTest({ instance: tgt, conf_thr: yoloConf })
       setYoloResult(r)
     } catch (e) {
@@ -325,29 +341,31 @@ export function TemplateLibrary() {
                 <div className="p-3 space-y-2 border-b border-border">
                   <div className="text-xs font-semibold">模版测试 (dryrun, 不实点)</div>
                   <div className="flex flex-wrap gap-1">
-                    {Object.values(instances).map((inst) => (
+                    {availableInstances.map((inst) => (
                       <Button
                         key={inst.index}
                         variant={testInst === inst.index ? 'secondary' : 'outline'}
                         size="sm"
                         onClick={() => setTestInst(inst.index)}
+                        title={inst.name + (inst.running ? ' (运行中)' : ' (未启动)')}
+                        className={!inst.running ? 'opacity-60' : ''}
                       >
-                        #{inst.index}
+                        #{inst.index}{inst.running ? '' : '·停'}
                       </Button>
                     ))}
-                    {Object.values(instances).length === 0 && (
+                    {availableInstances.length === 0 && (
                       <div className="text-[11px] text-muted-foreground">
-                        没有实例信息 — 试着先在「运行控制」加载实例
+                        没检测到模拟器 — 看「运行控制」检测一下
                       </div>
                     )}
                   </div>
                   <Button
                     size="sm"
-                    disabled={testing}
+                    disabled={testing || availableInstances.length === 0}
                     onClick={runTest}
                     className="w-full"
                   >
-                    {testing ? '测试中…' : '抓帧测试匹配 (无需启动 runner)'}
+                    {testing ? '测试中…' : '抓帧测试匹配 (无需 runner)'}
                   </Button>
                 </div>
 
@@ -400,16 +418,21 @@ export function TemplateLibrary() {
               <div className="space-y-1.5">
                 <div className="text-xs font-semibold">选实例 (无需启动 runner)</div>
                 <div className="flex flex-wrap gap-1">
-                  {Object.values(instances).map((inst) => (
+                  {availableInstances.map((inst) => (
                     <Button
                       key={inst.index}
                       variant={yoloInst === inst.index ? 'secondary' : 'outline'}
                       size="sm"
                       onClick={() => setYoloInst(inst.index)}
+                      title={inst.name + (inst.running ? ' (运行中)' : ' (未启动)')}
+                      className={!inst.running ? 'opacity-60' : ''}
                     >
-                      #{inst.index}
+                      #{inst.index}{inst.running ? '' : '·停'}
                     </Button>
                   ))}
+                  {availableInstances.length === 0 && (
+                    <div className="text-[11px] text-muted-foreground">没检测到模拟器</div>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 text-[11px]">
                   <span>置信度阈值:</span>

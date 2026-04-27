@@ -24,7 +24,18 @@ interface CropperProps {
 
 export function TemplateCropper({ open, onClose, onSaved, initialUrl, initialBlob }: CropperProps) {
   const instances = useAppStore((s) => s.instances)
+  const emulators = useAppStore((s) => s.emulators)
   const focusedInstance = useAppStore((s) => s.focusedInstance)
+  // 优先用 emulators (无需 runner)
+  const availInstances = (() => {
+    const ids = new Set<number>()
+    for (const e of emulators) ids.add(e.index)
+    for (const i of Object.values(instances)) ids.add(i.index)
+    return Array.from(ids).sort((a, b) => a - b).map((idx) => ({
+      index: idx,
+      running: emulators.find((e) => e.index === idx)?.running ?? false,
+    }))
+  })()
 
   const [imgUrl, setImgUrl] = useState<string>('')
   const [imgBlob, setImgBlob] = useState<Blob | null>(null)
@@ -246,23 +257,23 @@ export function TemplateCropper({ open, onClose, onSaved, initialUrl, initialBlo
                   />
                 </label>
                 <div className="text-[10px] text-muted-foreground">或:</div>
-                {Object.values(instances).length > 0 && (
+                {availInstances.length > 0 ? (
                   <div className="flex flex-wrap gap-1">
-                    {Object.values(instances).slice(0, 12).map((inst) => (
+                    {availInstances.slice(0, 12).map((inst) => (
                       <Button
                         key={inst.index}
                         variant="outline"
                         size="sm"
                         onClick={() => loadInstanceFrame(inst.index)}
-                        className={focusedInstance === inst.index ? 'ring-1 ring-blue-500' : ''}
+                        className={`${focusedInstance === inst.index ? 'ring-1 ring-blue-500' : ''} ${!inst.running ? 'opacity-60' : ''}`}
+                        title={inst.running ? '运行中' : '模拟器未启动'}
                       >
-                        实例 #{inst.index}
+                        实例 #{inst.index}{inst.running ? '' : '·停'}
                       </Button>
                     ))}
                   </div>
-                )}
-                {Object.values(instances).length === 0 && (
-                  <div className="text-[10px] text-muted-foreground">没有运行实例 (在「运行控制」点开始后可拉实例帧)</div>
+                ) : (
+                  <div className="text-[10px] text-muted-foreground">没检测到模拟器</div>
                 )}
               </div>
             </div>
