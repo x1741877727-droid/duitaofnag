@@ -50,6 +50,14 @@ def _timed_phase(name: str):
     return wrap
 
 
+# v3: PhaseHandler 内部要 game_restart 时, 抛这个让 runner_service 翻译成 _GameCrashError
+class V3GameRestartRequested(Exception):
+    """v3 PhaseHandler 返回 GAME_RESTART 时, _run_v3_phase 抛此异常."""
+    def __init__(self, phase_name: str = ""):
+        self.phase_name = phase_name
+        super().__init__(f"v3 game_restart from {phase_name}")
+
+
 class Phase(str, Enum):
     """运行阶段"""
     INIT = "init"
@@ -106,6 +114,105 @@ class SingleInstanceRunner:
         self._team_code: str = ""  # 队长生成的口令码
         self._last_phash: int = 0  # 帧差跳过：上一帧的 pHash
         self.dbg = DebugLogger(enabled=bool(log_dir), save_dir=log_dir or "logs")
+
+        # v3 资源 (lazy 初始化)
+        self._v3_ctx = None  # backend.automation.phase_base.RunContext
+        self._v3_memory = None
+        self._v3_lobby_detector = None
+        self._v3_recognizer = None
+
+    def _build_v3_ctx(self):
+        """构造 v3 RunContext (lazy, 缓存)."""
+        if self._v3_ctx is not None:
+            return self._v3_ctx
+        from .phase_base import RunContext
+        from .recognizer import Recognizer
+        from .lobby_check import LobbyQuadDetector
+        from .memory_l1 import FrameMemory
+        from .user_paths import user_data_dir
+        from .decision_log import get_recorder
+
+        if self._v3_memory is None:
+            try:
+                self._v3_memory = FrameMemory(user_data_dir() / "memory" / "dismiss_popups.db")
+            except Exception as _e:
+                logger.warning(f"[v3] memory 初始化失败 (非致命): {_e}")
+                self._v3_memory = None
+
+        if self._v3_lobby_detector is None:
+            self._v3_lobby_detector = LobbyQuadDetector(stable_frames_required=2)
+
+        if self._v3_recognizer is None:
+            self._v3_recognizer = Recognizer(
+                matcher=self.matcher,
+                yolo_detect_fn=(self.yolo_dismisser.detect
+                                if self.yolo_dismisser.is_available() else None),
+                memory=self._v3_memory,
+            )
+
+        self._v3_ctx = RunContext(
+            device=self.adb,
+            matcher=self.matcher,
+            recognizer=self._v3_recognizer,
+            runner=self,
+            yolo=self.yolo_dismisser,
+            memory=self._v3_memory,
+            lobby_detector=self._v3_lobby_detector,
+            decision_recorder=get_recorder(),
+            instance_idx=-1,
+            account=None,
+            settings=None,
+            role="leader" if self.role == "captain" else "follower",
+        )
+        return self._v3_ctx
+
+    async def _run_v3_phase(self, handler) -> bool:
+        """用 v3 PhaseHandler 跑一个 phase. 返回 True=NEXT/DONE, False=FAIL/超时."""
+        from .phase_base import PhaseResult
+        from .action_executor import ActionExecutor
+        ctx = self._build_v3_ctx()
+        await handler.enter(ctx)
+        for rnd in range(handler.max_rounds):
+            ctx.phase_round = rnd + 1
+            try:
+                shot = await self.adb.screenshot()
+            except Exception as _e:
+                shot = None
+            ctx.current_shot = shot
+            if shot is None:
+                await asyncio.sleep(0.3)
+                continue
+            try:
+                step = await handler.handle_frame(ctx)
+            except Exception as e:
+                logger.warning(f"[{handler.name}/R{rnd+1}] handle_frame 异常: {e}", exc_info=True)
+                final = await handler.on_failure(ctx, e)
+                await handler.exit(ctx, final)
+                return False
+            if step.note:
+                logger.info(f"[{handler.name}/R{rnd+1}] {step.note}")
+            if step.action is not None:
+                try:
+                    await ActionExecutor.apply(ctx, step.action)
+                except Exception as e:
+                    logger.warning(f"[{handler.name}] ActionExecutor 异常: {e}")
+            if step.result in (PhaseResult.NEXT, PhaseResult.DONE):
+                await handler.exit(ctx, step.result)
+                return True
+            if step.result == PhaseResult.FAIL:
+                await handler.exit(ctx, step.result)
+                return False
+            if step.result == PhaseResult.GAME_RESTART:
+                await handler.exit(ctx, step.result)
+                # 让上层 runner_service 接住 → 翻译成 _GameCrashError
+                raise V3GameRestartRequested(handler.name)
+            if step.result == PhaseResult.WAIT:
+                await asyncio.sleep(max(0.0, step.wait_seconds))
+            else:
+                await asyncio.sleep(handler.round_interval_s)
+        logger.warning(f"[{handler.name}] 超 max_rounds={handler.max_rounds} → FAIL")
+        await handler.exit(ctx, PhaseResult.FAIL)
+        return False
 
     def _frame_changed(self, shot: np.ndarray, threshold: int = 4) -> bool:
         """pHash 帧差检测：画面没变返回 False，跳过 OCR"""
