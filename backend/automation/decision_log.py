@@ -137,6 +137,22 @@ class _Recorder:
             self._enabled = True
             logger.info(f"[decision] 记录目录: {self._root}")
 
+    def register_live_listener(self, cb) -> None:
+        """注册 finalize 回调 (cb(decision_dict)). 用于 LiveBroadcaster 推 WS."""
+        with self._lock:
+            if not hasattr(self, "_listeners"):
+                self._listeners = []
+            self._listeners.append(cb)
+
+    def _notify_listeners(self, decision_dict: dict) -> None:
+        """finalize 后异步通知 listener. 不阻塞主决策路径."""
+        listeners = list(getattr(self, "_listeners", []) or [])
+        for cb in listeners:
+            try:
+                cb(decision_dict)
+            except Exception as e:
+                logger.debug(f"[decision] listener err: {e}")
+
     def is_enabled(self) -> bool:
         return self._enabled and self._root is not None
 
@@ -559,7 +575,7 @@ class Decision:
         except Exception as e:
             logger.warning(f"[decision] save json fail: {e}")
         # 加索引
-        self.recorder.record_summary({
+        summary = {
             "id": self.id,
             "instance": self.instance,
             "phase": self.phase,
@@ -570,7 +586,13 @@ class Decision:
             "tap_target": self.tap.target_class if self.tap else "",
             "verify_success": self.verify.success if self.verify else None,
             "tier_count": len(self.tiers),
-        })
+        }
+        self.recorder.record_summary(summary)
+        # 通知 listener (LiveBroadcaster 推 WS)
+        try:
+            self.recorder._notify_listeners({**summary, "tap_xy": [self.tap.x, self.tap.y] if self.tap else None})
+        except Exception:
+            pass
         return self
 
 

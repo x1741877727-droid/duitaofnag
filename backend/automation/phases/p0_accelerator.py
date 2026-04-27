@@ -17,6 +17,7 @@ import logging
 import time
 
 from ..phase_base import PhaseAction, PhaseHandler, PhaseResult, PhaseStep, RunContext
+from ..recorder_helpers import record_signal_tier
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,17 @@ class P0AcceleratorHandler(PhaseHandler):
         if runner is None:
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
+        decision = ctx.current_decision
+
         # ── 快速路径: VPN 已连接 ──
+        t0 = time.perf_counter()
         if await runner._check_vpn_connected():
+            record_signal_tier(decision, name="VPN校验", hit=True,
+                               note="VPN 已连接 (4 信号校验通过, 跳过启动)",
+                               duration_ms=(time.perf_counter() - t0) * 1000)
             logger.info("[P0] FightMaster 已连接 ✓ 跳过启动")
-            return PhaseStep(PhaseResult.NEXT, note="vpn already connected")
+            return PhaseStep(PhaseResult.NEXT, note="vpn already connected",
+                             outcome_hint="vpn_already_connected")
 
         # ── 广播启动 (1-8s 快路径) ──
         try:
@@ -44,8 +52,12 @@ class P0AcceleratorHandler(PhaseHandler):
         except Exception as e:
             logger.warning(f"[P0] _start_vpn 异常: {e}")
         if await runner._wait_vpn_connected(timeout=8):
+            record_signal_tier(decision, name="VPN校验", hit=True,
+                               note="广播启动 → 8s 内连上",
+                               duration_ms=(time.perf_counter() - t0) * 1000)
             logger.info("[P0] FightMaster 广播启动成功 ✓")
-            return PhaseStep(PhaseResult.NEXT, note="vpn broadcast ok")
+            return PhaseStep(PhaseResult.NEXT, note="vpn broadcast ok",
+                             outcome_hint="vpn_broadcast_ok")
 
         # ── UI 启动 (3 次重试) ──
         logger.warning("[P0] 广播启动失败, 切换 UI 模式")
@@ -65,8 +77,16 @@ class P0AcceleratorHandler(PhaseHandler):
                 continue
 
             if await runner._wait_vpn_connected(timeout=10):
+                record_signal_tier(decision, name="VPN校验", hit=True,
+                                   note=f"UI 启动 → 连接 (retry={retry})",
+                                   duration_ms=(time.perf_counter() - t0) * 1000)
                 logger.info(f"[P0] FightMaster UI 启动成功 ✓ (retry={retry})")
-                return PhaseStep(PhaseResult.NEXT, note=f"vpn ui ok (retry={retry})")
+                return PhaseStep(PhaseResult.NEXT, note=f"vpn ui ok (retry={retry})",
+                                 outcome_hint="vpn_ui_ok")
 
+        record_signal_tier(decision, name="VPN校验", hit=False,
+                           note="广播 + 3 次 UI 启动全失败",
+                           duration_ms=(time.perf_counter() - t0) * 1000)
         logger.error("[P0] 所有方式均失败")
-        return PhaseStep(PhaseResult.FAIL, note="vpn 全部失败")
+        return PhaseStep(PhaseResult.FAIL, note="vpn 全部失败",
+                         outcome_hint="vpn_all_failed")

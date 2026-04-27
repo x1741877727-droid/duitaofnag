@@ -19,6 +19,7 @@ from typing import Optional
 
 from ..action_executor import ActionExecutor
 from ..phase_base import PhaseAction, PhaseResult, PhaseStep, RunContext
+from ..recorder_helpers import record_perception
 from .p2_perception import Perception, perceive
 from .p2_policy import decide
 
@@ -39,6 +40,9 @@ class P2SubFSM:
         # 1. 跑 perception
         p: Perception = await perceive(ctx)
         rnd = ctx.phase_round
+
+        # 把 perception 8 字段写进 5 层 Tier (decision_log)
+        record_perception(ctx.current_decision, p)
 
         # log dets 概览 (跟 v2 等价, 便于排查 YOLO 漏检)
         if p.yolo_dets_raw:
@@ -61,11 +65,13 @@ class P2SubFSM:
                     PhaseResult.NEXT,
                     note=f"大厅确认 {ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED}, "
                          f"关闭 {ctx.popups_closed} 弹窗 · {p.quad_note}",
+                    outcome_hint="lobby_confirmed_quad",
                 )
             return PhaseStep(
                 PhaseResult.WAIT,
                 wait_seconds=0.3,
                 note=f"大厅判定 {ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED} ({p.quad_note})",
+                outcome_hint=f"lobby_pending_{ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED}",
             )
         else:
             ctx.lobby_confirm_count = 0
@@ -83,6 +89,7 @@ class P2SubFSM:
                     return PhaseStep(
                         PhaseResult.GAME_RESTART,
                         note=f"自动登录 {elapsed:.0f}s 仍在登录页 → game_restart",
+                        outcome_hint="login_timeout_fail",
                     )
         else:
             if ctx.login_first_seen_ts is not None:
@@ -106,16 +113,19 @@ class P2SubFSM:
                     PhaseResult.NEXT,
                     note=f"大厅 (兜底: 连续{ctx.empty_dets_streak}轮无目标 + 模板命中) "
                          f"· 关闭 {ctx.popups_closed} 弹窗",
+                    outcome_hint="lobby_confirmed_legacy",
                 )
             # 持续无目标 + 不在大厅 → 死屏 → game_restart
             if ctx.empty_dets_streak > EMPTY_STREAK_LIMIT:
                 return PhaseStep(
                     PhaseResult.GAME_RESTART,
                     note=f"连续 {ctx.empty_dets_streak} 轮无目标 + 非大厅 → 死屏",
+                    outcome_hint="dead_screen",
                 )
             return PhaseStep(
                 PhaseResult.RETRY,
                 note=f"无目标 (streak={ctx.empty_dets_streak})",
+                outcome_hint="no_target",
             )
 
         ctx.empty_dets_streak = 0
@@ -134,6 +144,7 @@ class P2SubFSM:
                 return PhaseStep(
                     PhaseResult.RETRY,
                     note=f"同坐标连击 → 加黑名单, 重选",
+                    outcome_hint="loop_blocked",
                 )
         else:
             ctx.same_target_count = 0
@@ -145,6 +156,7 @@ class P2SubFSM:
             action=action,
             wait_seconds=0.3,
             note=f"tap {action.label}({action.x},{action.y})",
+            outcome_hint="tapped",
         )
 
 

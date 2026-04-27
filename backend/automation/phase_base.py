@@ -70,6 +70,7 @@ class PhaseStep:
     action: Optional[PhaseAction] = None
     wait_seconds: float = 0.0
     note: str = ""                        # 决策注释 (写进 decision_log)
+    outcome_hint: str = ""                # 细粒度 outcome (P2 用: lobby_confirmed_quad / no_target / loop_blocked / tapped / login_timeout_fail / lobby_pending_X)
 
 
 # ─────────────── RunContext ─────────────────
@@ -129,6 +130,9 @@ class RunContext:
     # 帧缓存 (RunnerFSM._loop_phase 每轮写)
     current_shot: Optional[np.ndarray] = None
     current_phash: str = ""
+
+    # 决策记录 (RunnerFSM._loop_phase 每轮 new_decision, finalize 时清; phase 中可 add_tier)
+    current_decision: Optional[Any] = None
 
     def reset_phase_state(self) -> None:
         """每 PhaseHandler.enter() 必调. 清 P2/计时/帧缓存, 跨 phase 数据不动."""

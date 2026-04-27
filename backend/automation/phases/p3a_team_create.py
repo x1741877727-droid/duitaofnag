@@ -26,16 +26,27 @@ class P3aTeamCreateHandler(PhaseHandler):
         if runner is None:
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
+        from ..recorder_helpers import record_signal_tier
+        decision = ctx.current_decision
         try:
             scheme = await runner.phase_team_create()
         except Exception as e:
+            record_signal_tier(decision, name="OCR流程", hit=False, tier_idx=3,
+                               note=f"phase_team_create 异常: {e}")
             logger.error(f"[P3a] phase_team_create 异常: {e}")
-            return PhaseStep(PhaseResult.FAIL, note=f"team_create 异常: {e}")
+            return PhaseStep(PhaseResult.FAIL, note=f"team_create 异常: {e}",
+                             outcome_hint="team_create_exception")
 
         if scheme:
             ctx.game_scheme_url = scheme
+            record_signal_tier(decision, name="OCR流程", hit=True, tier_idx=3,
+                               note=f"队伍创建成功 scheme={scheme[:48]}")
             return PhaseStep(
                 PhaseResult.NEXT,
                 note=f"队伍创建成功, scheme={scheme[:50]}...",
+                outcome_hint="team_create_ok",
             )
-        return PhaseStep(PhaseResult.FAIL, note="队伍创建失败")
+        record_signal_tier(decision, name="OCR流程", hit=False, tier_idx=3,
+                           note="队伍创建失败 (scheme 为空)")
+        return PhaseStep(PhaseResult.FAIL, note="队伍创建失败",
+                         outcome_hint="team_create_fail")

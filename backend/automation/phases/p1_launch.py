@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 
+import time as _time
+
 from ..phase_base import PhaseHandler, PhaseResult, PhaseStep, RunContext
+from ..recorder_helpers import record_signal_tier
 
 logger = logging.getLogger(__name__)
 
@@ -60,36 +63,57 @@ class P1LaunchHandler(PhaseHandler):
 
         rnd = ctx.phase_round
         matcher = ctx.matcher
+        decision = ctx.current_decision
 
         # ① 模板检测大厅
+        t0 = _time.perf_counter()
         if matcher and matcher.is_at_lobby(shot):
+            record_signal_tier(decision, name="模板", hit=True, tier_idx=0,
+                               note="大厅模板命中 (lobby_start_btn / is_at_lobby)",
+                               duration_ms=(_time.perf_counter() - t0) * 1000)
             return PhaseStep(PhaseResult.NEXT,
-                             note=f"R{rnd}: 大厅模板命中 → done")
+                             note=f"R{rnd}: 大厅模板命中 → done",
+                             outcome_hint="lobby_template_hit")
 
         # ② 模板检测 close_x + 登录页
         if matcher:
             for tn in CLOSE_X_TEMPLATE_NAMES + LOGIN_TEMPLATE_NAMES:
                 h = matcher.match_one(shot, tn, threshold=0.80)
                 if h:
+                    record_signal_tier(decision, name="模板", hit=True, tier_idx=0,
+                                       note=f"模板 {tn}({h.confidence:.2f}) 命中",
+                                       duration_ms=(_time.perf_counter() - t0) * 1000)
                     return PhaseStep(
                         PhaseResult.NEXT,
                         note=f"R{rnd}: 模板 {tn}({h.confidence:.2f}) 命中 → done",
+                        outcome_hint="popup_or_login_template_hit",
                     )
+        record_signal_tier(decision, name="模板", hit=False, tier_idx=0,
+                           note="大厅 / close_x / 登录页 模板均未命中",
+                           duration_ms=(_time.perf_counter() - t0) * 1000)
 
         # ③ YOLO 推理 (任何 dets > 0 → 脱离加载黑屏)
+        t1 = _time.perf_counter()
         if ctx.yolo is not None and ctx.yolo.is_available():
             try:
                 dets = ctx.yolo.detect(shot)
                 if dets:
                     names = ",".join(f"{d.name}({d.conf:.2f})" for d in dets[:3])
+                    record_signal_tier(decision, name="YOLO", hit=True, tier_idx=2,
+                                       note=f"YOLO 检到 {len(dets)} 个 [{names}]",
+                                       duration_ms=(_time.perf_counter() - t1) * 1000)
                     return PhaseStep(
                         PhaseResult.NEXT,
                         note=f"R{rnd}: YOLO 检到 {len(dets)} 个 [{names}] → done",
+                        outcome_hint="yolo_dets_seen",
                     )
+                record_signal_tier(decision, name="YOLO", hit=False, tier_idx=2,
+                                   note="YOLO 0 dets",
+                                   duration_ms=(_time.perf_counter() - t1) * 1000)
             except Exception as e:
                 logger.debug(f"[P1] YOLO 推理失败: {e}")
 
         # 都没命中, 等下一帧
         if rnd % 5 == 0:
             logger.info(f"[P1] R{rnd}: 等待中 (无 UI 元素出现)")
-        return PhaseStep(PhaseResult.RETRY)
+        return PhaseStep(PhaseResult.RETRY, outcome_hint="waiting_ui")

@@ -213,6 +213,23 @@ def create_app(config: ConfigManager) -> FastAPI:
         import logging as _logging
         _logging.getLogger(__name__).warning(f"debug server 启动失败（不影响主程序）: {_e}")
 
+    # 中控台 v3 路由 — WebSocket 实时推流 (decision/phase_change/intervene_ack/perf)
+    try:
+        from .api_live import router as _live_router, install_listeners as _install_live
+        app.include_router(_live_router)
+        _install_live()
+        logger.info("[api] /ws/live 中控台实时推流已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_live 挂载失败: {_e}")
+
+    # 决策档案 / 历史会话 (从 8901 迁到主 8900)
+    try:
+        from .api_decisions import router as _decisions_router
+        app.include_router(_decisions_router)
+        logger.info("[api] /api/decisions /api/sessions 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_decisions 挂载失败: {_e}")
+
     @app.on_event("startup")
     async def startup():
         ws_manager.start_drain()

@@ -52,7 +52,7 @@ def start_server(app, host: str, port: int):
 
 def run_dev_mode(port: int, mock: bool, host: str = ""):
     """开发模式：纯 HTTP 服务，浏览器访问"""
-    bind_host = host or "127.0.0.1"
+    bind_host = host or "0.0.0.0"
 
     config.load()
     if mock:
@@ -75,7 +75,7 @@ def run_desktop_mode(port: int, mock: bool, host: str = ""):
     """
     桌面模式：pywebview 窗口 + 后台 uvicorn
     """
-    bind_host = host or "127.0.0.1"
+    bind_host = host or "0.0.0.0"
 
     try:
         import webview
@@ -164,7 +164,8 @@ def main():
     parser.add_argument("--dev", action="store_true", help="开发模式（纯 HTTP，不启动桌面窗口）")
     parser.add_argument("--mock", action="store_true", help="Mock 模式（macOS 开发用）")
     parser.add_argument("--port", type=int, default=0, help="HTTP 端口（0=自动分配）")
-    parser.add_argument("--host", type=str, default="", help="绑定地址（0.0.0.0=局域网可访问，macOS远程调试用）")
+    parser.add_argument("--host", type=str, default="0.0.0.0",
+                        help="绑定地址 (默认 0.0.0.0=局域网可访问; 仅本机用 127.0.0.1)")
     parser.add_argument("--debug", action="store_true", help="调试日志")
 
     args = parser.parse_args()

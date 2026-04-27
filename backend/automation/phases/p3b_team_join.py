@@ -24,19 +24,33 @@ class P3bTeamJoinHandler(PhaseHandler):
         if runner is None:
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
+        from ..recorder_helpers import record_signal_tier
+        decision = ctx.current_decision
         scheme = ctx.game_scheme_url
         if not scheme:
+            record_signal_tier(decision, name="加入流程", hit=False, tier_idx=3,
+                               note="scheme 为空")
             return PhaseStep(
                 PhaseResult.FAIL,
                 note="game_scheme_url 为空 (队长还没创建队伍 / runner_service 没注入)",
+                outcome_hint="team_join_no_scheme",
             )
 
         try:
             ok = await runner.phase_team_join(scheme)
         except Exception as e:
+            record_signal_tier(decision, name="加入流程", hit=False, tier_idx=3,
+                               note=f"phase_team_join 异常: {e}")
             logger.error(f"[P3b] phase_team_join 异常: {e}")
-            return PhaseStep(PhaseResult.FAIL, note=f"team_join 异常: {e}")
+            return PhaseStep(PhaseResult.FAIL, note=f"team_join 异常: {e}",
+                             outcome_hint="team_join_exception")
 
         if ok:
-            return PhaseStep(PhaseResult.DONE, note="加入队伍成功")
-        return PhaseStep(PhaseResult.FAIL, note="加入队伍失败")
+            record_signal_tier(decision, name="加入流程", hit=True, tier_idx=3,
+                               note=f"加入成功 scheme={scheme[:32]}")
+            return PhaseStep(PhaseResult.DONE, note="加入队伍成功",
+                             outcome_hint="team_join_ok")
+        record_signal_tier(decision, name="加入流程", hit=False, tier_idx=3,
+                           note="phase_team_join 返回 False")
+        return PhaseStep(PhaseResult.FAIL, note="加入队伍失败",
+                         outcome_hint="team_join_fail")

@@ -60,6 +60,20 @@ _TRANSITIONS: dict[tuple[FsmState, PhaseResult], FsmState] = {
 }
 
 
+_RESULT_OUTCOME = {
+    PhaseResult.NEXT: "phase_next",
+    PhaseResult.RETRY: "retry",
+    PhaseResult.WAIT: "wait",
+    PhaseResult.FAIL: "phase_fail",
+    PhaseResult.GAME_RESTART: "game_restart",
+    PhaseResult.DONE: "phase_done",
+}
+
+
+def _result_to_outcome(r: PhaseResult) -> str:
+    return _RESULT_OUTCOME.get(r, str(r))
+
+
 class _PhaseFailError(Exception):
     """RunnerFSM 内部异常, 翻译成 runner_service 的 _PhaseError."""
     def __init__(self, state: FsmState, reason: str):
@@ -136,6 +150,9 @@ class RunnerFSM:
 
     async def _loop_phase(self, handler: PhaseHandler) -> PhaseResult:
         """跑一个 phase 直到出 NEXT/FAIL/GAME_RESTART/DONE 或超 max_rounds."""
+        from .decision_log import get_recorder
+        recorder = get_recorder()
+
         for rnd in range(handler.max_rounds):
             self._ctx.phase_round = rnd + 1
 
@@ -150,22 +167,70 @@ class RunnerFSM:
                 await asyncio.sleep(0.3)
                 continue
 
+            # 开决策记录 (本轮)
+            phash_str = ""
+            try:
+                from .adb_lite import phash as _phash
+                phash_int = _phash(shot)
+                phash_str = f"0x{int(phash_int):016x}" if phash_int else ""
+                self._ctx.current_phash = phash_str
+            except Exception:
+                pass
+            decision = None
+            try:
+                decision = recorder.new_decision(
+                    instance=self._ctx.instance_idx,
+                    phase=handler.name,
+                    round_idx=self._ctx.phase_round,
+                )
+                decision.set_input(shot, phash_str, q=70)
+                self._ctx.current_decision = decision
+            except Exception as e:
+                logger.debug(f"[{handler.name}] new_decision err: {e}")
+                self._ctx.current_decision = decision
+
             # 调 handler 决策
+            step: Optional[PhaseStep] = None
+            handle_exc: Optional[Exception] = None
             try:
                 step = await handler.handle_frame(self._ctx)
             except Exception as e:
+                handle_exc = e
                 logger.warning(f"[{handler.name}] handle_frame 异常: {e}", exc_info=True)
-                return await handler.on_failure(self._ctx, e)
 
-            if step.note:
-                logger.info(f"[{handler.name}/R{rnd + 1}] {step.note}")
-
-            # 实施 action
-            if step.action is not None:
+            # 实施 action (在 handle_frame 之后, finalize 之前 — set_tap/set_verify 在 ActionExecutor 里写 ctx.current_decision)
+            if step is not None and step.action is not None:
                 try:
                     await ActionExecutor.apply(self._ctx, step.action)
                 except Exception as e:
                     logger.warning(f"[{handler.name}] ActionExecutor 异常: {e}")
+
+            # finalize 决策记录
+            try:
+                outcome = ""
+                note = ""
+                if step is not None:
+                    note = step.note or ""
+                    if step.outcome_hint:
+                        outcome = step.outcome_hint
+                    else:
+                        outcome = _result_to_outcome(step.result)
+                else:
+                    outcome = "phase_exception"
+                    note = repr(handle_exc) if handle_exc else ""
+                if decision is not None:
+                    decision.finalize(outcome=outcome, note=note)
+            except Exception as e:
+                logger.debug(f"[{handler.name}] finalize err: {e}")
+            finally:
+                self._ctx.current_decision = None
+
+            # handle_frame 抛异常 → on_failure
+            if handle_exc is not None:
+                return await handler.on_failure(self._ctx, handle_exc)
+
+            if step.note:
+                logger.info(f"[{handler.name}/R{rnd + 1}] {step.note}")
 
             # 终态 → 立即返回
             if step.result in (

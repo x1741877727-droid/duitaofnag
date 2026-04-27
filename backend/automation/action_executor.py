@@ -72,6 +72,22 @@ class ActionExecutor:
             return True
         ctx.last_tap_xy = (cx, cy)
 
+        # 写 decision.tap (含红圈标注图)
+        decision = getattr(ctx, "current_decision", None)
+        if decision is not None:
+            try:
+                decision.set_tap(
+                    cx, cy,
+                    method=act.label or "tap",
+                    target_class=act.label or "",
+                    target_text=str((act.payload or {}).get("template_name", ""))
+                                 or str((act.payload or {}).get("memory_note", "")),
+                    target_conf=float((act.payload or {}).get("conf", 0.0)),
+                    screenshot=shot_before,
+                )
+            except Exception as e:
+                logger.debug(f"[executor] set_tap err: {e}")
+
         # tap 后等待 (默认 0.4s, 让画面有时间响应)
         await asyncio.sleep(act.seconds if act.seconds > 0 else 0.4)
 
@@ -89,6 +105,21 @@ class ActionExecutor:
             return True
         if shot_after is None:
             return True
+
+        # 写 decision.verify (phash before/after + distance)
+        if decision is not None:
+            try:
+                from .adb_lite import phash as _phash
+                pa = _phash(shot_before)
+                pb = _phash(shot_after)
+                dist = bin(int(pa) ^ int(pb)).count("1") if (pa and pb) else 0
+                decision.set_verify(
+                    before=f"0x{int(pa):016x}" if pa else "",
+                    after=f"0x{int(pb):016x}" if pb else "",
+                    distance=int(dist),
+                )
+            except Exception as e:
+                logger.debug(f"[executor] set_verify err: {e}")
 
         # 防线 1+2: state_expectation 综合判定 (内部含 phash + 自定义 verifier)
         try:
