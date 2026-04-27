@@ -718,7 +718,14 @@ class YoloDismisser:
             await device.tap(tap_xy[0], tap_xy[1])
             popups_closed += 1
             lobby_confirm = 0
-            await asyncio.sleep(0.5)
+            # tap 登录按钮后游戏要 3-8 秒加载, 期间 P2 sleep 不动作避免重复 tap
+            if target_class == "login_btn":
+                logger.info(
+                    f"[Y{rnd + 1}] 登录 tap 完成, sleep 8s 等游戏加载 (避免重复点)"
+                )
+                await asyncio.sleep(8.0)
+            else:
+                await asyncio.sleep(0.5)
 
             # tap 后验证：防线 1 phash 比对 + 防线 2 State Expectation
             outcome = "tapped"
@@ -777,24 +784,37 @@ class YoloDismisser:
                                     f"[时间] dismiss_popups: 第一次成功关闭 "
                                     f"+{_t_first_dismiss_ok_ms:.0f}ms"
                                 )
-                            # ── Memory L1 缓冲 (延迟写入) ──
-                            # 不立即写, 缓冲到 P2 全程结束 + return success 时才 commit.
-                            # 避免"中间 tap 错了画面变了" 污染 Memory.
+                            # ── Memory L1 缓冲 (延迟写入 + 去重) ──
+                            # 不立即写, 缓冲到 P2 success 时才 commit.
                             # tap 来源是 memory_hit 时不缓冲 (避免 Memory 自我强化循环).
+                            # 同 method + 坐标 < 30px → 去重 (短时间内重复 tap 不算多次学习).
                             if memory is not None and target_class != "memory_hit":
-                                try:
-                                    pending_memory_writes.append((
-                                        shot.copy(),
-                                        (tap_xy[0], tap_xy[1]),
-                                        target_class,
-                                    ))
+                                already_buffered = any(
+                                    m == target_class
+                                    and abs(ax - tap_xy[0]) < 30
+                                    and abs(ay - tap_xy[1]) < 30
+                                    for (_f, (ax, ay), m) in pending_memory_writes
+                                )
+                                if already_buffered:
                                     logger.info(
-                                        f"[Y{rnd + 1}] 🧠 Memory 缓冲 "
-                                        f"({tap_xy[0]},{tap_xy[1]}) method={target_class} "
-                                        f"(待 P2 success 后 commit, 当前 buffer={len(pending_memory_writes)})"
+                                        f"[Y{rnd + 1}] 🧠 Memory 缓冲跳过 "
+                                        f"({tap_xy[0]},{tap_xy[1]}) "
+                                        f"method={target_class} (已在 buffer)"
                                     )
-                                except Exception as _me:
-                                    logger.debug(f"[memory] buffer err: {_me}")
+                                else:
+                                    try:
+                                        pending_memory_writes.append((
+                                            shot.copy(),
+                                            (tap_xy[0], tap_xy[1]),
+                                            target_class,
+                                        ))
+                                        logger.info(
+                                            f"[Y{rnd + 1}] 🧠 Memory 缓冲 "
+                                            f"({tap_xy[0]},{tap_xy[1]}) method={target_class} "
+                                            f"(待 P2 success 后 commit, buffer={len(pending_memory_writes)})"
+                                        )
+                                    except Exception as _me:
+                                        logger.debug(f"[memory] buffer err: {_me}")
                     except Exception as _ee:
                         logger.debug(f"[Y{rnd + 1}] expectation verify err: {_ee}")
             except Exception:
