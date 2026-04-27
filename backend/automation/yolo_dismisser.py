@@ -28,7 +28,25 @@ from . import metrics
 logger = logging.getLogger(__name__)
 
 
-CLASSES = ["close_x", "action_btn"]
+def _load_classes() -> list[str]:
+    """从 user_yolo_dir/classes.txt 读 CLASSES (跟训练时一致). 不存在 fallback 内置.
+    模块加载时调一次, runtime 改 classes.txt 不会生效 (改了要重启 exe — 通常伴随
+    训新模型, 重启是预期流程)."""
+    try:
+        from .user_paths import user_yolo_dir
+        p = user_yolo_dir() / "classes.txt"
+        if p.is_file():
+            lines = [x.strip() for x in p.read_text(encoding="utf-8").splitlines()
+                     if x.strip() and not x.strip().startswith("#")]
+            if lines:
+                logger.info(f"[yolo] classes from {p}: {lines}")
+                return lines
+    except Exception as e:
+        logger.warning(f"[yolo] 读 classes.txt 失败, fallback: {e}")
+    return ["close_x", "action_btn"]
+
+
+CLASSES = _load_classes()
 CONF_THRESHOLD = 0.30   # 检测下限：低于此值丢弃
 TAP_CONF_CLOSE = 0.50   # 点击 close_x 下限
 TAP_CONF_ACTION = 0.50  # 点击 action_btn 下限
@@ -319,6 +337,16 @@ class YoloDismisser:
         last_tap = (0, 0)
         same_target_count = 0
         empty_dets_streak = 0  # 连续多少轮 YOLO 没检到 close_x/action_btn
+
+        # v2-10 会话级失败黑名单: State Expectation 失败的 (cx, cy)
+        # 本 P2 期间不再 tap. 距离 < 30px 视为同一目标.
+        # 修用户痛点: '反复点同一坐标都失败 还在点'
+        session_invalid_coords: list = []  # [(cx, cy)]
+        def _is_blacklisted(cx: int, cy: int) -> bool:
+            return any(
+                abs(cx - ix) < 30 and abs(cy - iy) < 30
+                for (ix, iy) in session_invalid_coords
+            )
 
         # ── v2-4 Memory L1: 见过这个画面 → 直接 tap 历史成功坐标 ──
         # 跨实例共享 (同 PC), 用户教 / YOLO 成功 / CTA 成功 都自动入库
@@ -790,6 +818,13 @@ class YoloDismisser:
                                 f"[Y{rnd + 1}] State Expectation 失败 [{expect_label}]: "
                                 f"{exp_r.note}"
                             )
+                            # 加入会话黑名单 — 本 P2 不再 tap 这个坐标
+                            if not _is_blacklisted(tap_xy[0], tap_xy[1]):
+                                session_invalid_coords.append((tap_xy[0], tap_xy[1]))
+                                logger.warning(
+                                    f"[Y{rnd + 1}] 加入会话黑名单 ({tap_xy[0]},{tap_xy[1]}) "
+                                    f"(本 P2 不再 tap, 黑名单大小={len(session_invalid_coords)})"
+                                )
                             # ── Memory L1 写入 (失败) ──
                             if memory is not None:
                                 try:
