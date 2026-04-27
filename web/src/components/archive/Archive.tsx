@@ -233,45 +233,48 @@ function SessionView({
         </Button>
       </div>
 
-      {/* 各实例进度概览 */}
+      {/* 实例进度 — 紧凑版 (一行 = 一实例, 6 阶段 stepper) */}
       {Object.keys(byInst).length > 0 && (
-        <div className="rounded-lg border border-border bg-card p-3 space-y-2">
-          <div className="text-xs font-semibold text-foreground">实例进度</div>
-          <div className="space-y-1.5">
-            {Object.keys(byInst).map(Number).sort((a, b) => a - b).map((idx) => {
-              const p = progressByInst[idx]
-              return (
-                <div key={idx} className="flex items-center gap-2 text-xs">
-                  <span className="font-mono font-semibold w-8">#{idx}</span>
-                  <div className="flex gap-1 flex-1">
-                    {PHASE_ORDER.map((ph) => {
-                      const cnt = p?.counts[ph] || 0
-                      const isCur = p?.current === ph
-                      return (
+        <div className="space-y-1">
+          {Object.keys(byInst).map(Number).sort((a, b) => a - b).map((idx) => {
+            const p = progressByInst[idx]
+            return (
+              <div key={idx} className="flex items-center gap-2 text-[11px] py-0.5">
+                <span className="font-mono font-bold w-7 text-foreground shrink-0">#{idx}</span>
+                <div className="flex items-center gap-px flex-1">
+                  {PHASE_ORDER.map((ph, i) => {
+                    const cnt = p?.counts[ph] || 0
+                    const isCur = p?.current === ph
+                    const visited = cnt > 0
+                    return (
+                      <div key={ph} className="flex items-center gap-px flex-1">
                         <div
-                          key={ph}
-                          className={`flex-1 px-2 py-1 rounded text-center text-[11px] border transition ${
+                          className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] flex-1 justify-center transition ${
                             isCur
-                              ? 'bg-primary text-primary-foreground border-primary font-semibold'
-                              : cnt > 0
-                                ? 'bg-success-muted text-success border-success/30'
-                                : 'bg-card border-border text-muted-foreground'
+                              ? 'bg-primary text-primary-foreground font-bold'
+                              : visited
+                                ? 'bg-success/15 text-success'
+                                : 'bg-muted text-muted-foreground'
                           }`}
-                          title={`${ph} ${PHASE_NAME[ph]}: ${cnt} 决策${isCur ? ' (当前)' : ''}`}
+                          title={`${PHASE_NAME[ph]}: ${cnt} 决策${isCur ? ' (当前 ●)' : ''}`}
                         >
-                          <span className="font-mono">{ph}</span>
-                          <span className="ml-1 opacity-70">{cnt}</span>
+                          {isCur && <span className="w-1 h-1 rounded-full bg-primary-foreground animate-pulse" />}
+                          <span className="font-mono">{PHASE_NAME[ph]}</span>
+                          {cnt > 0 && <span className="opacity-70 font-mono">{cnt}</span>}
                         </div>
-                      )
-                    })}
-                  </div>
-                  <span className="text-muted-foreground text-[11px]">
-                    {p?.toLobby || 0} 次到大厅
-                  </span>
+                        {i < PHASE_ORDER.length - 1 && (
+                          <span className={`text-muted-foreground/50 text-[8px]`}>›</span>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
-              )
-            })}
-          </div>
+                <span className="font-mono text-muted-foreground shrink-0 w-20 text-right">
+                  到大厅 {p?.toLobby || 0}
+                </span>
+              </div>
+            )
+          })}
         </div>
       )}
 
@@ -360,10 +363,46 @@ function OutcomeIcon({ outcome, verifySuccess }: { outcome: string; verifySucces
 }
 
 
+// outcome → flow_step 序号 (前端启发式映射, 用于在阶段步骤里高亮"目前到哪步")
+const OUTCOME_TO_STEP_IDX: Record<string, number> = {
+  // P0
+  vpn_already_connected: 0,
+  vpn_broadcast_ok: 1,
+  vpn_ui_ok: 2,
+  vpn_all_failed: 3,
+  // P1 / 通用
+  lobby_template_hit: 0,
+  popup_or_login_template_hit: 1,
+  yolo_dets_seen: 2,
+  // P2
+  lobby_confirmed_quad: 1,           // step 1: 守门 1 大厅判
+  lobby_pending_1: 1, lobby_pending_2: 1,
+  login_timeout_fail: 2,             // step 2: 登录守门
+  tapped: 3,                         // step 3: 决策 → tap
+  loop_blocked: 4,                   // step 4: 防死循环
+  lobby_confirmed_legacy: 5,         // step 5: 兜底
+  no_target: 5,
+  dead_screen: 6,                    // step 6: 死屏
+  // P3a / P3b / P4 → 简单按是否成功
+  team_create_ok: 6, team_create_fail: 6, team_create_exception: 6,
+  team_join_ok: 3, team_join_fail: 3, team_join_exception: 3,
+  team_join_no_scheme: 0,
+  map_setup_ok: 4, map_setup_fail: 4, map_setup_exception: 4,
+}
+
+interface PhaseDocData {
+  key: string
+  name: string
+  description: string
+  flow_steps: string[]
+  max_rounds: number
+}
+
 function DecisionDetail({ decisionId, session }: { decisionId: string; session: string }) {
   const [data, setData] = useState<DecisionData | null>(null)
   const [loading, setLoading] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState<string>('')
+  const [phaseDoc, setPhaseDoc] = useState<PhaseDocData | null>(null)
 
   useEffect(() => {
     if (!decisionId) {
@@ -378,6 +417,17 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [decisionId, session])
+
+  // 拉对应 phase 的 doc (description + flow_steps)
+  useEffect(() => {
+    if (!data?.phase) { setPhaseDoc(null); return }
+    let cancelled = false
+    fetch(`/api/runner/phase_doc/${encodeURIComponent(data.phase)}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (!cancelled && d) setPhaseDoc(d) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [data?.phase])
 
   useEffect(() => {
     if (!lightboxSrc) return
@@ -421,6 +471,46 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {/* 阶段步骤 stepper — 高亮当前 outcome 推算的步骤 */}
+        {phaseDoc && phaseDoc.flow_steps.length > 0 && (
+          <div className="rounded-lg border border-border bg-secondary/50 p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-semibold text-foreground">
+                {phaseDoc.name} · 流程步骤
+              </span>
+              {phaseDoc.description && (
+                <span className="text-muted-foreground italic">{phaseDoc.description}</span>
+              )}
+            </div>
+            <ol className="space-y-1">
+              {phaseDoc.flow_steps.map((s, i) => {
+                const curIdx = OUTCOME_TO_STEP_IDX[data.outcome]
+                const isCur = curIdx === i
+                const isPast = curIdx !== undefined && i < curIdx
+                return (
+                  <li
+                    key={i}
+                    className={`flex items-start gap-2 px-2 py-1 rounded text-[12px] transition ${
+                      isCur
+                        ? 'bg-primary/10 border-l-2 border-primary text-foreground font-medium'
+                        : isPast
+                          ? 'text-muted-foreground'
+                          : 'text-muted-foreground/70'
+                    }`}
+                  >
+                    <span className={`font-mono text-[10px] w-5 shrink-0 ${
+                      isCur ? 'text-primary font-bold' : 'text-muted-foreground'
+                    }`}>
+                      {isCur ? '►' : isPast ? '✓' : (i + 1)}
+                    </span>
+                    <span>{s}</span>
+                  </li>
+                )
+              })}
+            </ol>
+          </div>
+        )}
+
         {/* 三联截图 (点击放大) */}
         <div className="grid gap-2" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
           {(() => {
@@ -554,6 +644,7 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
 }
 
 function TierRow({ t }: { t: DecisionTier }) {
+  const [popoverTpl, setPopoverTpl] = useState<string>('')
   const winner = t.early_exit
   return (
     <div className={`rounded border p-2 text-xs ${
@@ -571,12 +662,19 @@ function TierRow({ t }: { t: DecisionTier }) {
           {t.templates.map((tp, i) => (
             <li key={i} className="flex items-center gap-2 font-mono text-[10px]">
               <span className={tp.hit ? 'text-success' : 'text-muted-foreground'}>{tp.hit ? '✓' : '·'}</span>
-              <span className="flex-1 truncate">{tp.name}</span>
+              <button
+                onClick={() => setPopoverTpl(tp.name)}
+                className="flex-1 truncate text-left underline decoration-dotted hover:text-info hover:decoration-solid"
+                title={`点击查看模版图 ${tp.name}`}
+              >
+                {tp.name}
+              </button>
               <span className="text-muted-foreground">{tp.score.toFixed(3)}</span>
             </li>
           ))}
         </ul>
       )}
+      {popoverTpl && <TemplatePreview name={popoverTpl} onClose={() => setPopoverTpl('')} />}
       {t.yolo_detections && t.yolo_detections.length > 0 && (
         <ul className="mt-1 space-y-0.5">
           {t.yolo_detections.slice(0, 6).map((d, i) => (
@@ -593,6 +691,53 @@ function TierRow({ t }: { t: DecisionTier }) {
           ◆ phash {t.memory_phash_query} → ({t.memory_hit.cx}, {t.memory_hit.cy})
         </div>
       )}
+    </div>
+  )
+}
+
+
+function TemplatePreview({ name, onClose }: { name: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-foreground/85 flex items-center justify-center p-6"
+      onClick={onClose}
+    >
+      <div
+        className="bg-card rounded-lg shadow-xl max-w-[min(700px,90vw)] max-h-[85vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
+          <span className="text-sm font-semibold">模版预览</span>
+          <span className="font-mono text-xs text-muted-foreground">{name}</span>
+          <button
+            onClick={onClose}
+            className="ml-auto text-muted-foreground hover:text-foreground text-sm"
+          >✕</button>
+        </div>
+        <div className="flex-1 bg-foreground/95 flex items-center justify-center p-3 overflow-hidden">
+          <img
+            src={`/api/templates/file/${encodeURIComponent(name)}`}
+            alt={name}
+            className="max-w-full max-h-[70vh] object-contain"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).replaceWith(
+                Object.assign(document.createElement('div'), {
+                  className: 'text-background/60 text-xs',
+                  textContent: '模版图找不到 (可能已删除)',
+                }),
+              )
+            }}
+          />
+        </div>
+        <div className="px-3 py-2 text-[11px] text-muted-foreground border-t border-border">
+          ESC / 点空白 关闭 · 想看更多详情请去「模版库」找 <span className="font-mono">{name}</span>
+        </div>
+      </div>
     </div>
   )
 }

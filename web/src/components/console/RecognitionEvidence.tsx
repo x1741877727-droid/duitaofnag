@@ -34,9 +34,10 @@ interface DecisionData {
   tiers: TierData[]
 }
 
-export function RecognitionEvidence() {
-  const focused = useAppStore((s) => s.focusedInstance)
+export function RecognitionEvidence({ instanceIdx }: { instanceIdx?: number } = {}) {
+  const focusedFromStore = useAppStore((s) => s.focusedInstance)
   const liveDecisions = useAppStore((s) => s.liveDecisions)
+  const focused = instanceIdx !== undefined ? instanceIdx : focusedFromStore
 
   const latest = focused !== null ? (liveDecisions[focused] || []).slice(-1)[0] : null
   const decisionId = latest?.id || ''

@@ -36,86 +36,44 @@ export function Header() {
         <h1 className="text-lg font-bold text-foreground tracking-tight shrink-0">FightMaster</h1>
 
         <nav className="flex items-center gap-0.5 min-w-0 overflow-x-auto">
-          <Button
-            variant={currentView === 'dashboard' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('dashboard')}
-            className="gap-1.5 px-2 shrink-0"
-            title="运行控制"
-          >
-            <LayoutDashboard className="h-4 w-4" />
-            <span className="hidden xl:inline">运行</span>
-          </Button>
-          <Button
-            variant={currentView === 'console' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('console')}
-            className="gap-1.5 px-2 shrink-0"
-            title="中控台"
-          >
-            <Activity className="h-4 w-4" />
-            <span className="hidden xl:inline">中控台</span>
-          </Button>
-          <Button
-            variant={currentView === 'archive' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('archive')}
-            className="gap-1.5 px-2 shrink-0"
-            title="决策档案"
-          >
-            <Archive className="h-4 w-4" />
-            <span className="hidden xl:inline">档案</span>
-          </Button>
-          <Button
-            variant={currentView === 'templates' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('templates')}
-            className="gap-1.5 px-2 shrink-0"
-            title="模版库"
-          >
-            <Image className="h-4 w-4" />
-            <span className="hidden xl:inline">模版</span>
-          </Button>
-          <Button
-            variant={currentView === 'yolo' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('yolo')}
-            className="gap-1.5 px-2 shrink-0"
-            title="YOLO"
-          >
-            <Crosshair className="h-4 w-4" />
-            <span className="hidden xl:inline">YOLO</span>
-          </Button>
-          <Button
-            variant={currentView === 'memory' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('memory')}
-            className="gap-1.5 px-2 shrink-0"
-            title="记忆库"
-          >
-            <Brain className="h-4 w-4" />
-            <span className="hidden xl:inline">记忆</span>
-          </Button>
-          <Button
-            variant={currentView === 'perf' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('perf')}
-            className="gap-1.5 px-2 shrink-0"
-            title="性能监控"
-          >
-            <BarChart3 className="h-4 w-4" />
-            <span className="hidden xl:inline">性能</span>
-          </Button>
-          <Button
-            variant={currentView === 'settings' ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setCurrentView('settings')}
-            className="gap-1.5 px-2 shrink-0"
-            title="设置"
-          >
-            <Settings className="h-4 w-4" />
-            <span className="hidden xl:inline">设置</span>
-          </Button>
+          {([
+            { key: 'dashboard', label: '运行', Icon: LayoutDashboard, title: '运行控制' },
+            { key: 'console', label: '中控台', Icon: Activity, title: '中控台' },
+            { key: 'archive', label: '档案', Icon: Archive, title: '决策档案' },
+            { key: 'templates', label: '模版', Icon: Image, title: '模版库' },
+            { key: 'yolo', label: 'YOLO', Icon: Crosshair, title: 'YOLO' },
+            { key: 'memory', label: '记忆', Icon: Brain, title: '记忆库' },
+            { key: 'perf', label: '性能', Icon: BarChart3, title: '性能监控' },
+            { key: 'settings', label: '设置', Icon: Settings, title: '设置' },
+          ] as const).map(({ key, label, Icon, title }) => {
+            const active = currentView === key
+            return (
+              <Button
+                key={key}
+                variant={active ? 'secondary' : 'ghost'}
+                size="sm"
+                onClick={() => setCurrentView(key)}
+                className={cn(
+                  'gap-1.5 px-2 shrink-0 transition-all duration-200 ease-out',
+                  active && 'px-3 font-semibold',
+                )}
+                title={title}
+              >
+                <Icon className="h-4 w-4" />
+                {/* 选中: 永远显文字; 未选中: xl 屏才显 */}
+                <span
+                  className={cn(
+                    'overflow-hidden transition-all duration-200',
+                    active
+                      ? 'max-w-[80px] opacity-100'
+                      : 'max-w-0 opacity-0 xl:max-w-[80px] xl:opacity-100',
+                  )}
+                >
+                  {label}
+                </span>
+              </Button>
+            )
+          })}
         </nav>
       </div>
 

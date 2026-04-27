@@ -69,8 +69,11 @@ export function InstancesOverview() {
   const instances = useAppStore((s) => s.instances)
   const emulators = useAppStore((s) => s.emulators)
   const liveDecisions = useAppStore((s) => s.liveDecisions)
-  const focusedInstance = useAppStore((s) => s.focusedInstance)
-  const setFocusedInstance = useAppStore((s) => s.setFocusedInstance)
+  const selectedInstances = useAppStore((s) => s.selectedInstances)
+  const toggleInstanceSelection = useAppStore((s) => s.toggleInstanceSelection)
+  const setSelectedInstances = useAppStore((s) => s.setSelectedInstances)
+  const clearInstanceSelection = useAppStore((s) => s.clearInstanceSelection)
+  const selSet = new Set(selectedInstances)
 
   const cards = useMemo(() => {
     const ids = new Set<number>()
@@ -106,17 +109,35 @@ export function InstancesOverview() {
     )
   }
 
+  const allRunning = cards.filter((c) => c.emuRunning).map((c) => c.index)
+  const allSelected = allRunning.length > 0 && allRunning.every((i) => selSet.has(i))
+
   return (
-    <div className="grid gap-2"
-         style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
+    <div className="space-y-2">
+      {/* 多选操作栏 */}
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">
+          已选 <span className="font-mono font-bold text-foreground">{selectedInstances.length}</span> / {cards.length}
+          <span className="ml-2 text-[11px]">(单击切换 · 多选可分屏 · Cmd/Ctrl 同样)</span>
+        </span>
+        <button
+          onClick={() => allSelected ? clearInstanceSelection() : setSelectedInstances(allRunning)}
+          className="ml-2 px-2 py-0.5 rounded border border-border text-xs hover:border-primary/40"
+        >
+          {allSelected ? '清空' : '全选运行中'}
+        </button>
+      </div>
+
+      <div className="grid gap-2"
+           style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
       {cards.map((c) => {
-        const focused = focusedInstance === c.index
+        const focused = selSet.has(c.index)
         const dotCls = STATE_DOT[c.state] || 'bg-muted-foreground/30'
         const txtCls = STATE_TEXT[c.state] || 'text-foreground'
         return (
           <button
             key={c.index}
-            onClick={() => setFocusedInstance(focused ? null : c.index)}
+            onClick={() => toggleInstanceSelection(c.index)}
             className={cn(
               'rounded-lg border bg-card text-left transition-all overflow-hidden',
               focused
@@ -163,6 +184,7 @@ export function InstancesOverview() {
           </button>
         )
       })}
+      </div>
     </div>
   )
 }

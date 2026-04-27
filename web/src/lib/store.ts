@@ -187,9 +187,15 @@ interface AppState {
   phaseHistory: Record<number, { from: string; to: string; ts: number }[]>
   pushPhaseChange: (ev: PhaseChangeEvent) => void
 
-  // 选中实例 (中控台聚焦哪一个)
+  // 选中实例 (中控台聚焦哪一个; 兼容字段)
   focusedInstance: number | null
   setFocusedInstance: (idx: number | null) => void
+
+  // 多选实例 (中控台分屏 + 阶段测试自动注入)
+  selectedInstances: number[]
+  toggleInstanceSelection: (idx: number) => void
+  setSelectedInstances: (list: number[]) => void
+  clearInstanceSelection: () => void
 }
 
 const MAX_LIVE_PER_INSTANCE = 50
@@ -289,7 +295,30 @@ export const useAppStore = create<AppState>((set) => ({
   }),
 
   focusedInstance: null,
-  setFocusedInstance: (idx) => set({ focusedInstance: idx }),
+  setFocusedInstance: (idx) => set((state) => {
+    // 设单选 = 同步 selected (单元素); idx=null 清空
+    return {
+      focusedInstance: idx,
+      selectedInstances: idx === null ? [] : [idx],
+    }
+  }),
+
+  selectedInstances: [],
+  toggleInstanceSelection: (idx) => set((state) => {
+    const cur = state.selectedInstances
+    const has = cur.includes(idx)
+    const next = has ? cur.filter((x) => x !== idx) : [...cur, idx].sort((a, b) => a - b)
+    return {
+      selectedInstances: next,
+      // focusedInstance 兼容: 单选 = 该 idx, 多/空 = null
+      focusedInstance: next.length === 1 ? next[0] : null,
+    }
+  }),
+  setSelectedInstances: (list) => set({
+    selectedInstances: [...list].sort((a, b) => a - b),
+    focusedInstance: list.length === 1 ? list[0] : null,
+  }),
+  clearInstanceSelection: () => set({ selectedInstances: [], focusedInstance: null }),
 }))
 
 // 状态配置

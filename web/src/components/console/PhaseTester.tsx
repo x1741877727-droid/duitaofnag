@@ -33,6 +33,7 @@ export function PhaseTester() {
   const isRunning = useAppStore((s) => s.isRunning)
   const emulators = useAppStore((s) => s.emulators)
   const instances = useAppStore((s) => s.instances)
+  const selectedInstances = useAppStore((s) => s.selectedInstances)
   const availableInstances = useMemo(() => {
     const ids = new Set<number>()
     for (const e of emulators) ids.add(e.index)
@@ -43,10 +44,14 @@ export function PhaseTester() {
     }))
   }, [instances, emulators])
 
+  // 阶段测试用的实例列表 = 中控台多选 (没选时回退手动单选)
+  const useFromConsole = selectedInstances.length > 0
+  const targetsFromConsole = useFromConsole ? selectedInstances : []
+
   const [phases, setPhases] = useState<PhaseDef[]>([])
   const [selKeys, setSelKeys] = useState<string[]>([])     // 多选 (按勾选顺序)
   const [expanded, setExpanded] = useState<string | null>(null)
-  const [selInst, setSelInst] = useState<number | null>(null)
+  const [selInst, setSelInst] = useState<number | null>(null)   // 仅在没多选时用
   const [selRole, setSelRole] = useState<'captain' | 'member'>('captain')
   const [keepGoing, setKeepGoing] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -65,39 +70,60 @@ export function PhaseTester() {
     setBusy(true)
     setResults([])
     setProgress('')
-    const tgt = selInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
-    if (tgt === undefined) {
-      setResults([{ phase: '-', phase_name: '-', ok: false, error: '没选实例' }])
+
+    // 目标实例: 优先用 console 多选; 否则手动单选
+    let targets: number[]
+    if (useFromConsole) {
+      targets = targetsFromConsole
+    } else {
+      const t = selInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
+      targets = t === undefined ? [] : [t]
+    }
+    if (targets.length === 0) {
+      setResults([{ phase: '-', phase_name: '-', ok: false, error: '没可用实例 (中控台选实例 或 这里选)' }])
       setBusy(false)
       return
     }
+
+    const total = targets.length * selKeys.length
+    let cursor = 0
     const out: RunResult[] = []
-    for (let i = 0; i < selKeys.length; i++) {
-      const phase = selKeys[i]
-      setProgress(`跑 ${i + 1}/${selKeys.length} · ${phase}`)
-      try {
-        const r = await fetch('/api/runner/test_phase', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instance: tgt, phase, role: selRole }),
-        })
-        const data = await r.json()
-        if (!r.ok) {
-          out.push({ phase, phase_name: phase, ok: false, error: data.detail || data.error || `HTTP ${r.status}` })
+    for (const tgt of targets) {
+      for (let i = 0; i < selKeys.length; i++) {
+        cursor += 1
+        const phase = selKeys[i]
+        setProgress(`跑 ${cursor}/${total} · #${tgt} ${phase}`)
+        try {
+          const r = await fetch('/api/runner/test_phase', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instance: tgt, phase, role: selRole }),
+          })
+          const data = await r.json()
+          if (!r.ok) {
+            out.push({
+              phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
+              ok: false, error: data.detail || data.error || `HTTP ${r.status}`,
+            })
+            setResults([...out])
+            if (!keepGoing) { setProgress(''); setBusy(false); return }
+            continue
+          }
+          out.push({
+            phase: `#${tgt}/${phase}`,
+            phase_name: `#${tgt} ${data.phase_name || phase}`,
+            ok: data.ok, duration_ms: data.duration_ms, error: data.error,
+          })
           setResults([...out])
-          if (!keepGoing) break
-          continue
+          if (!data.ok && !keepGoing) { setProgress(''); setBusy(false); return }
+        } catch (e) {
+          out.push({
+            phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
+            ok: false, error: String(e),
+          })
+          setResults([...out])
+          if (!keepGoing) { setProgress(''); setBusy(false); return }
         }
-        out.push({
-          phase, phase_name: data.phase_name || phase,
-          ok: data.ok, duration_ms: data.duration_ms, error: data.error,
-        })
-        setResults([...out])
-        if (!data.ok && !keepGoing) break
-      } catch (e) {
-        out.push({ phase, phase_name: phase, ok: false, error: String(e) })
-        setResults([...out])
-        if (!keepGoing) break
       }
     }
     setProgress('')
@@ -158,23 +184,46 @@ export function PhaseTester() {
         <PhaseDoc def={phases.find((p) => p.key === expanded)!} />
       )}
 
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-semibold">实例:</span>
-        {availableInstances.map((e) => (
-          <Button
-            key={e.index}
-            variant={selInst === e.index ? 'secondary' : 'outline'}
-            size="sm"
-            onClick={() => setSelInst(e.index)}
-            className={!e.running ? 'opacity-60' : ''}
-          >
-            #{e.index}{e.running ? '' : '·停'}
-          </Button>
-        ))}
-        {availableInstances.length === 0 && (
-          <span className="text-[11px] text-muted-foreground">没检测到模拟器</span>
-        )}
-      </div>
+      {useFromConsole ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-semibold">实例:</span>
+          <span className="text-info">
+            从中控台多选 ({targetsFromConsole.length} 个):
+          </span>
+          {targetsFromConsole.map((idx) => (
+            <span
+              key={idx}
+              className="px-2 py-0.5 rounded border border-info/30 bg-info/10 text-info font-mono text-[11px]"
+            >
+              #{idx}
+            </span>
+          ))}
+          <span className="text-[11px] text-muted-foreground ml-1">
+            (改选请到上面实例总览)
+          </span>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-semibold">实例:</span>
+          <span className="text-[11px] text-muted-foreground">
+            (没多选 → 这里挑一个; 或上面实例总览多选可一键串跑)
+          </span>
+          {availableInstances.map((e) => (
+            <Button
+              key={e.index}
+              variant={selInst === e.index ? 'secondary' : 'outline'}
+              size="sm"
+              onClick={() => setSelInst(e.index)}
+              className={!e.running ? 'opacity-60' : ''}
+            >
+              #{e.index}{e.running ? '' : '·停'}
+            </Button>
+          ))}
+          {availableInstances.length === 0 && (
+            <span className="text-[11px] text-muted-foreground">没检测到模拟器</span>
+          )}
+        </div>
+      )}
 
       {selKeys.some((k) => ROLE_PHASES.has(k)) && (
         <div className="flex items-center gap-2 text-xs">
@@ -199,7 +248,11 @@ export function PhaseTester() {
           onClick={runAll}
           className="min-w-[180px]"
         >
-          {busy ? `跑中… ${progress}` : `串跑 ${selKeys.length} 个阶段`}
+          {busy ? `跑中… ${progress}` : (
+            useFromConsole && targetsFromConsole.length > 1
+              ? `串跑 ${selKeys.length} 阶段 × ${targetsFromConsole.length} 实例`
+              : `串跑 ${selKeys.length} 个阶段`
+          )}
         </Button>
         <label className="flex items-center gap-1 text-xs">
           <input

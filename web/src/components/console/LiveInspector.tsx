@@ -8,9 +8,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 
-export function LiveInspector() {
-  const focused = useAppStore((s) => s.focusedInstance)
+export function LiveInspector({ instanceIdx, compact = false }: { instanceIdx?: number; compact?: boolean } = {}) {
+  const focusedFromStore = useAppStore((s) => s.focusedInstance)
   const liveDecisions = useAppStore((s) => s.liveDecisions)
+  // 优先用外部传的 instance, 否则 fallback 单选
+  const focused = instanceIdx !== undefined ? instanceIdx : focusedFromStore
 
   const latestDec = focused !== null ? (liveDecisions[focused] || []).slice(-1)[0] : null
   const decisionId = latestDec?.id || ''
