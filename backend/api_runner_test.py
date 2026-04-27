@@ -42,6 +42,7 @@ class TestPhaseReq(BaseModel):
     instance: int
     phase: str               # P0 / P1 / P2 / P3a / P3b / P4
     role: str = "captain"    # captain / member (P3a 用 captain, P3b 用 member)
+    scheme: Optional[str] = None  # P3b 用: 队长 P3a 跑完吐出来的 scheme URL, 队员加入用
 
 
 @router.get("/api/runner/phases")
@@ -151,6 +152,14 @@ async def test_phase(req: TestPhaseReq):
     # 跑前重置取消令牌
     CANCEL_FLAG["v"] = False
 
+    # 队员 P3b 入口前注入队长的 scheme (前端协调)
+    if req.scheme:
+        try:
+            ctx = runner._build_v3_ctx()
+            ctx.game_scheme_url = req.scheme
+        except Exception as e:
+            logger.debug(f"[test_phase] 注入 scheme 失败: {e}")
+
     # 跑
     t0 = time.perf_counter()
     error: Optional[str] = None
@@ -162,6 +171,15 @@ async def test_phase(req: TestPhaseReq):
         logger.warning(f"[test_phase] _run_v3_phase err: {e}", exc_info=True)
 
     dur_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+    # 队长 P3a 跑完后, ctx.game_scheme_url 已被 P3aHandler 写入 (大组联动用)
+    scheme_out = ""
+    try:
+        ctx = runner._v3_ctx
+        if ctx is not None:
+            scheme_out = ctx.game_scheme_url or ""
+    except Exception:
+        pass
 
     # 决策记录所在 session
     try:
@@ -182,6 +200,7 @@ async def test_phase(req: TestPhaseReq):
         "decision_session": sess_name,
         "fresh_runner": fresh,
         "error": error,
+        "game_scheme_url": scheme_out,   # 队长 P3a 跑完后吐出, 给队员 P3b 用
     }
 
 

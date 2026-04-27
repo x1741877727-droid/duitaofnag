@@ -99,11 +99,14 @@ export function Console() {
           <RecognitionEvidence instanceIdx={sel[0]} />
         </div>
       ) : (
-        // 分屏 2-4
-        <div className="flex-1 flex flex-col gap-2 min-h-0">
-          <div className={`${gridCls} gap-2 flex-1 min-h-0`}>
+        // 分屏 2-4: 每屏限 16:9 + max-h-[280px], 没图也保持紧凑高度
+        <div className="flex flex-col gap-2 min-h-0">
+          <div className={`${gridCls} gap-2`}>
             {sel.map((idx) => (
-              <div key={idx} className="relative min-h-0 rounded-lg border border-border overflow-hidden">
+              <div
+                key={idx}
+                className="relative rounded-lg border border-border overflow-hidden aspect-video max-h-[280px]"
+              >
                 <div className="absolute top-2 left-2 z-10 px-2 py-0.5 bg-foreground/85 text-background text-xs font-mono font-bold rounded">
                   实例 #{idx}
                 </div>

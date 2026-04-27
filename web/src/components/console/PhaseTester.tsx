@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/lib/store'
+import { SquadDialog, type SquadAssignment } from './SquadDialog'
 
 interface PhaseDef {
   key: string
@@ -58,6 +59,7 @@ export function PhaseTester() {
 
   const [phases, setPhases] = useState<PhaseDef[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [squadDialogOpen, setSquadDialogOpen] = useState(false)
 
   useEffect(() => {
     fetch('/api/runner/phases').then((r) => r.json()).then((d) => setPhases(d.phases || [])).catch(() => {})
@@ -69,10 +71,8 @@ export function PhaseTester() {
     setPhaseTester({ selKeys: next })
   }
 
-  async function runAll() {
-    setPhaseTester({ busy: true, progress: '' })
-    clearPhaseResults()
-
+  // 入口: 决定走独立模式还是弹窗 (P3+ 多实例)
+  function onClickRun() {
     let targets: number[]
     if (useFromConsole) {
       targets = targetsFromConsole
@@ -80,11 +80,21 @@ export function PhaseTester() {
       const t = selInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
       targets = t === undefined ? [] : [t]
     }
-    if (targets.length === 0) {
-      addPhaseResult({ phase: '-', phase_name: '-', ok: false, error: '没可用实例' })
-      setPhaseTester({ busy: false })
+    if (targets.length === 0) return
+
+    // 多实例 + 选了 P3+/P4 → 弹窗大组联动
+    const hasSquadPhase = selKeys.some((k) => ROLE_PHASES.has(k))
+    if (targets.length > 1 && hasSquadPhase) {
+      setSquadDialogOpen(true)
       return
     }
+    // 否则 (单实例 / 只跑 P0-P2) 直接独立模式
+    runAllIndependent(targets)
+  }
+
+  async function runAllIndependent(targets: number[]) {
+    setPhaseTester({ busy: true, progress: '' })
+    clearPhaseResults()
 
     const total = targets.length * selKeys.length
     addLog({
@@ -159,6 +169,124 @@ export function PhaseTester() {
       message: `[阶段测试] 全部跑完 ${done}/${total}`,
     })
     // 跑完后清空结果区 + 进度 (按用户要求, 不留垃圾)
+    setPhaseTester({ busy: false, progress: '' })
+    setTimeout(() => clearPhaseResults(), 100)
+  }
+
+
+  // 大组联动模式: 大组之间 Promise.allSettled 并发, 组内 P0-P2 并发, P3a 拿 scheme 同步给队员 P3b, P4 队长收尾
+  async function runAllSquads(squads: SquadAssignment[]) {
+    setSquadDialogOpen(false)
+    setPhaseTester({ busy: true, progress: '' })
+    clearPhaseResults()
+
+    const totalInstances = squads.reduce((n, sq) => n + 1 + sq.members.length, 0)
+    const totalSteps = totalInstances * selKeys.length
+    let done = 0
+    const updateProg = () => setPhaseTester({ progress: `${done}/${totalSteps}` })
+
+    addLog({
+      timestamp: Date.now() / 1000, instance: 'SYS', level: 'info',
+      message: `[阶段测试·大组联动] ${squads.length} 大组 / ${totalInstances} 实例 / ${selKeys.length} 阶段 (${selKeys.join(' → ')})`,
+    })
+
+    async function runPhase(tgt: number, phase: string, role: 'captain' | 'member', scheme?: string): Promise<{ ok: boolean; scheme: string; error: string }> {
+      addLog({
+        timestamp: Date.now() / 1000, instance: tgt, level: 'info',
+        message: `[阶段测试·大组] #${tgt} ${role} 开始 ${phase}…`,
+      })
+      try {
+        const t0 = performance.now()
+        const r = await fetch('/api/runner/test_phase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instance: tgt, phase, role, scheme }),
+        })
+        const data = await r.json()
+        const dur = data.duration_ms ?? (performance.now() - t0)
+        const ok = r.ok && data.ok
+        const errMsg = !r.ok ? (data.detail || `HTTP ${r.status}`) : (data.error || '')
+        done += 1
+        updateProg()
+        addPhaseResult({
+          phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${data.phase_name || phase}`,
+          ok, duration_ms: dur, error: errMsg,
+        })
+        addLog({
+          timestamp: Date.now() / 1000, instance: tgt,
+          level: ok ? 'info' : (errMsg ? 'error' : 'warn'),
+          message: `[阶段测试·大组] #${tgt} ${data.phase_name || phase} ${ok ? '✓ 完成' : '✗ 失败'} (${dur.toFixed(0)}ms)${errMsg ? ' — ' + errMsg : ''}`,
+        })
+        return { ok, scheme: data.game_scheme_url || '', error: errMsg }
+      } catch (e) {
+        done += 1
+        updateProg()
+        const err = String(e)
+        addPhaseResult({
+          phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
+          ok: false, error: err,
+        })
+        addLog({
+          timestamp: Date.now() / 1000, instance: tgt, level: 'error',
+          message: `[阶段测试·大组] #${tgt} ${phase} 异常: ${err}`,
+        })
+        return { ok: false, scheme: '', error: err }
+      }
+    }
+
+    async function runOneSquad(sq: SquadAssignment): Promise<void> {
+      const all = [sq.leader, ...sq.members]
+
+      // P0/P1/P2 (前三): 全组并发
+      const preSquadPhases = selKeys.filter((k) => !ROLE_PHASES.has(k))
+      for (const phase of preSquadPhases) {
+        const results = await Promise.all(all.map((idx) =>
+          runPhase(idx, phase, idx === sq.leader ? 'captain' : 'member')
+        ))
+        if (results.some((r) => !r.ok) && !keepGoing) return
+      }
+
+      // P3a: 队长跑, 拿 scheme
+      let scheme = ''
+      if (selKeys.includes('P3a')) {
+        const r = await runPhase(sq.leader, 'P3a', 'captain')
+        if (!r.ok && !keepGoing) return
+        scheme = r.scheme
+        if (!scheme) {
+          addLog({
+            timestamp: Date.now() / 1000, instance: sq.leader, level: 'warn',
+            message: `[阶段测试·大组] 大组 ${sq.group} 队长 P3a 没拿到 scheme, 队员 P3b 跳过`,
+          })
+        }
+      }
+
+      // P3b: 所有队员并发, 用队长的 scheme
+      if (selKeys.includes('P3b') && sq.members.length > 0) {
+        if (!scheme) {
+          addLog({
+            timestamp: Date.now() / 1000, instance: sq.leader, level: 'warn',
+            message: `[阶段测试·大组] 大组 ${sq.group} 没 scheme, P3b 队员跳过`,
+          })
+        } else {
+          const results = await Promise.all(sq.members.map((idx) =>
+            runPhase(idx, 'P3b', 'member', scheme)
+          ))
+          if (results.some((r) => !r.ok) && !keepGoing) return
+        }
+      }
+
+      // P4: 队长跑 (会等队员 P3b 完了才到这, 因为上面 await 了)
+      if (selKeys.includes('P4')) {
+        await runPhase(sq.leader, 'P4', 'captain')
+      }
+    }
+
+    await Promise.allSettled(squads.map(runOneSquad))
+
+    addLog({
+      timestamp: Date.now() / 1000, instance: 'SYS', level: 'info',
+      message: `[阶段测试·大组联动] 全部跑完 ${done}/${totalSteps}`,
+    })
     setPhaseTester({ busy: false, progress: '' })
     setTimeout(() => clearPhaseResults(), 100)
   }
@@ -290,7 +418,7 @@ export function PhaseTester() {
           <Button
             size="sm"
             disabled={isRunning || selKeys.length === 0}
-            onClick={runAll}
+            onClick={onClickRun}
             className="min-w-[180px]"
           >
             {useFromConsole && targetsFromConsole.length > 1
@@ -326,6 +454,15 @@ export function PhaseTester() {
           ))}
         </div>
       )}
+
+      {/* 大组联动弹窗 (选了 P3+/P4 + 多实例触发) */}
+      <SquadDialog
+        open={squadDialogOpen}
+        selectedInstances={targetsFromConsole.length > 0 ? targetsFromConsole : (selInst !== null ? [selInst] : [])}
+        selKeys={selKeys}
+        onCancel={() => setSquadDialogOpen(false)}
+        onConfirm={runAllSquads}
+      />
     </div>
   )
 }
