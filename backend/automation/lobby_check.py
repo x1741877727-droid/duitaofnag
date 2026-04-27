@@ -2,7 +2,8 @@
 v2 P2 dismiss_popups 四元信号融合判大厅 — 修当前最大 bug "半透明弹窗误判".
 
 四个条件 *全部* 满足才算大厅, 任一不满足继续清弹窗:
-  ① 模板 lobby_start_btn (or lobby_start_game) conf > 0.85
+  ① 模板 lobby_start_btn (or lobby_start_game) conf > 0.78
+     (实测大厅干净时 score ~ 0.80-0.82, 0.85 太严会一直不过 quad)
   ② YOLO 检测: close_x = 0 AND action_btn = 0 (没有任何弹窗结构)
   ③ 4 角无半透明遮罩 (overlay 检测)
   ④ 5 帧 phash 距离 < 3 (画面持续 1 秒稳定, 防过渡帧)
@@ -55,7 +56,7 @@ class LobbyQuadDetector:
         self,
         stable_frames_required: int = 5,
         phash_dist_max: int = 3,
-        template_threshold: float = 0.85,
+        template_threshold: float = 0.78,
         overlay_corner_dark: int = 50,
         overlay_center_diff: int = 40,
     ):

@@ -63,6 +63,9 @@ export function TemplateLibrary() {
   const [cropperOpen, setCropperOpen] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
   const [loading, setLoading] = useState(false)
+  // 测试源: 空 = 实例当前帧; 'session::decision_id' = 历史决策画面
+  const [decisionSrc, setDecisionSrc] = useState<string>('')
+  const [recentDecs, setRecentDecs] = useState<{ id: string; phase: string; round: number; outcome: string; created: number; session?: string }[]>([])
 
   useEffect(() => {
     let cancelled = false
@@ -72,6 +75,14 @@ export function TemplateLibrary() {
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
+  }, [refreshTick])
+
+  // 拉最近 30 条决策 (用于"选历史画面测"下拉)
+  useEffect(() => {
+    fetch('/api/decisions?limit=30')
+      .then((r) => r.json())
+      .then((d) => setRecentDecs(d.items || []))
+      .catch(() => {})
   }, [refreshTick])
 
   // 选中变化 → 拉 stats + detail
@@ -112,11 +123,19 @@ export function TemplateLibrary() {
     setTesting(true)
     setTestResult(null)
     try {
-      let args: { name: string; instance?: number; threshold?: number } = {
+      let args: { name: string; instance?: number; decision_id?: string; session?: string; threshold?: number } = {
         name: selected.name,
       }
-      const tgt = testInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
-      if (tgt !== undefined) args.instance = tgt
+      if (decisionSrc) {
+        // 用历史决策画面 (格式 "session::decision_id")
+        const [sess, decId] = decisionSrc.split('::')
+        args.session = sess || undefined
+        args.decision_id = decId
+      } else {
+        // 实例当前帧
+        const tgt = testInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
+        if (tgt !== undefined) args.instance = tgt
+      }
       const r = await testTemplate(args)
       setTestResult(r)
     } catch (e) {
@@ -287,13 +306,16 @@ export function TemplateLibrary() {
 
                 <div className="p-3 space-y-2 border-b border-border">
                   <div className="text-xs font-semibold">模版测试 (dryrun, 不实点)</div>
+
+                  {/* 测试源 1: 实例当前帧 (按钮选实例) — 只在 decisionSrc 空时启用 */}
+                  <div className="text-[11px] text-muted-foreground">实例当前帧:</div>
                   <div className="flex flex-wrap gap-1">
                     {availableInstances.map((inst) => (
                       <Button
                         key={inst.index}
-                        variant={testInst === inst.index ? 'secondary' : 'outline'}
+                        variant={!decisionSrc && testInst === inst.index ? 'secondary' : 'outline'}
                         size="sm"
-                        onClick={() => setTestInst(inst.index)}
+                        onClick={() => { setTestInst(inst.index); setDecisionSrc('') }}
                         title={inst.name + (inst.running ? ' (运行中)' : ' (未启动)')}
                         className={!inst.running ? 'opacity-60' : ''}
                       >
@@ -301,18 +323,36 @@ export function TemplateLibrary() {
                       </Button>
                     ))}
                     {availableInstances.length === 0 && (
-                      <div className="text-[11px] text-muted-foreground">
-                        没检测到模拟器 — 看「运行控制」检测一下
-                      </div>
+                      <div className="text-[11px] text-muted-foreground">没检测到模拟器</div>
                     )}
                   </div>
+
+                  {/* 测试源 2: 历史决策画面下拉 */}
+                  <div className="text-[11px] text-muted-foreground pt-1">或选历史决策画面:</div>
+                  <select
+                    value={decisionSrc}
+                    onChange={(e) => setDecisionSrc(e.target.value)}
+                    className="w-full h-8 text-xs border border-border rounded px-2 bg-card"
+                  >
+                    <option value="">— 不选, 用实例当前帧 —</option>
+                    {recentDecs.map((d) => {
+                      const v = `${d.session || ''}::${d.id}`
+                      const time = new Date(d.created * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+                      return (
+                        <option key={d.id} value={v}>
+                          {time} #{d.id.match(/inst(\d+)/)?.[1] ?? '?'} {d.phase} R{d.round} · {d.outcome}
+                        </option>
+                      )
+                    })}
+                  </select>
+
                   <Button
                     size="sm"
-                    disabled={testing || availableInstances.length === 0}
+                    disabled={testing || (availableInstances.length === 0 && !decisionSrc)}
                     onClick={runTest}
                     className="w-full"
                   >
-                    {testing ? '测试中…' : '抓帧测试匹配 (无需 runner)'}
+                    {testing ? '测试中…' : (decisionSrc ? '在该历史画面测匹配' : '抓帧测试匹配')}
                   </Button>
                 </div>
 
