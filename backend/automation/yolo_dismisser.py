@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,15 +74,32 @@ def _model_path() -> Path:
 
 
 class YoloDismisser:
-    """YOLO 驱动的弹窗清理器。warmup 加载 ONNX，每轮 detect + tap"""
+    """YOLO 驱动的弹窗清理器.
 
-    _session = None
-    _input_name: Optional[str] = None
-    _input_shape = (640, 640)
+    v2-9: 多 session 池模式 - 每实例独立 ONNX session 实现真并发推理.
+    旧: 类级单 _session, 6 实例并发要排队 (实测推理时间 30→200ms 抖动)
+    新: 每实例 self._session, 真并发, 关键路径 (队长 P3a) 不被队员拖
+    用 intra_op_num_threads (默认 2) 防多 session 互抢 CPU 核.
+    """
 
-    def __init__(self, max_rounds: int = 20):
+    # 类级共享 _session 作为兼容路径 (谁第一个调 cls.detect/is_available 谁初始化)
+    # 实际生产: single_runner 每实例创建自己的 YoloDismisser, 用 instance 方法
+    _shared_session = None
+    _shared_input_name: Optional[str] = None
+    _shared_input_shape = (640, 640)
+
+    def __init__(self, max_rounds: int = 20, intra_threads: Optional[int] = None):
         self.max_rounds = max_rounds
-        self._ocr_for_cta = None  # 懒初始化, CTA 检测在 ROI 内 OCR 用
+        self._ocr_for_cta = None
+        # 每实例独立 session (v2-9 真并发关键)
+        self._session = None
+        self._input_name: Optional[str] = None
+        self._input_shape = (640, 640)
+        self._load_failed = False
+        # CPU intra-op 线程数: 默认 2 (6 实例 × 2 = 12 thread, 8 核接近饱和不打架)
+        self._intra_threads = intra_threads or int(
+            os.environ.get("GAMEBOT_YOLO_INTRA_THREADS", "2")
+        )
 
     def _get_ocr_for_cta(self):
         """懒初始化, 复用 OcrDismisser 的 _ocr_all (调 OcrPool)"""
@@ -93,58 +111,67 @@ class YoloDismisser:
                 self._ocr_for_cta = False  # 标记失败, 不重试
         return self._ocr_for_cta if self._ocr_for_cta else None
 
-    # ─────────── 模型加载 ───────────
+    # ─────────── 模型加载 (v2-9: 实例级 session) ───────────
 
-    @classmethod
-    def is_available(cls) -> bool:
-        """有可用模型 → True；用来决定是否走 YOLO 路径"""
-        if cls._session is not None:
+    def is_available(self) -> bool:
+        """有可用模型 → True; 触发实例级 session 懒加载"""
+        if self._session is not None:
             return True
-        return cls._try_load()
+        return self._try_load()
 
-    @classmethod
-    def _try_load(cls) -> bool:
+    def _try_load(self) -> bool:
+        if self._session is not None:
+            return True
+        if self._load_failed:
+            return False
         path = _model_path()
         if not path.is_file():
-            logger.info(f"[yolo] 模型文件不存在 ({path})，dismiss 走 OCR fallback")
+            logger.info(f"[yolo] 模型文件不存在 ({path}), dismiss 走 OCR fallback")
+            self._load_failed = True
             return False
         try:
             import onnxruntime as ort
         except ImportError:
-            logger.warning("[yolo] onnxruntime 未安装，dismiss 走 OCR fallback")
+            logger.warning("[yolo] onnxruntime 未安装, dismiss 走 OCR fallback")
+            self._load_failed = True
             return False
         try:
             available = set(ort.get_available_providers())
             providers = []
-            # 优先 CUDA（Windows GPU）→ DirectML → CPU
             for p in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"):
                 if p in available:
                     providers.append(p)
             if not providers:
                 providers = ["CPUExecutionProvider"]
-            cls._session = ort.InferenceSession(str(path), providers=providers)
-            cls._input_name = cls._session.get_inputs()[0].name
-            shape = cls._session.get_inputs()[0].shape
-            cls._input_shape = (int(shape[2]), int(shape[3]))
+            # SessionOptions 限制 intra-op 线程数, 防多 session 互抢 CPU 核
+            sess_options = ort.SessionOptions()
+            sess_options.intra_op_num_threads = self._intra_threads
+            sess_options.inter_op_num_threads = 1
+            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            self._session = ort.InferenceSession(
+                str(path), sess_options=sess_options, providers=providers,
+            )
+            self._input_name = self._session.get_inputs()[0].name
+            shape = self._session.get_inputs()[0].shape
+            self._input_shape = (int(shape[2]), int(shape[3]))
             logger.info(
-                f"[yolo] 加载 {path} providers={cls._session.get_providers()} "
-                f"input={cls._input_shape}"
+                f"[yolo] 加载 (instance) providers={self._session.get_providers()} "
+                f"input={self._input_shape} intra_threads={self._intra_threads}"
             )
             return True
         except Exception as e:
             logger.error(f"[yolo] 模型加载失败: {e}")
+            self._load_failed = True
             return False
 
-    @classmethod
-    def warmup(cls) -> bool:
-        """启动时调一次预热（先 load 一次防首次推理慢）"""
-        if not cls._try_load():
+    def warmup(self) -> bool:
+        """启动时调一次预热 (避免首次推理慢)"""
+        if not self._try_load():
             return False
-        # 跑一帧热身
         try:
             dummy = np.zeros((720, 1280, 3), dtype=np.uint8)
-            cls._infer(dummy)
-            logger.info("[yolo] warmup 完成")
+            self._infer(dummy)
+            logger.info("[yolo] warmup 完成 (instance)")
             return True
         except Exception as e:
             logger.warning(f"[yolo] warmup 推理失败: {e}")
@@ -152,11 +179,11 @@ class YoloDismisser:
 
     # ─────────── 推理 ───────────
 
-    @classmethod
-    def _preprocess(cls, frame: np.ndarray) -> tuple[np.ndarray, float, tuple[int, int]]:
+    @staticmethod
+    def _preprocess(frame: np.ndarray, input_shape: tuple = (640, 640)) -> tuple[np.ndarray, float, tuple[int, int]]:
         """letterbox resize 到 input_shape + normalize"""
         h, w = frame.shape[:2]
-        th, tw = cls._input_shape
+        th, tw = input_shape
         scale = min(tw / w, th / h)
         new_w, new_h = int(w * scale), int(h * scale)
         resized = cv2.resize(frame, (new_w, new_h))
@@ -233,19 +260,36 @@ class YoloDismisser:
         keep.sort(key=lambda d: d.conf, reverse=True)
         return keep
 
-    @classmethod
-    def _infer(cls, frame: np.ndarray) -> list[Detection]:
-        if cls._session is None and not cls._try_load():
+    def _infer(self, frame: np.ndarray) -> list[Detection]:
+        if self._session is None and not self._try_load():
             return []
         h, w = frame.shape[:2]
-        tensor, scale, pad = cls._preprocess(frame)
-        outputs = cls._session.run(None, {cls._input_name: tensor})
-        return cls._postprocess(outputs[0], scale, pad, h, w)
+        tensor, scale, pad = self._preprocess(frame, input_shape=self._input_shape)
+        outputs = self._session.run(None, {self._input_name: tensor})
+        return self._postprocess(outputs[0], scale, pad, h, w)
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        """对外暴露的检测方法 (实例级 session, v2-9 真并发)"""
+        return self._infer(frame)
+
+    # ─── 兼容 classmethod (没 instance 时用, 共享一个 session) ───
+    _shared_instance: Optional["YoloDismisser"] = None
 
     @classmethod
-    def detect(cls, frame: np.ndarray) -> list[Detection]:
-        """对外暴露的检测方法。返回所有 conf > CONF_THRESHOLD 的 bbox"""
-        return cls._infer(frame)
+    def _shared(cls) -> "YoloDismisser":
+        if cls._shared_instance is None:
+            cls._shared_instance = YoloDismisser()
+        return cls._shared_instance
+
+    @classmethod
+    def is_available_cls(cls) -> bool:
+        """兼容旧代码 (popup_watchdog 等). 推荐用 instance.is_available()"""
+        return cls._shared().is_available()
+
+    @classmethod
+    def detect_cls(cls, frame: np.ndarray) -> list[Detection]:
+        """兼容旧代码. 推荐用 instance.detect(frame) 走独立 session"""
+        return cls._shared().detect(frame)
 
     # ─────────── 主循环 ───────────
 

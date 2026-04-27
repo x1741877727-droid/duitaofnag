@@ -401,8 +401,8 @@ class SingleInstanceRunner:
         #   ③ 模板 close_x_* 任一 (公告 / 活动 / 对话框 弹窗)
         #
         # 老 OCR 路径完全废弃 (实测 12 实例并发跑全屏 OCR 240s/分钟 CPU).
-        from .yolo_dismisser import YoloDismisser
-        yolo_avail = YoloDismisser.is_available()
+        # 用 self.yolo_dismisser 实例 (v2-9 多 session 池, 真并发)
+        yolo_avail = self.yolo_dismisser.is_available()
         # close_x_* 系列模板, 公告/活动/对话框/签到 等弹窗 X 高准确率
         close_x_template_names = [
             "close_x_announce", "close_x_dialog", "close_x_activity",
@@ -445,7 +445,7 @@ class SingleInstanceRunner:
             # ③ YOLO 推理 (~30ms, 任何 dets > 0 即认为脱离加载黑屏)
             if yolo_avail:
                 try:
-                    dets = YoloDismisser.detect(shot)
+                    dets = self.yolo_dismisser.detect(shot)
                     if dets:
                         names = ",".join(f"{d.name}({d.conf:.2f})" for d in dets[:3])
                         logger.info(
@@ -504,9 +504,8 @@ class SingleInstanceRunner:
     async def phase_dismiss_popups(self) -> bool:
         """清理所有弹窗直到大厅（OCR驱动）"""
         self.phase = Phase.DISMISS_POPUPS
-        # 优先 YOLO；ONNX 不存在时 yolo_dismisser 内部 fallback 到 OCR
-        from .yolo_dismisser import YoloDismisser
-        use_yolo = YoloDismisser.is_available()
+        # 优先 YOLO; ONNX 不存在时 yolo_dismisser 内部 fallback 到 OCR
+        use_yolo = self.yolo_dismisser.is_available()
         logger.info(f"[阶段3] 开始弹窗清理 ({'YOLO' if use_yolo else 'OCR fallback'})")
 
         # 关闭守卫：这个阶段自己完整处理弹窗，避免和守卫冲突

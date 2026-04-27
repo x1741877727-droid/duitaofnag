@@ -465,8 +465,8 @@ class MultiRunnerService:
             # PopupWatchdog: phase 感知 (dismiss_popups skip / team_create+map_setup
             # system_only / 其他 all). YOLO 模型不存在时安静跳过.
             try:
-                from .automation.yolo_dismisser import YoloDismisser
-                if YoloDismisser.is_available():
+                # v2-9: 用 runner.yolo_dismisser 实例 (每实例独立 ONNX session)
+                if runner.yolo_dismisser.is_available():
                     async def _wd_screenshot():
                         try:
                             return await runner.adb.screenshot()
@@ -475,7 +475,7 @@ class MultiRunnerService:
 
                     def _wd_yolo_detect(frame):
                         try:
-                            return YoloDismisser.detect(frame)
+                            return runner.yolo_dismisser.detect(frame)
                         except Exception:
                             return []
 
