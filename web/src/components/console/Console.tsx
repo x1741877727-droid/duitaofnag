@@ -44,7 +44,7 @@ export function Console() {
   else if (sel.length >= 3) gridCls = 'grid grid-cols-2 grid-rows-2'
 
   return (
-    <div className="flex flex-col gap-4 h-full min-h-0">
+    <div className="flex flex-col gap-4 min-h-0">
       {/* 顶部状态条 */}
       <div className="flex items-center gap-3 text-sm">
         <span className={`inline-flex items-center gap-1.5 ${liveConnected ? 'text-success' : 'text-muted-foreground'}`}>
@@ -99,16 +99,16 @@ export function Console() {
           <RecognitionEvidence instanceIdx={sel[0]} />
         </div>
       ) : (
-        // 分屏 2-4: 每屏限 16:9 + max-h-[280px], 没图也保持紧凑高度
-        <div className="flex flex-col gap-2 min-h-0">
+        // 分屏 2-4: 每屏 16:9 限高 240px, 用 object-contain 自适应; 没图时只占顶栏 + 小空间
+        <div className="flex flex-col gap-2">
           <div className={`${gridCls} gap-2`}>
             {sel.map((idx) => (
               <div
                 key={idx}
-                className="relative rounded-lg border border-border overflow-hidden aspect-video max-h-[280px]"
+                className="relative rounded-lg border border-border overflow-hidden h-[240px]"
               >
-                <div className="absolute top-2 left-2 z-10 px-2 py-0.5 bg-foreground/85 text-background text-xs font-mono font-bold rounded">
-                  实例 #{idx}
+                <div className="absolute top-1.5 left-1.5 z-10 px-1.5 py-0.5 bg-foreground/85 text-background text-[10px] font-mono font-bold rounded">
+                  #{idx}
                 </div>
                 <LiveInspector instanceIdx={idx} compact />
               </div>

@@ -44,8 +44,8 @@ export function LiveInspector({ instanceIdx, compact = false }: { instanceIdx?: 
   }
 
   return (
-    <div className="rounded-lg border border-border bg-card flex flex-col overflow-hidden">
-      <div className="flex items-center gap-3 px-3 py-2 border-b border-border text-xs">
+    <div className="rounded-lg border border-border bg-card flex flex-col overflow-hidden h-full">
+      <div className="flex items-center gap-3 px-3 py-2 border-b border-border text-xs shrink-0">
         <span className="font-semibold">实时观察 · 实例 #{focused}</span>
         {latestDec && (
           <>
