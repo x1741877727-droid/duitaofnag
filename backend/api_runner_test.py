@@ -180,7 +180,7 @@ async def test_phase(req: TestPhaseReq):
 
 async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     """临时构造 SingleInstanceRunner. 跟主 runner 隔离, 不进 svc._runners."""
-    from .automation.adb_controller import ADBController
+    from .automation.adb_lite import ADBController
     from .automation.screen_matcher import ScreenMatcher
     from .automation.single_runner import SingleInstanceRunner
 
