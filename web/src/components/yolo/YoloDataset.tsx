@@ -25,6 +25,7 @@ type Filter = 'all' | 'labeled' | 'skipped' | 'remaining'
 export function YoloDataset({ onLabel }: { onLabel: (name: string) => void }) {
   const [data, setData] = useState<DatasetList | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
+  const [classFilter, setClassFilter] = useState<Set<number>>(new Set())   // 多选 cid; 空=不筛
   const [loading, setLoading] = useState(false)
   const [tick, setTick] = useState(0)
 
@@ -44,8 +45,21 @@ export function YoloDataset({ onLabel }: { onLabel: (name: string) => void }) {
     if (filter === 'labeled') list = list.filter((x) => x.labeled)
     else if (filter === 'skipped') list = list.filter((x) => x.skipped)
     else if (filter === 'remaining') list = list.filter((x) => !x.labeled && !x.skipped)
+    if (classFilter.size > 0) {
+      // 含任一选中 cid → 显示
+      list = list.filter((x) => x.class_ids?.some((c) => classFilter.has(c)))
+    }
     return list.slice().reverse() // 最新在前
-  }, [data, filter])
+  }, [data, filter, classFilter])
+
+  function toggleClass(cid: number) {
+    setClassFilter((cur) => {
+      const n = new Set(cur)
+      if (n.has(cid)) n.delete(cid)
+      else n.add(cid)
+      return n
+    })
+  }
 
   async function trash(name: string) {
     if (!confirm(`废弃图片 ${name}? (移到 .trash/)`)) return
@@ -83,20 +97,50 @@ export function YoloDataset({ onLabel }: { onLabel: (name: string) => void }) {
         <Button variant="ghost" size="sm" onClick={() => setTick((x) => x + 1)}>刷新</Button>
       </div>
 
-      <div className="flex items-center gap-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-muted-foreground">状态:</span>
         {(['all', 'labeled', 'skipped', 'remaining'] as Filter[]).map((f) => (
           <button
             key={f}
             onClick={() => setFilter(f)}
-            className={`text-xs px-2 py-1 rounded border ${
+            className={`text-xs px-2 py-1 rounded-md border transition ${
               filter === f
-                ? 'bg-blue-50 border-blue-300 text-blue-700'
-                : 'border-border text-muted-foreground'
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'bg-card border-border text-muted-foreground hover:border-primary/40'
             }`}
           >
             {({ all: '全部', labeled: '已标', skipped: '跳过', remaining: '未标' } as const)[f]}
           </button>
         ))}
+        {data && data.per_class.length > 0 && (
+          <>
+            <span className="ml-3 text-xs text-muted-foreground">含类别 (多选):</span>
+            {data.per_class.filter((c) => c.id < (data.classes?.length || 0)).map((c) => {
+              const sel = classFilter.has(c.id)
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => toggleClass(c.id)}
+                  className={`text-xs px-2 py-1 rounded-md border transition ${
+                    sel
+                      ? 'bg-info text-white border-info'
+                      : 'bg-card border-border text-muted-foreground hover:border-info/40'
+                  }`}
+                >
+                  {c.name} <span className="text-[10px] opacity-70">({c.images})</span>
+                </button>
+              )
+            })}
+            {classFilter.size > 0 && (
+              <button
+                onClick={() => setClassFilter(new Set())}
+                className="text-xs text-muted-foreground hover:text-foreground underline"
+              >
+                清空类别筛选
+              </button>
+            )}
+          </>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto rounded-lg border border-border bg-card p-3">

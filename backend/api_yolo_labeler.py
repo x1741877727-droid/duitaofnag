@@ -36,8 +36,35 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# 类名 — 跟 yolo_dismisser.CLASSES + debug_server.LABEL_CLASSES 对齐
-LABEL_CLASSES = ["close_x", "action_btn"]
+# 默认类 (如果 classes.txt 不存在) — 跟 yolo_dismisser.CLASSES 对齐
+DEFAULT_CLASSES = ["close_x", "action_btn"]
+
+
+def _read_classes() -> list[str]:
+    """动态读 classes.txt. 不存在 → 写默认 + 返回."""
+    from .automation.user_paths import user_yolo_dir
+    p = user_yolo_dir() / "classes.txt"
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(DEFAULT_CLASSES) + "\n", encoding="utf-8")
+        return list(DEFAULT_CLASSES)
+    try:
+        lines = [x.strip() for x in p.read_text(encoding="utf-8").splitlines()]
+        return [x for x in lines if x]
+    except Exception:
+        return list(DEFAULT_CLASSES)
+
+
+def _write_classes(names: list[str]) -> None:
+    from .automation.user_paths import user_yolo_dir
+    p = user_yolo_dir() / "classes.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(names) + "\n", encoding="utf-8")
+
+
+# 兼容旧引用
+def _label_classes() -> list[str]:
+    return _read_classes()
 
 
 # ─── 路径 ───
@@ -52,8 +79,7 @@ def _yolo_paths():
     classes_p = root / "classes.txt"
     raw.mkdir(parents=True, exist_ok=True)
     labels.mkdir(parents=True, exist_ok=True)
-    if not classes_p.exists():
-        classes_p.write_text("\n".join(LABEL_CLASSES) + "\n", encoding="utf-8")
+    _read_classes()  # 触发默认 classes.txt 写入
     return raw, labels, classes_p
 
 
@@ -80,6 +106,7 @@ def _safe_filename(name: str) -> str:
 async def labeler_list():
     """所有原始截图 + 标注状态 + 每类 bbox 数."""
     raw, labels_dir, _ = _yolo_paths()
+    classes = _read_classes()
     items = []
     class_counts: dict[int, int] = {}
     class_imgs: dict[int, set[str]] = {}
@@ -87,13 +114,8 @@ async def labeler_list():
         label_p = labels_dir / f"{p.stem}.txt"
         labeled = label_p.is_file() and label_p.stat().st_size > 0
         skipped = label_p.is_file() and label_p.stat().st_size == 0
-        items.append({
-            "name": p.name,
-            "size": p.stat().st_size,
-            "mtime": p.stat().st_mtime,
-            "labeled": labeled,
-            "skipped": skipped,
-        })
+        # 抽这张图含哪些 cid (前端按类筛用)
+        img_cids: set[int] = set()
         if labeled:
             try:
                 for line in label_p.read_text(encoding="utf-8").splitlines():
@@ -106,18 +128,27 @@ async def labeler_list():
                         continue
                     class_counts[cid] = class_counts.get(cid, 0) + 1
                     class_imgs.setdefault(cid, set()).add(p.name)
+                    img_cids.add(cid)
             except Exception:
                 pass
+        items.append({
+            "name": p.name,
+            "size": p.stat().st_size,
+            "mtime": p.stat().st_mtime,
+            "labeled": labeled,
+            "skipped": skipped,
+            "class_ids": sorted(img_cids),
+        })
     items.sort(key=lambda x: x["mtime"])
     n_labeled = sum(1 for i in items if i["labeled"])
     n_skipped = sum(1 for i in items if i["skipped"])
 
     per_class = []
     legacy_names = {2: "dialog (历史)"}
-    all_cids = sorted(set(list(class_counts.keys()) + list(range(len(LABEL_CLASSES)))))
+    all_cids = sorted(set(list(class_counts.keys()) + list(range(len(classes)))))
     for cid in all_cids:
-        if cid < len(LABEL_CLASSES):
-            name = LABEL_CLASSES[cid]
+        if cid < len(classes):
+            name = classes[cid]
         else:
             name = legacy_names.get(cid, f"class_{cid}")
         per_class.append({
@@ -132,7 +163,7 @@ async def labeler_list():
         "labeled": n_labeled,
         "skipped": n_skipped,
         "remaining": len(items) - n_labeled - n_skipped,
-        "classes": LABEL_CLASSES,
+        "classes": classes,
         "per_class": per_class,
         "items": items,
     }
@@ -193,6 +224,7 @@ async def labeler_save_labels(filename: str, req: SaveLabelsReq):
     filename = _safe_filename(filename)
     label_p = _label_path_for(filename)
     label_p.parent.mkdir(parents=True, exist_ok=True)
+    classes = _read_classes()
     lines = []
     for b in req.boxes:
         try:
@@ -203,7 +235,7 @@ async def labeler_save_labels(filename: str, req: SaveLabelsReq):
             h = float(b.get("h", 0))
         except (TypeError, ValueError):
             continue
-        if cid < 0 or cid >= len(LABEL_CLASSES):
+        if cid < 0 or cid >= len(classes):
             continue
         if w <= 0 or h <= 0:
             continue
@@ -242,9 +274,10 @@ async def labeler_export():
     """打包训练数据为 zip (images/ + labels/ + classes.txt + manifest.json)"""
     import random
     raw, labels_dir, _ = _yolo_paths()
+    classes = _read_classes()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("classes.txt", "\n".join(LABEL_CLASSES) + "\n")
+        zf.writestr("classes.txt", "\n".join(classes) + "\n")
         labeled_imgs = []
         skipped_imgs = []
         for p in sorted(raw.glob("*.png")) + sorted(raw.glob("*.jpg")):
@@ -271,14 +304,14 @@ async def labeler_export():
                         cid = int(parts[0])
                     except ValueError:
                         continue
-                    if 0 <= cid < len(LABEL_CLASSES):
+                    if 0 <= cid < len(classes):
                         kept.append(line.strip())
                 zf.writestr(f"labels/{p.stem}.txt",
                             "\n".join(kept) + ("\n" if kept else ""))
             else:
                 zf.writestr(f"labels/{p.stem}.txt", "")
         zf.writestr("manifest.json", json.dumps({
-            "classes": LABEL_CLASSES,
+            "classes": classes,
             "labeled": len(labeled_imgs),
             "background_sampled": len(bg_sample),
             "background_total": len(skipped_imgs),
@@ -379,3 +412,49 @@ def _register_upload_model():
 
 
 _register_upload_model()
+
+
+# ─── /api/labeler/classes ───
+
+
+@router.get("/api/labeler/classes")
+async def list_classes():
+    """当前 classes.txt + 已废弃 cid (历史标注但不在 classes 中)."""
+    classes = _read_classes()
+    _, labels_dir, _ = _yolo_paths()
+    legacy_cids: set[int] = set()
+    for lp in labels_dir.glob("*.txt"):
+        if lp.stat().st_size == 0:
+            continue
+        try:
+            for line in lp.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                try:
+                    cid = int(parts[0])
+                    if cid >= len(classes):
+                        legacy_cids.add(cid)
+                except ValueError:
+                    continue
+        except Exception:
+            continue
+    return {"classes": classes, "legacy_cids": sorted(legacy_cids)}
+
+
+class AddClassReq(BaseModel):
+    name: str
+
+
+@router.post("/api/labeler/classes")
+async def add_class(req: AddClassReq):
+    """追加新类到 classes.txt. 旧 cid 不动, 新类 id = len(classes)."""
+    name = (req.name or "").strip()
+    if not re.match(r"^[A-Za-z0-9_]{1,32}$", name):
+        raise HTTPException(400, "类名只允许 A-Z a-z 0-9 _ (1-32 字符)")
+    cur = _read_classes()
+    if name in cur:
+        raise HTTPException(409, f"类名已存在: {name}")
+    cur.append(name)
+    _write_classes(cur)
+    return {"ok": True, "classes": cur, "new_id": len(cur) - 1}

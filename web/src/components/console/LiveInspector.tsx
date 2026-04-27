@@ -44,7 +44,7 @@ export function LiveInspector() {
   return (
     <div className="rounded-lg border border-border bg-card flex flex-col overflow-hidden">
       <div className="flex items-center gap-3 px-3 py-2 border-b border-border text-xs">
-        <span className="font-semibold">实时观察台 · 实例 #{focused}</span>
+        <span className="font-semibold">实时观察 · 实例 #{focused}</span>
         {latestDec && (
           <>
             <span className="font-mono text-muted-foreground">
@@ -52,19 +52,19 @@ export function LiveInspector() {
             </span>
             <span className="text-muted-foreground">{labelOutcome(latestDec.outcome)}</span>
             {latestDec.tap_xy && (
-              <span className="font-mono text-blue-600">
+              <span className="font-mono text-info">
                 tap ({latestDec.tap_xy[0]},{latestDec.tap_xy[1]})
               </span>
             )}
           </>
         )}
         <span className="ml-auto text-muted-foreground font-mono text-[10px]">
-          {decisionId.slice(7) /* trim HHMMSS_iii_ prefix */ || '—'}
+          {decisionId.slice(7) || '—'}
         </span>
       </div>
-      <div className="flex-1 min-h-0 flex items-center justify-center bg-zinc-900">
+      <div className="flex-1 min-h-0 flex items-center justify-center bg-foreground/95">
         {!src ? (
-          <div className="text-xs text-zinc-500">等待第一帧…</div>
+          <div className="text-xs text-background/70">等待第一帧…</div>
         ) : imgError ? (
           <img
             src={`/api/decision/${encodeURIComponent(decisionId)}/image/input.jpg`}

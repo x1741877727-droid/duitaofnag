@@ -3,17 +3,48 @@
  */
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { fetchYoloInfo, uploadModel, type YoloInfo } from '@/lib/yoloApi'
+import { Input } from '@/components/ui/input'
+import {
+  fetchYoloInfo, uploadModel, type YoloInfo,
+  fetchLabelClasses, addLabelClass,
+} from '@/lib/yoloApi'
 
 export function YoloModel() {
   const [info, setInfo] = useState<YoloInfo | null>(null)
   const [uploading, setUploading] = useState(false)
   const [msg, setMsg] = useState('')
   const [tick, setTick] = useState(0)
+  // 类别管理
+  const [labelClasses, setLabelClasses] = useState<string[]>([])
+  const [legacyCids, setLegacyCids] = useState<number[]>([])
+  const [newCls, setNewCls] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [clsMsg, setClsMsg] = useState('')
 
   useEffect(() => {
     fetchYoloInfo().then(setInfo).catch(() => setInfo(null))
+    fetchLabelClasses().then((r) => {
+      setLabelClasses(r.classes)
+      setLegacyCids(r.legacy_cids || [])
+    }).catch(() => {})
   }, [tick])
+
+  async function onAddClass() {
+    const n = newCls.trim()
+    if (!n) return
+    setAdding(true)
+    setClsMsg('')
+    try {
+      const r = await addLabelClass(n)
+      setLabelClasses(r.classes)
+      setNewCls('')
+      setClsMsg(`✓ 已添加 [${r.new_id}] ${n}`)
+    } catch (e) {
+      setClsMsg('失败: ' + String(e))
+    } finally {
+      setAdding(false)
+    }
+  }
 
   async function onUpload(f: File) {
     setUploading(true)
@@ -30,7 +61,7 @@ export function YoloModel() {
   }
 
   return (
-    <div className="grid gap-3 h-full" style={{ gridTemplateColumns: '1fr 1fr' }}>
+    <div className="grid gap-3 h-full overflow-y-auto" style={{ gridTemplateColumns: '1fr 1fr' }}>
       <div className="rounded-lg border border-border bg-card p-4 space-y-3 overflow-y-auto">
         <div className="text-sm font-semibold">当前模型</div>
         {!info ? (
@@ -99,10 +130,56 @@ export function YoloModel() {
           <div className="text-xs font-semibold mb-1">训练流程参考</div>
           <ol className="text-[11px] text-muted-foreground space-y-0.5 list-decimal pl-4">
             <li>「采集」连拍 100+ 张多样化画面</li>
-            <li>「标注」给每张画框标 close_x / action_btn</li>
+            <li>「标注」给每张画框标 (类别可在右侧添加)</li>
             <li>「数据集」下载 zip → mac 上跑 YOLOv8 训练</li>
             <li>训练完导出 ONNX → 这里上传</li>
           </ol>
+        </div>
+      </div>
+
+      {/* 类别管理 (跨列, 全宽) */}
+      <div className="rounded-lg border border-border bg-card p-4 space-y-3 col-span-2">
+        <div className="text-sm font-semibold">类别管理 (classes.txt)</div>
+        <div className="text-[11px] text-muted-foreground">
+          添加新类不影响旧 cid (新类追加, id = 当前类数). 旧标注文件保持不变.
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {labelClasses.map((c, i) => (
+            <span
+              key={c}
+              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-secondary text-xs"
+            >
+              <span className="font-mono text-muted-foreground">[{i}]</span>
+              <span className="font-medium">{c}</span>
+            </span>
+          ))}
+          {legacyCids.length > 0 && legacyCids.map((cid) => (
+            <span
+              key={cid}
+              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-warning/40 bg-warning-muted text-xs text-warning"
+              title="历史标注用过这个 cid 但不在 classes.txt 里, 需手动决定保留/清理"
+            >
+              <span className="font-mono">[{cid}]</span>
+              <span>历史</span>
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="新类名 (a-z 0-9 _, 1-32 字符)"
+            value={newCls}
+            onChange={(e) => setNewCls(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onAddClass()}
+            className="h-8 text-xs max-w-[280px]"
+          />
+          <Button size="sm" onClick={onAddClass} disabled={adding || !newCls.trim()}>
+            + 新增类别
+          </Button>
+          {clsMsg && (
+            <span className={`text-[11px] ${clsMsg.startsWith('✓') ? 'text-success' : 'text-destructive'}`}>
+              {clsMsg}
+            </span>
+          )}
         </div>
       </div>
     </div>

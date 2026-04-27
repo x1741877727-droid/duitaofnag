@@ -175,6 +175,32 @@ function SessionView({
     return m
   }, [items])
 
+  // 每实例当前进度: 最近一条决策的 phase + 各 phase 决策计数
+  const progressByInst = useMemo(() => {
+    const m: Record<number, { current: string; counts: Record<string, number>; total: number; toLobby: number }> = {}
+    for (const [idx, list] of Object.entries(byInst)) {
+      const counts: Record<string, number> = {}
+      let toLobby = 0
+      for (const d of list) {
+        counts[d.phase] = (counts[d.phase] || 0) + 1
+        if (d.outcome.startsWith('lobby_confirmed')) toLobby += 1
+      }
+      const lastByTs = list.slice().sort((a, b) => b.created - a.created)[0]
+      m[Number(idx)] = {
+        current: lastByTs?.phase || '',
+        counts,
+        total: list.length,
+        toLobby,
+      }
+    }
+    return m
+  }, [byInst])
+
+  const PHASE_ORDER = ['P0', 'P1', 'P2', 'P3a', 'P3b', 'P4']
+  const PHASE_NAME: Record<string, string> = {
+    P0: '加速器', P1: '启动', P2: '清弹窗', P3a: '建队', P3b: '加入', P4: '选地图',
+  }
+
   return (
     <div className="flex flex-col gap-3 h-full min-h-0">
       <div className="flex items-center gap-2 flex-wrap">
@@ -207,6 +233,48 @@ function SessionView({
         </Button>
       </div>
 
+      {/* 各实例进度概览 */}
+      {Object.keys(byInst).length > 0 && (
+        <div className="rounded-lg border border-border bg-card p-3 space-y-2">
+          <div className="text-xs font-semibold text-foreground">实例进度</div>
+          <div className="space-y-1.5">
+            {Object.keys(byInst).map(Number).sort((a, b) => a - b).map((idx) => {
+              const p = progressByInst[idx]
+              return (
+                <div key={idx} className="flex items-center gap-2 text-xs">
+                  <span className="font-mono font-semibold w-8">#{idx}</span>
+                  <div className="flex gap-1 flex-1">
+                    {PHASE_ORDER.map((ph) => {
+                      const cnt = p?.counts[ph] || 0
+                      const isCur = p?.current === ph
+                      return (
+                        <div
+                          key={ph}
+                          className={`flex-1 px-2 py-1 rounded text-center text-[11px] border transition ${
+                            isCur
+                              ? 'bg-primary text-primary-foreground border-primary font-semibold'
+                              : cnt > 0
+                                ? 'bg-success-muted text-success border-success/30'
+                                : 'bg-card border-border text-muted-foreground'
+                          }`}
+                          title={`${ph} ${PHASE_NAME[ph]}: ${cnt} 决策${isCur ? ' (当前)' : ''}`}
+                        >
+                          <span className="font-mono">{ph}</span>
+                          <span className="ml-1 opacity-70">{cnt}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <span className="text-muted-foreground text-[11px]">
+                    {p?.toLobby || 0} 次到大厅
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 grid gap-3 min-h-0" style={{ gridTemplateColumns: '380px 1fr' }}>
         {/* 左: 决策列表 */}
         <div className="rounded-lg border border-border bg-card overflow-y-auto">
@@ -219,7 +287,7 @@ function SessionView({
           ) : (
             Object.keys(byInst).map(Number).sort((a, b) => a - b).map((idx) => (
               <div key={idx}>
-                <div className="sticky top-0 bg-zinc-50 border-b border-border px-3 py-1.5 text-[11px] font-semibold flex items-center gap-2">
+                <div className="sticky top-0 bg-secondary border-b border-border px-3 py-1.5 text-[11px] font-semibold flex items-center gap-2">
                   <span className="font-mono">实例 #{idx}</span>
                   <span className="text-muted-foreground">{byInst[idx].length} 决策</span>
                 </div>
@@ -295,6 +363,7 @@ function OutcomeIcon({ outcome, verifySuccess }: { outcome: string; verifySucces
 function DecisionDetail({ decisionId, session }: { decisionId: string; session: string }) {
   const [data, setData] = useState<DecisionData | null>(null)
   const [loading, setLoading] = useState(false)
+  const [lightboxSrc, setLightboxSrc] = useState<string>('')
 
   useEffect(() => {
     if (!decisionId) {
@@ -309,6 +378,13 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [decisionId, session])
+
+  useEffect(() => {
+    if (!lightboxSrc) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLightboxSrc('') }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightboxSrc])
 
   if (!decisionId) {
     return (
@@ -345,23 +421,26 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
-        {/* 三联截图 */}
+        {/* 三联截图 (点击放大) */}
         <div className="grid gap-2" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
-          <ScreenshotPanel title="原图" src={data.input_image ? decisionImgSrc(data.id, data.input_image, session) : ''} />
-          <ScreenshotPanel
-            title="标注 (YOLO + 点击点)"
-            src={data.tap?.annot_image ? decisionImgSrc(data.id, data.tap.annot_image, session) : (
-              data.tiers.find((t) => t.yolo_annot_image)?.yolo_annot_image
-                ? decisionImgSrc(data.id, data.tiers.find((t) => t.yolo_annot_image)!.yolo_annot_image!, session)
-                : ''
-            )}
-          />
-          <ScreenshotPanel
-            title="OCR ROI"
-            src={data.tiers.find((t) => t.ocr_roi_image)?.ocr_roi_image
+          {(() => {
+            const original = data.input_image ? decisionImgSrc(data.id, data.input_image, session) : ''
+            const annot = data.tap?.annot_image
+              ? decisionImgSrc(data.id, data.tap.annot_image, session)
+              : (data.tiers.find((t) => t.yolo_annot_image)?.yolo_annot_image
+                  ? decisionImgSrc(data.id, data.tiers.find((t) => t.yolo_annot_image)!.yolo_annot_image!, session)
+                  : '')
+            const ocr = data.tiers.find((t) => t.ocr_roi_image)?.ocr_roi_image
               ? decisionImgSrc(data.id, data.tiers.find((t) => t.ocr_roi_image)!.ocr_roi_image!, session)
-              : ''}
-          />
+              : ''
+            return (
+              <>
+                <ScreenshotPanel title="原图" src={original} onClick={() => original && setLightboxSrc(original)} />
+                <ScreenshotPanel title="标注 (YOLO + 点击点)" src={annot} onClick={() => annot && setLightboxSrc(annot)} />
+                <ScreenshotPanel title="OCR ROI" src={ocr} onClick={() => ocr && setLightboxSrc(ocr)} />
+              </>
+            )
+          })()}
         </div>
 
         {/* 总览 */}
@@ -390,20 +469,86 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
           </div>
         </div>
       </div>
+
+      {/* Lightbox */}
+      {lightboxSrc && <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc('')} />}
     </div>
   )
 }
 
 
-function ScreenshotPanel({ title, src }: { title: string; src: string }) {
+function ScreenshotPanel({ title, src, onClick }: { title: string; src: string; onClick?: () => void }) {
   return (
-    <div className="rounded border border-border bg-zinc-900 overflow-hidden">
-      <div className="bg-zinc-800 text-white text-[10px] px-2 py-1">{title}</div>
+    <div className="rounded border border-border bg-foreground/95 overflow-hidden">
+      <div className="bg-foreground text-background text-[10px] px-2 py-1">{title}</div>
       {src ? (
-        <img src={src} alt={title} className="w-full max-h-[260px] object-contain" />
+        <img
+          src={src}
+          alt={title}
+          className="w-full max-h-[260px] object-contain cursor-zoom-in hover:opacity-90"
+          onClick={onClick}
+        />
       ) : (
-        <div className="text-zinc-500 text-xs text-center py-12">— 无 —</div>
+        <div className="text-background/50 text-xs text-center py-12">— 无 —</div>
       )}
+    </div>
+  )
+}
+
+
+function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [drag, setDrag] = useState<{ sx: number; sy: number; px: number; py: number } | null>(null)
+
+  function onWheel(e: React.WheelEvent) {
+    e.preventDefault()
+    const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15
+    setZoom((z) => Math.max(0.3, Math.min(8, z * delta)))
+  }
+  function onMouseDown(e: React.MouseEvent) {
+    setDrag({ sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y })
+  }
+  function onMouseMove(e: React.MouseEvent) {
+    if (!drag) return
+    setPan({ x: drag.px + (e.clientX - drag.sx), y: drag.py + (e.clientY - drag.sy) })
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-foreground/95 flex flex-col"
+      onWheel={onWheel}
+      onMouseDown={onMouseDown}
+      onMouseMove={onMouseMove}
+      onMouseUp={() => setDrag(null)}
+      onMouseLeave={() => setDrag(null)}
+      onClick={(e) => {
+        // 点击空白关闭 (但不在图上)
+        if ((e.target as HTMLElement).tagName !== 'IMG') onClose()
+      }}
+    >
+      <div className="flex items-center gap-2 p-2 text-background bg-foreground">
+        <span className="text-xs font-mono">{Math.round(zoom * 100)}%</span>
+        <button
+          onClick={(e) => { e.stopPropagation(); setZoom(1); setPan({ x: 0, y: 0 }) }}
+          className="text-xs underline opacity-80 hover:opacity-100"
+        >重置</button>
+        <span className="text-[10px] opacity-60 ml-2">滚轮缩放 · 拖动平移 · ESC / 点空白 关闭</span>
+        <button onClick={onClose} className="ml-auto text-sm">✕</button>
+      </div>
+      <div className="flex-1 flex items-center justify-center overflow-hidden" style={{ cursor: drag ? 'grabbing' : 'grab' }}>
+        <img
+          src={src}
+          alt="放大"
+          draggable={false}
+          style={{
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transformOrigin: 'center center',
+            maxWidth: '95%', maxHeight: '95%',
+            transition: drag ? 'none' : 'transform 0.05s',
+          }}
+        />
+      </div>
     </div>
   )
 }

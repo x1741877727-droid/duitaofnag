@@ -66,6 +66,7 @@ export interface DatasetItem {
   mtime: number
   labeled: boolean
   skipped: boolean
+  class_ids: number[]
 }
 
 export interface PerClassStat {
@@ -147,4 +148,28 @@ export async function uploadModel(file: Blob): Promise<{ ok: boolean; saved: str
 
 export function exportZipUrl(): string {
   return '/api/labeler/export.zip'
+}
+
+export interface ClassesResp {
+  classes: string[]
+  legacy_cids: number[]
+}
+
+export async function fetchLabelClasses(): Promise<ClassesResp> {
+  const r = await fetch('/api/labeler/classes')
+  if (!r.ok) throw new Error(`classes ${r.status}`)
+  return await r.json()
+}
+
+export async function addLabelClass(name: string): Promise<{ ok: boolean; classes: string[]; new_id: number }> {
+  const r = await fetch('/api/labeler/classes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!r.ok) {
+    const t = await r.text()
+    throw new Error(`add class ${r.status} ${t.slice(0, 200)}`)
+  }
+  return await r.json()
 }
