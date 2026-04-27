@@ -34,6 +34,15 @@ export function PhaseTester() {
   const emulators = useAppStore((s) => s.emulators)
   const instances = useAppStore((s) => s.instances)
   const selectedInstances = useAppStore((s) => s.selectedInstances)
+  // 持久状态 (切页面不重置)
+  const phaseTester = useAppStore((s) => s.phaseTester)
+  const setPhaseTester = useAppStore((s) => s.setPhaseTester)
+  const addPhaseResult = useAppStore((s) => s.addPhaseResult)
+  const clearPhaseResults = useAppStore((s) => s.clearPhaseResults)
+  const addLog = useAppStore((s) => s.addLog)
+
+  const { selKeys, selInst, selRole, keepGoing, busy, progress, results } = phaseTester
+
   const availableInstances = useMemo(() => {
     const ids = new Set<number>()
     for (const e of emulators) ids.add(e.index)
@@ -44,34 +53,26 @@ export function PhaseTester() {
     }))
   }, [instances, emulators])
 
-  // 阶段测试用的实例列表 = 中控台多选 (没选时回退手动单选)
   const useFromConsole = selectedInstances.length > 0
   const targetsFromConsole = useFromConsole ? selectedInstances : []
 
   const [phases, setPhases] = useState<PhaseDef[]>([])
-  const [selKeys, setSelKeys] = useState<string[]>([])     // 多选 (按勾选顺序)
   const [expanded, setExpanded] = useState<string | null>(null)
-  const [selInst, setSelInst] = useState<number | null>(null)   // 仅在没多选时用
-  const [selRole, setSelRole] = useState<'captain' | 'member'>('captain')
-  const [keepGoing, setKeepGoing] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [progress, setProgress] = useState<string>('')
-  const [results, setResults] = useState<RunResult[]>([])
 
   useEffect(() => {
     fetch('/api/runner/phases').then((r) => r.json()).then((d) => setPhases(d.phases || [])).catch(() => {})
   }, [])
 
   function togglePhase(key: string) {
-    setSelKeys((cur) => cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key])
+    const cur = selKeys
+    const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]
+    setPhaseTester({ selKeys: next })
   }
 
   async function runAll() {
-    setBusy(true)
-    setResults([])
-    setProgress('')
+    setPhaseTester({ busy: true, progress: '' })
+    clearPhaseResults()
 
-    // 目标实例: 优先用 console 多选; 否则手动单选
     let targets: number[]
     if (useFromConsole) {
       targets = targetsFromConsole
@@ -80,54 +81,90 @@ export function PhaseTester() {
       targets = t === undefined ? [] : [t]
     }
     if (targets.length === 0) {
-      setResults([{ phase: '-', phase_name: '-', ok: false, error: '没可用实例 (中控台选实例 或 这里选)' }])
-      setBusy(false)
+      addPhaseResult({ phase: '-', phase_name: '-', ok: false, error: '没可用实例' })
+      setPhaseTester({ busy: false })
       return
     }
 
     const total = targets.length * selKeys.length
+    addLog({
+      timestamp: Date.now() / 1000,
+      instance: 'SYS',
+      level: 'info',
+      message: `[阶段测试] 开始: ${selKeys.join(' → ')} × ${targets.length} 实例 (#${targets.join(',#')}) · 角色 ${selRole}`,
+    })
+
     let cursor = 0
-    const out: RunResult[] = []
+    let stopped = false
     for (const tgt of targets) {
+      if (stopped) break
       for (let i = 0; i < selKeys.length; i++) {
         cursor += 1
         const phase = selKeys[i]
-        setProgress(`跑 ${cursor}/${total} · #${tgt} ${phase}`)
+        const prog = `${cursor}/${total} · #${tgt} ${phase}`
+        setPhaseTester({ progress: prog })
+        addLog({
+          timestamp: Date.now() / 1000,
+          instance: tgt,
+          level: 'info',
+          message: `[阶段测试 ${prog}] 开始 ${phase}…`,
+        })
         try {
+          const t0 = performance.now()
           const r = await fetch('/api/runner/test_phase', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ instance: tgt, phase, role: selRole }),
           })
           const data = await r.json()
+          const dur = performance.now() - t0
           if (!r.ok) {
-            out.push({
+            const errMsg = data.detail || data.error || `HTTP ${r.status}`
+            addPhaseResult({
               phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
-              ok: false, error: data.detail || data.error || `HTTP ${r.status}`,
+              ok: false, error: errMsg,
             })
-            setResults([...out])
-            if (!keepGoing) { setProgress(''); setBusy(false); return }
+            addLog({
+              timestamp: Date.now() / 1000,
+              instance: tgt, level: 'error',
+              message: `[阶段测试] #${tgt} ${phase} 失败: ${errMsg}`,
+            })
+            if (!keepGoing) { stopped = true; break }
             continue
           }
-          out.push({
+          addPhaseResult({
             phase: `#${tgt}/${phase}`,
             phase_name: `#${tgt} ${data.phase_name || phase}`,
             ok: data.ok, duration_ms: data.duration_ms, error: data.error,
           })
-          setResults([...out])
-          if (!data.ok && !keepGoing) { setProgress(''); setBusy(false); return }
+          addLog({
+            timestamp: Date.now() / 1000,
+            instance: tgt,
+            level: data.ok ? 'info' : 'warn',
+            message: `[阶段测试] #${tgt} ${data.phase_name || phase} ${data.ok ? '✓ 完成' : '✗ 失败'} (${(data.duration_ms || dur).toFixed(0)}ms)${data.error ? ' — ' + data.error : ''}`,
+          })
+          if (!data.ok && !keepGoing) { stopped = true; break }
         } catch (e) {
-          out.push({
+          addPhaseResult({
             phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
             ok: false, error: String(e),
           })
-          setResults([...out])
-          if (!keepGoing) { setProgress(''); setBusy(false); return }
+          addLog({
+            timestamp: Date.now() / 1000,
+            instance: tgt, level: 'error',
+            message: `[阶段测试] #${tgt} ${phase} 异常: ${e}`,
+          })
+          if (!keepGoing) { stopped = true; break }
         }
       }
     }
-    setProgress('')
-    setBusy(false)
+    addLog({
+      timestamp: Date.now() / 1000,
+      instance: 'SYS',
+      level: 'info',
+      message: `[阶段测试] 全部跑完 ${cursor}/${total}${stopped ? ' (中途停)' : ''}`,
+    })
+    setPhaseTester({ busy: false, progress: '' })
   }
 
   const allKeys = phases.map((p) => p.key)
@@ -174,7 +211,7 @@ export function PhaseTester() {
             </div>
           )
         })}
-        <Button variant="ghost" size="sm" className="text-[11px]" onClick={() => setSelKeys(selKeys.length === allKeys.length ? [] : allKeys)}>
+        <Button variant="ghost" size="sm" className="text-[11px]" onClick={() => setPhaseTester({ selKeys: selKeys.length === allKeys.length ? [] : allKeys })}>
           {selKeys.length === allKeys.length ? '清空' : '全选'}
         </Button>
       </div>
@@ -213,7 +250,7 @@ export function PhaseTester() {
               key={e.index}
               variant={selInst === e.index ? 'secondary' : 'outline'}
               size="sm"
-              onClick={() => setSelInst(e.index)}
+              onClick={() => setPhaseTester({ selInst: e.index })}
               className={!e.running ? 'opacity-60' : ''}
             >
               #{e.index}{e.running ? '' : '·停'}
@@ -233,7 +270,7 @@ export function PhaseTester() {
               key={r}
               variant={selRole === r ? 'secondary' : 'outline'}
               size="sm"
-              onClick={() => setSelRole(r)}
+              onClick={() => setPhaseTester({ selRole: r })}
             >
               {r === 'captain' ? '队长 (leader)' : '队员 (follower)'}
             </Button>
@@ -258,7 +295,7 @@ export function PhaseTester() {
           <input
             type="checkbox"
             checked={keepGoing}
-            onChange={(e) => setKeepGoing(e.target.checked)}
+            onChange={(e) => setPhaseTester({ keepGoing: e.target.checked })}
           />
           失败也继续 (默认遇错停)
         </label>

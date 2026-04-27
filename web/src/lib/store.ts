@@ -196,6 +196,20 @@ interface AppState {
   toggleInstanceSelection: (idx: number) => void
   setSelectedInstances: (list: number[]) => void
   clearInstanceSelection: () => void
+
+  // 阶段测试持久状态 (切页面不丢)
+  phaseTester: {
+    selKeys: string[]               // 选中阶段 (按勾选顺序)
+    selInst: number | null          // 没多选时的备用单实例
+    selRole: 'captain' | 'member'
+    keepGoing: boolean
+    busy: boolean
+    progress: string
+    results: { phase: string; phase_name: string; ok: boolean; duration_ms?: number; error?: string }[]
+  }
+  setPhaseTester: (patch: Partial<AppState['phaseTester']>) => void
+  addPhaseResult: (r: AppState['phaseTester']['results'][number]) => void
+  clearPhaseResults: () => void
 }
 
 const MAX_LIVE_PER_INSTANCE = 50
@@ -319,6 +333,25 @@ export const useAppStore = create<AppState>((set) => ({
     focusedInstance: list.length === 1 ? list[0] : null,
   }),
   clearInstanceSelection: () => set({ selectedInstances: [], focusedInstance: null }),
+
+  phaseTester: {
+    selKeys: [],
+    selInst: null,
+    selRole: 'captain',
+    keepGoing: false,
+    busy: false,
+    progress: '',
+    results: [],
+  },
+  setPhaseTester: (patch) => set((state) => ({
+    phaseTester: { ...state.phaseTester, ...patch },
+  })),
+  addPhaseResult: (r) => set((state) => ({
+    phaseTester: { ...state.phaseTester, results: [...state.phaseTester.results, r] },
+  })),
+  clearPhaseResults: () => set((state) => ({
+    phaseTester: { ...state.phaseTester, results: [] },
+  })),
 }))
 
 // 状态配置
