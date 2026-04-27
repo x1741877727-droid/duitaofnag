@@ -50,6 +50,16 @@ def _timed_phase(name: str):
     return wrap
 
 
+# v3 helper: PhaseResult → outcome string (用于 decision_log finalize)
+def _result_to_outcome_str(r) -> str:
+    from .phase_base import PhaseResult
+    return {
+        PhaseResult.NEXT: "phase_next", PhaseResult.RETRY: "retry",
+        PhaseResult.WAIT: "wait", PhaseResult.FAIL: "phase_fail",
+        PhaseResult.GAME_RESTART: "game_restart", PhaseResult.DONE: "phase_done",
+    }.get(r, str(r))
+
+
 # v3: PhaseHandler 内部要 game_restart 时, 抛这个让 runner_service 翻译成 _GameCrashError
 class V3GameRestartRequested(Exception):
     """v3 PhaseHandler 返回 GAME_RESTART 时, _run_v3_phase 抛此异常."""
@@ -272,14 +282,6 @@ class SingleInstanceRunner:
         await handler.exit(ctx, PhaseResult.FAIL)
         return False
 
-
-def _result_to_outcome_str(r) -> str:
-    from .phase_base import PhaseResult
-    return {
-        PhaseResult.NEXT: "phase_next", PhaseResult.RETRY: "retry",
-        PhaseResult.WAIT: "wait", PhaseResult.FAIL: "phase_fail",
-        PhaseResult.GAME_RESTART: "game_restart", PhaseResult.DONE: "phase_done",
-    }.get(r, str(r))
 
     def _frame_changed(self, shot: np.ndarray, threshold: int = 4) -> bool:
         """pHash 帧差检测：画面没变返回 False，跳过 OCR"""

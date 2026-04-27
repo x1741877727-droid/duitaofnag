@@ -33,24 +33,53 @@ function fmtTimeShort(ts: number): string {
 }
 function outcomeText(o: string): string {
   if (!o) return '—'
+  // 通用
   if (o === 'tapped') return '已点击'
-  if (o === 'phase_next') return '阶段完成'
+  if (o === 'retry') return '重试一帧'
+  if (o === 'wait') return '等待中'
+  if (o === 'phase_next') return '阶段完成 → 下一阶段'
   if (o === 'phase_done') return '全流程完成'
   if (o === 'phase_fail') return '阶段失败'
-  if (o === 'no_target') return '无目标'
-  if (o === 'loop_blocked') return '同坐标连击拦下'
+  if (o === 'phase_exception') return '阶段异常 (看详情 note)'
+  // P0 加速器
+  if (o === 'vpn_already_connected') return 'VPN 已连接'
+  if (o === 'vpn_broadcast_ok') return 'VPN 广播启动成功'
+  if (o === 'vpn_ui_ok') return 'VPN UI 启动成功'
+  if (o === 'vpn_all_failed') return 'VPN 全部失败'
+  // P1 启动游戏
+  if (o === 'lobby_template_hit') return '大厅模板命中'
+  if (o === 'popup_or_login_template_hit') return '弹窗/登录模板命中'
+  if (o === 'yolo_dets_seen') return 'YOLO 看到目标'
+  if (o === 'waiting_ui') return '等待 UI 出现'
+  // P2 清弹窗
+  if (o === 'no_target') return '无目标 (5 层都空)'
+  if (o === 'loop_blocked') return '同坐标连击 → 加黑名单'
   if (o === 'lobby_confirmed_quad') return '大厅确认 (四元)'
-  if (o === 'lobby_confirmed_legacy') return '大厅 (兜底)'
-  if (o.startsWith('lobby_pending')) return o.replace('lobby_pending_', '大厅判定 ')
-  if (o === 'login_timeout_fail') return '登录超时'
-  if (o === 'dead_screen') return '死屏'
-  if (o === 'game_restart') return '请求重启'
-  if (o === 'vpn_already_connected') return 'VPN 已连'
-  if (o === 'vpn_broadcast_ok') return 'VPN 广播成功'
-  if (o === 'vpn_ui_ok') return 'VPN UI 启动'
-  if (o === 'vpn_all_failed') return 'VPN 失败'
-  if (o.includes('hit')) return '模板命中'
+  if (o === 'lobby_confirmed_legacy') return '大厅 (兜底命中模板)'
+  if (o.startsWith('lobby_pending_')) return '大厅判定 ' + o.replace('lobby_pending_', '')
+  if (o === 'login_timeout_fail') return '登录超时 60s → 重启'
+  if (o === 'dead_screen') return '死屏 (>12 轮无目标)'
+  if (o === 'game_restart') return '请求重启游戏'
+  // P3a 队长
+  if (o === 'team_create_ok') return '队伍创建成功'
+  if (o === 'team_create_fail') return '队伍创建失败'
+  if (o === 'team_create_exception') return '队伍创建异常'
+  // P3b 队员
+  if (o === 'team_join_ok') return '加入队伍成功'
+  if (o === 'team_join_fail') return '加入队伍失败'
+  if (o === 'team_join_no_scheme') return '没拿到 scheme'
+  if (o === 'team_join_exception') return '加入队伍异常'
+  // P4 选地图
+  if (o === 'map_setup_ok') return '地图设置完成'
+  if (o === 'map_setup_fail') return '地图设置失败'
+  if (o === 'map_setup_exception') return '地图设置异常'
   return o
+}
+
+// 简短阶段名 (用于决策列表): P0 → 加速器 等
+const PHASE_SHORT: Record<string, string> = {
+  P0: '加速器', P1: '启动游戏', P2: '清弹窗',
+  P3a: '队长建队', P3b: '队员加入', P4: '选地图',
 }
 
 export function Archive() {
@@ -306,10 +335,11 @@ function SessionView({
                         <div className="flex items-center gap-2 text-[11px]">
                           <OutcomeIcon outcome={it.outcome} verifySuccess={it.verify_success ?? null} />
                           <span className="font-mono text-muted-foreground">{fmtTimeShort(it.created)}</span>
-                          <span className="font-mono">{it.phase}</span>
-                          <span className="text-muted-foreground">R{it.round}</span>
+                          <span className="font-mono font-semibold text-foreground">{it.phase}</span>
+                          <span className="text-foreground/80">{PHASE_SHORT[it.phase] || ''}</span>
+                          <span className="text-muted-foreground font-mono">R{it.round}</span>
                         </div>
-                        <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+                        <div className="text-[11px] text-foreground/70 truncate mt-0.5">
                           {outcomeText(it.outcome)}
                           {it.tap_target && <span className="ml-2 text-info">→ {it.tap_target}</span>}
                         </div>
