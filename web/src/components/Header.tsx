@@ -54,19 +54,19 @@ export function Header() {
                 size="sm"
                 onClick={() => setCurrentView(key)}
                 className={cn(
-                  'gap-1.5 px-2 shrink-0 transition-all duration-200 ease-out',
+                  'group gap-1.5 px-2 shrink-0 transition-all duration-200 ease-out',
                   active && 'px-3 font-semibold',
                 )}
                 title={title}
               >
                 <Icon className="h-4 w-4" />
-                {/* 选中: 永远显文字; 未选中: xl 屏才显 */}
+                {/* 选中: 永显; 未选中: hover 才滑出文字; xl 屏永显 */}
                 <span
                   className={cn(
-                    'overflow-hidden transition-all duration-200',
+                    'overflow-hidden transition-all duration-200 whitespace-nowrap',
                     active
                       ? 'max-w-[80px] opacity-100'
-                      : 'max-w-0 opacity-0 xl:max-w-[80px] xl:opacity-100',
+                      : 'max-w-0 opacity-0 group-hover:max-w-[80px] group-hover:opacity-100 xl:max-w-[80px] xl:opacity-100',
                   )}
                 >
                   {label}

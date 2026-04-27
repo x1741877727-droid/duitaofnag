@@ -200,16 +200,18 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
         tmpl_dir = os.path.join(proj_root, "_internal", "fixtures", "templates")
     matcher = ScreenMatcher(tmpl_dir)
 
-    # decision_log session 还没初始化的话, 临时初始化一个 (跟旧 session 同根)
+    # decision_log session 还没初始化 → 用跟 runner_service 同算法的 logs/ 路径
+    # (开发: <项目根>/logs/test_TS, exe: <exe目录>/logs/test_TS)
     try:
         from .automation.decision_log import get_recorder
         rec = get_recorder()
         if rec.root() is None:
-            from .automation.user_paths import user_data_dir
             from datetime import datetime
-            session_dir = user_data_dir() / "logs" / f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            from pathlib import Path
+            session_dir = Path(proj_root) / "logs" / f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             session_dir.mkdir(parents=True, exist_ok=True)
             rec.init(session_dir)
+            logger.info(f"[test_phase] 临时 session: {session_dir}")
     except Exception as e:
         logger.debug(f"[test_phase] init recorder err: {e}")
 
