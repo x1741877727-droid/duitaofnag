@@ -85,7 +85,7 @@ class RunContext:
       [配置 / 不可变]    instance_idx, account, settings
       [跨 phase 共享]    role, game_scheme_url
       [P2 owned]         blacklist_coords, pending_memory_writes,
-                         last_tap_xy, same_target_count, empty_dets_streak,
+                         last_tap_xy, empty_dets_streak,
                          login_first_seen_ts, lobby_confirm_count, popups_closed
       [phase 计时]       phase_started_at, phase_round
       [帧缓存 / 每轮]    current_shot, current_phash
@@ -117,7 +117,6 @@ class RunContext:
     blacklist_coords: list = field(default_factory=list)        # [(x, y)]
     pending_memory_writes: list = field(default_factory=list)   # [(frame, (x,y), label)]
     last_tap_xy: tuple = (0, 0)
-    same_target_count: int = 0
     empty_dets_streak: int = 0
     login_first_seen_ts: Optional[float] = None
     lobby_confirm_count: int = 0
@@ -139,7 +138,6 @@ class RunContext:
         self.blacklist_coords.clear()
         self.pending_memory_writes.clear()
         self.last_tap_xy = (0, 0)
-        self.same_target_count = 0
         self.empty_dets_streak = 0
         self.login_first_seen_ts = None
         self.lobby_confirm_count = 0

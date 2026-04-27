@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 LOBBY_CONFIRM_NEEDED = 2          # 连续 N 帧四元判大厅 → 确认
 LOGIN_TIMEOUT_SECONDS = 60.0      # 登录页停留超过此 → game_restart
 EMPTY_STREAK_LIMIT = 12           # 连续 N 帧无目标 + 不在大厅 → game_restart (死屏)
-SAME_TARGET_LIMIT = 3             # 连续 N 帧选中同一目标 → 加黑名单
 
 
 class P2SubFSM:
@@ -130,24 +129,10 @@ class P2SubFSM:
 
         ctx.empty_dets_streak = 0
 
-        # 6. 防死循环 — 同一目标连续 3 次 → 加黑名单
-        if _same_target(action, ctx):
-            ctx.same_target_count += 1
-            if ctx.same_target_count >= SAME_TARGET_LIMIT:
-                if not ctx.is_blacklisted(action.x, action.y):
-                    ctx.blacklist_coords.append((action.x, action.y))
-                    logger.warning(
-                        f"[P2/R{rnd}] 同坐标 ({action.x},{action.y}) 连击 "
-                        f"{ctx.same_target_count} 次 → 加黑名单"
-                    )
-                ctx.same_target_count = 0
-                return PhaseStep(
-                    PhaseResult.RETRY,
-                    note=f"同坐标连击 → 加黑名单, 重选",
-                    outcome_hint="loop_blocked",
-                )
-        else:
-            ctx.same_target_count = 0
+        # 删了原 same_target 防死循环机制.
+        # 根因: 它不区分"真死循环 (verify 失败连击)"和"弹窗排队 (同位置弹一个接一个)".
+        # 真死循环已被 state_expectation 失败 → ActionExecutor 加黑名单挡住,
+        # 这里多余, 反而误伤合法排队 (R14-R16 verify=True 但被加黑名单导致 R17 起 no_target).
 
         # 7. 真 tap — 返回 WAIT, executor 处理 verify + 缓冲 memory
         ctx.popups_closed += 1
@@ -158,9 +143,3 @@ class P2SubFSM:
             note=f"tap {action.label}({action.x},{action.y})",
             outcome_hint="tapped",
         )
-
-
-def _same_target(action: PhaseAction, ctx: RunContext) -> bool:
-    """是否跟上次 tap 同一目标 (距离 < 20px)."""
-    last_x, last_y = ctx.last_tap_xy
-    return abs(action.x - last_x) < 20 and abs(action.y - last_y) < 20
