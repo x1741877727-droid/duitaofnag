@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 
 class P3bTeamJoinHandler(PhaseHandler):
     name = "P3b"
+    name_cn = "队员加入"
+    description = "队员通过 scheme URL 加入队长队伍. 薄壳包装现有 phase_team_join."
+    flow_steps = [
+        "拿 ctx.game_scheme_url (runner_service 从 leader 同步)",
+        "am start scheme://… 跳转游戏内组队界面",
+        "等队伍面板出现",
+        "确认已加入 (UI 验证)",
+    ]
     max_rounds = 1
     round_interval_s = 1.0
 

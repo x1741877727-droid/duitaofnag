@@ -42,12 +42,60 @@ class TestPhaseReq(BaseModel):
 
 @router.get("/api/runner/phases")
 async def list_phases():
-    """列出可测试的 phase + 中文名."""
+    """列出可测试的 phase + 中文名 + description + flow_steps (从代码读, 同步).
+
+    返回示例:
+      [{key: "P0", name: "加速器校验",
+        description: "...", flow_steps: [...], max_rounds: 1}, ...]
+    """
+    out = []
+    for key, (cls_name, fallback_name) in _HANDLER_MAP.items():
+        try:
+            from .automation import phases as _p
+            cls = getattr(_p, cls_name)
+            inst = cls()  # 拿类属性 (有些用 self 才能取, 但 description/flow_steps 都是类属性)
+            out.append({
+                "key": key,
+                "name": getattr(inst, "name_cn", "") or fallback_name,
+                "handler": cls_name,
+                "description": getattr(inst, "description", "") or "",
+                "flow_steps": list(getattr(inst, "flow_steps", []) or []),
+                "max_rounds": int(getattr(inst, "max_rounds", 0) or 0),
+                "round_interval_s": float(getattr(inst, "round_interval_s", 0) or 0),
+            })
+        except Exception as e:
+            out.append({
+                "key": key, "name": fallback_name, "handler": cls_name,
+                "description": "", "flow_steps": [], "error": str(e),
+            })
+    return {"phases": out}
+
+
+@router.get("/api/runner/phase_doc/{phase}")
+async def phase_doc(phase: str):
+    """单 phase 的完整文档 (description + flow_steps + 类源代码引用)."""
+    if phase not in _HANDLER_MAP:
+        raise HTTPException(404, f"未知 phase: {phase}")
+    cls_name, fallback_name = _HANDLER_MAP[phase]
+    from .automation import phases as _p
+    cls = getattr(_p, cls_name)
+    inst = cls()
+    # 拿源文件路径 (用户想看代码可以追到这里)
+    import inspect
+    src_file = ""
+    try:
+        src_file = inspect.getsourcefile(cls) or ""
+    except Exception:
+        pass
     return {
-        "phases": [
-            {"key": k, "name": v[1], "handler": v[0]}
-            for k, v in _HANDLER_MAP.items()
-        ],
+        "key": phase,
+        "name": getattr(inst, "name_cn", "") or fallback_name,
+        "handler_class": cls_name,
+        "description": getattr(inst, "description", ""),
+        "flow_steps": list(getattr(inst, "flow_steps", []) or []),
+        "max_rounds": int(getattr(inst, "max_rounds", 0) or 0),
+        "round_interval_s": float(getattr(inst, "round_interval_s", 0) or 0),
+        "source_file": src_file.replace("\\", "/"),
     }
 
 

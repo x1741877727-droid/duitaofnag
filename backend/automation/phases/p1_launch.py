@@ -35,6 +35,14 @@ class P1LaunchHandler(PhaseHandler):
     """启动游戏 (am start) → 等任意可交互 UI 出现."""
 
     name = "P1"
+    name_cn = "启动游戏"
+    description = "am start 拉起游戏, 等任意可交互 UI 出现. 不区分大厅/弹窗/登录页, 都让 P2 处理."
+    flow_steps = [
+        "enter: am start 启动游戏包",
+        "每帧 1.5s: 抓帧 + 跑识别",
+        "命中任一 → NEXT: ① 大厅模板 (lobby_start_btn) ② close_x_* 模板 ③ 登录模板 ④ YOLO dets > 0",
+        "60 轮 (~90s) 都没命中 → FAIL",
+    ]
     max_rounds = 60               # 60 × 1.5s = 90s timeout
     round_interval_s = 1.5
 

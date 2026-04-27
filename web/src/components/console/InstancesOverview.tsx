@@ -9,6 +9,8 @@ import { useAppStore, stateConfig, type InstanceState } from '@/lib/store'
 import { cn } from '@/lib/utils'
 
 const STATE_COLOR: Record<string, string> = {
+  idle_running: 'bg-zinc-50 text-zinc-700 border-zinc-300',
+  idle_stopped: 'bg-zinc-100 text-zinc-400 border-zinc-200',
   init: 'bg-zinc-200 text-zinc-600 border-zinc-300',
   accelerator: 'bg-blue-50 text-blue-700 border-blue-200',
   launch_game: 'bg-blue-50 text-blue-700 border-blue-200',
@@ -26,34 +28,41 @@ const STATE_COLOR: Record<string, string> = {
 
 export function InstancesOverview() {
   const instances = useAppStore((s) => s.instances)
+  const emulators = useAppStore((s) => s.emulators)
   const liveDecisions = useAppStore((s) => s.liveDecisions)
   const focusedInstance = useAppStore((s) => s.focusedInstance)
   const setFocusedInstance = useAppStore((s) => s.setFocusedInstance)
 
   const cards = useMemo(() => {
-    const list = Object.values(instances)
-    list.sort((a, b) => a.index - b.index)
-    return list.map((inst) => {
-      const dec = liveDecisions[inst.index] || []
+    // 合并 emulators (始终有) + instances (runner 跑时填充)
+    const ids = new Set<number>()
+    for (const e of emulators) ids.add(e.index)
+    for (const i of Object.values(instances)) ids.add(i.index)
+    return Array.from(ids).sort((a, b) => a - b).map((idx) => {
+      const inst = instances[String(idx)] || instances[idx as any]
+      const emu = emulators.find((e) => e.index === idx)
+      const dec = liveDecisions[idx] || []
       const lastDec = dec.length > 0 ? dec[dec.length - 1] : null
-      const decRound = lastDec?.round ?? 0
-      const decPhase = lastDec?.phase ?? ''
-      const stateLabel = stateConfig[inst.state as InstanceState]?.label ?? inst.state
+      const stateRaw = (inst?.state as string) || (emu?.running ? 'idle_running' : 'idle_stopped')
+      const stateLabel = inst
+        ? (stateConfig[inst.state as InstanceState]?.label ?? inst.state)
+        : (emu?.running ? '模拟器运行' : '模拟器未启动')
       return {
-        index: inst.index,
-        state: inst.state as string,
+        index: idx,
+        state: stateRaw,
         stateLabel,
-        decPhase,
-        decRound,
+        decPhase: lastDec?.phase ?? '',
+        decRound: lastDec?.round ?? 0,
         decCount: dec.length,
+        emuRunning: emu?.running ?? false,
       }
     })
-  }, [instances, liveDecisions])
+  }, [instances, emulators, liveDecisions])
 
   if (cards.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-        暂无实例 — 在「运行控制」页选好账号后点开始
+        没检测到模拟器 — 看「运行控制」检测一下
       </div>
     )
   }

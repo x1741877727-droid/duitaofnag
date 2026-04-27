@@ -18,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 class P3aTeamCreateHandler(PhaseHandler):
     name = "P3a"
+    name_cn = "队长创建"
+    description = "队长建队伍 + 拿 game scheme URL (P3b 队员加入用). OCR 7 步流程, 薄壳包装现有 phase_team_create."
+    flow_steps = [
+        "找组队按钮 (OCR 大厅左下区)",
+        "点开组队界面",
+        "切到「组队码」tab",
+        "点「分享队伍码」",
+        "OCR 截 scheme URL",
+        "回到大厅 (close 队伍面板)",
+        "写 ctx.game_scheme_url, runner_service 同步给 follower 实例",
+    ]
     max_rounds = 1               # 内部一次性跑完 (phase_team_create 同步)
     round_interval_s = 1.0
 

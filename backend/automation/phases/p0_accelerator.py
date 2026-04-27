@@ -26,6 +26,14 @@ class P0AcceleratorHandler(PhaseHandler):
     """启动 FightMaster VPN 并确认连接 (4 信号校验)."""
 
     name = "P0"
+    name_cn = "加速器校验"
+    description = "启动 FightMaster VPN 并校验 4 个连接信号. 失败会重试 UI 启动."
+    flow_steps = [
+        "快速路径: 4 信号已通过 → 直接 NEXT",
+        "广播启动: am broadcast START → 等 8s 内连上",
+        "UI 启动: 拉起 FightMaster 界面 + 点连接 (3 次重试)",
+        "全失败 → FAIL (runner_service 重试)",
+    ]
     max_rounds = 1                # 一帧内同步执行完 (内部 loop 等待)
     round_interval_s = 0.5
 

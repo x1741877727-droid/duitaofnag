@@ -172,6 +172,9 @@ class PhaseHandler(ABC):
     """
 
     name: str = "<phase>"
+    name_cn: str = ""                      # 中文名 (如 "加速器校验")
+    description: str = ""                  # 一句话: 这个 phase 在做什么 (中控台展示)
+    flow_steps: list[str] = []             # 步骤分解 (按序; 中控台展示)
     max_rounds: int = 60                   # 超过 → 自动 FAIL
     round_interval_s: float = 0.5          # 每帧间隔 (RETRY 时)
 

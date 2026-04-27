@@ -1,8 +1,10 @@
 /**
- * 单阶段测试面板 — 选实例 + 选阶段 + 跑一次.
+ * 阶段测试 — 多选阶段 + 选实例 + 串行跑 (单实例).
  *
- * 不进入完整流程, 跑完看决策档案 (Archive) 即可.
- * 要求主 runner 没在跑.
+ * 上层: 阶段勾选 (按勾选顺序串跑) + 文档展开 (description + flow_steps, 来自代码类属性)
+ * 下层: 选实例 + 角色 + 一键串跑
+ *
+ * 实现: 依次 POST /api/runner/test_phase 每个 phase, 上一阶段失败则停止 (除非用户勾"忽略失败继续").
  */
 import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -11,13 +13,21 @@ import { useAppStore } from '@/lib/store'
 interface PhaseDef {
   key: string
   name: string
-  handler: string
+  description: string
+  flow_steps: string[]
+  max_rounds: number
+  round_interval_s: number
 }
 
-const ROLES = [
-  { value: 'captain', label: '队长 (leader)' },
-  { value: 'member', label: '队员 (follower)' },
-] as const
+interface RunResult {
+  phase: string
+  phase_name: string
+  ok: boolean
+  duration_ms?: number
+  error?: string
+}
+
+const ROLE_PHASES = new Set(['P3a', 'P3b', 'P4'])
 
 export function PhaseTester() {
   const isRunning = useAppStore((s) => s.isRunning)
@@ -34,50 +44,73 @@ export function PhaseTester() {
   }, [instances, emulators])
 
   const [phases, setPhases] = useState<PhaseDef[]>([])
-  const [selPhase, setSelPhase] = useState<string>('P0')
+  const [selKeys, setSelKeys] = useState<string[]>([])     // 多选 (按勾选顺序)
+  const [expanded, setExpanded] = useState<string | null>(null)
   const [selInst, setSelInst] = useState<number | null>(null)
   const [selRole, setSelRole] = useState<'captain' | 'member'>('captain')
+  const [keepGoing, setKeepGoing] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<any>(null)
+  const [progress, setProgress] = useState<string>('')
+  const [results, setResults] = useState<RunResult[]>([])
 
   useEffect(() => {
-    fetch('/api/runner/phases')
-      .then((r) => r.json())
-      .then((d) => setPhases(d.phases || []))
-      .catch(() => {})
+    fetch('/api/runner/phases').then((r) => r.json()).then((d) => setPhases(d.phases || [])).catch(() => {})
   }, [])
 
-  async function run() {
-    setBusy(true)
-    setResult(null)
-    try {
-      const tgt = selInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
-      if (tgt === undefined) {
-        setResult({ ok: false, error: '没选实例' })
-        return
-      }
-      const r = await fetch('/api/runner/test_phase', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instance: tgt, phase: selPhase, role: selRole }),
-      })
-      const data = await r.json()
-      if (!r.ok) {
-        setResult({ ok: false, error: data.detail || data.error || `HTTP ${r.status}` })
-      } else {
-        setResult(data)
-      }
-    } catch (e) {
-      setResult({ ok: false, error: String(e) })
-    } finally {
-      setBusy(false)
-    }
+  function togglePhase(key: string) {
+    setSelKeys((cur) => cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key])
   }
+
+  async function runAll() {
+    setBusy(true)
+    setResults([])
+    setProgress('')
+    const tgt = selInst ?? availableInstances.find((e) => e.running)?.index ?? availableInstances[0]?.index
+    if (tgt === undefined) {
+      setResults([{ phase: '-', phase_name: '-', ok: false, error: '没选实例' }])
+      setBusy(false)
+      return
+    }
+    const out: RunResult[] = []
+    for (let i = 0; i < selKeys.length; i++) {
+      const phase = selKeys[i]
+      setProgress(`跑 ${i + 1}/${selKeys.length} · ${phase}`)
+      try {
+        const r = await fetch('/api/runner/test_phase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instance: tgt, phase, role: selRole }),
+        })
+        const data = await r.json()
+        if (!r.ok) {
+          out.push({ phase, phase_name: phase, ok: false, error: data.detail || data.error || `HTTP ${r.status}` })
+          setResults([...out])
+          if (!keepGoing) break
+          continue
+        }
+        out.push({
+          phase, phase_name: data.phase_name || phase,
+          ok: data.ok, duration_ms: data.duration_ms, error: data.error,
+        })
+        setResults([...out])
+        if (!data.ok && !keepGoing) break
+      } catch (e) {
+        out.push({ phase, phase_name: phase, ok: false, error: String(e) })
+        setResults([...out])
+        if (!keepGoing) break
+      }
+    }
+    setProgress('')
+    setBusy(false)
+  }
+
+  const allKeys = phases.map((p) => p.key)
 
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="font-semibold text-sm">阶段测试 (dryrun, 不跑整套)</span>
+        <span className="font-semibold text-sm">阶段测试</span>
+        <span className="text-[11px] text-muted-foreground">(dryrun · 不跑整套 · 多选按勾选顺序串跑)</span>
         {isRunning && (
           <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
             主 runner 在跑 — 先停才能阶段测试
@@ -86,23 +119,47 @@ export function PhaseTester() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span>选阶段:</span>
-        {phases.map((p) => (
-          <Button
-            key={p.key}
-            variant={selPhase === p.key ? 'secondary' : 'outline'}
-            size="sm"
-            onClick={() => setSelPhase(p.key)}
-            title={p.name}
-          >
-            <span className="font-mono">{p.key}</span>
-            <span className="ml-1 text-[10px] opacity-70">{p.name}</span>
-          </Button>
-        ))}
+        <span className="font-semibold">阶段 (点选, 再点取消):</span>
+        {phases.map((p) => {
+          const idx = selKeys.indexOf(p.key)
+          const sel = idx >= 0
+          const isExp = expanded === p.key
+          return (
+            <div key={p.key} className="inline-flex items-center gap-0.5">
+              <button
+                onClick={() => togglePhase(p.key)}
+                className={`px-2 py-1 rounded-l border text-xs flex items-center gap-1.5 transition ${
+                  sel
+                    ? 'bg-blue-100 border-blue-400 text-blue-700 font-semibold'
+                    : 'border-border hover:bg-zinc-50'
+                }`}
+              >
+                {sel && <span className="font-mono text-[10px] bg-blue-500 text-white rounded-full w-4 h-4 inline-flex items-center justify-center">{idx + 1}</span>}
+                <span className="font-mono">{p.key}</span>
+                <span className="text-[10px] opacity-70">{p.name}</span>
+              </button>
+              <button
+                onClick={() => setExpanded(isExp ? null : p.key)}
+                className="px-1 py-1 rounded-r border-y border-r border-border text-xs hover:bg-zinc-50"
+                title="看流程文档"
+              >
+                {isExp ? '▴' : '▾'}
+              </button>
+            </div>
+          )
+        })}
+        <Button variant="ghost" size="sm" className="text-[11px]" onClick={() => setSelKeys(selKeys.length === allKeys.length ? [] : allKeys)}>
+          {selKeys.length === allKeys.length ? '清空' : '全选'}
+        </Button>
       </div>
 
+      {/* 流程文档展开 */}
+      {expanded && (
+        <PhaseDoc def={phases.find((p) => p.key === expanded)!} />
+      )}
+
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span>选实例:</span>
+        <span className="font-semibold">实例:</span>
         {availableInstances.map((e) => (
           <Button
             key={e.index}
@@ -119,53 +176,93 @@ export function PhaseTester() {
         )}
       </div>
 
-      {(selPhase === 'P3a' || selPhase === 'P3b' || selPhase === 'P4') && (
+      {selKeys.some((k) => ROLE_PHASES.has(k)) && (
         <div className="flex items-center gap-2 text-xs">
           <span>角色:</span>
-          {ROLES.map((r) => (
+          {(['captain', 'member'] as const).map((r) => (
             <Button
-              key={r.value}
-              variant={selRole === r.value ? 'secondary' : 'outline'}
+              key={r}
+              variant={selRole === r ? 'secondary' : 'outline'}
               size="sm"
-              onClick={() => setSelRole(r.value)}
+              onClick={() => setSelRole(r)}
             >
-              {r.label}
+              {r === 'captain' ? '队长 (leader)' : '队员 (follower)'}
             </Button>
           ))}
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <Button
           size="sm"
-          disabled={busy || isRunning}
-          onClick={run}
-          className="min-w-[160px]"
+          disabled={busy || isRunning || selKeys.length === 0}
+          onClick={runAll}
+          className="min-w-[180px]"
         >
-          {busy ? '跑中…' : `跑一次 ${selPhase}`}
+          {busy ? `跑中… ${progress}` : `串跑 ${selKeys.length} 个阶段`}
         </Button>
-        <span className="text-[11px] text-muted-foreground">
-          跑完去「决策档案」看详情 (input.jpg / 标注图 / 5 层 Tier)
+        <label className="flex items-center gap-1 text-xs">
+          <input
+            type="checkbox"
+            checked={keepGoing}
+            onChange={(e) => setKeepGoing(e.target.checked)}
+          />
+          失败也继续 (默认遇错停)
+        </label>
+        <span className="text-[11px] text-muted-foreground ml-auto">
+          跑完去「决策档案」看每帧详情
         </span>
       </div>
 
-      {result && (
-        <div className={`rounded p-2 text-[11px] ${
-          result.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-800'
-        }`}>
-          {result.ok ? (
-            <div className="space-y-0.5">
-              <div className="font-semibold">✓ {result.phase} ({result.phase_name}) 在 #{result.instance} 完成</div>
-              <div>耗时 <span className="font-mono">{result.duration_ms?.toFixed?.(0) || result.duration_ms}ms</span> · 角色 {result.role} · {result.fresh_runner ? '临时 runner' : '复用 runner'}</div>
-              {result.decision_session && (
-                <div>决策会话: <span className="font-mono">{result.decision_session}</span> (去「决策档案」看)</div>
+      {results.length > 0 && (
+        <div className="rounded border border-border bg-zinc-50 p-2 space-y-1">
+          {results.map((r, i) => (
+            <div key={i} className={`flex items-center gap-2 text-[11px] ${r.ok ? 'text-emerald-800' : 'text-red-800'}`}>
+              <span>{r.ok ? '✓' : '✗'}</span>
+              <span className="font-mono">{r.phase}</span>
+              <span>{r.phase_name}</span>
+              {r.duration_ms !== undefined && (
+                <span className="font-mono text-zinc-500">{r.duration_ms.toFixed(0)}ms</span>
               )}
+              {r.error && <span className="text-red-700">— {r.error}</span>}
             </div>
-          ) : (
-            <div>✗ 失败: {result.error || result.detail || '未知错误'}</div>
-          )}
+          ))}
         </div>
       )}
+    </div>
+  )
+}
+
+
+function PhaseDoc({ def }: { def: PhaseDef }) {
+  return (
+    <div className="rounded border border-blue-200 bg-blue-50/40 p-3 text-xs space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="font-mono font-bold">{def.key}</span>
+        <span className="font-semibold text-blue-700">{def.name}</span>
+        <span className="ml-auto text-[10px] text-muted-foreground">
+          max_rounds={def.max_rounds} · 间隔 {def.round_interval_s}s
+        </span>
+      </div>
+      {def.description && (
+        <div className="text-zinc-700">{def.description}</div>
+      )}
+      {def.flow_steps && def.flow_steps.length > 0 && (
+        <div>
+          <div className="text-[11px] font-semibold mb-1 text-zinc-600">执行流程:</div>
+          <ol className="space-y-0.5 text-[11px] text-zinc-700">
+            {def.flow_steps.map((s, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="text-blue-500 font-mono w-4 shrink-0">{i + 1}.</span>
+                <span>{s}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      <div className="text-[10px] text-muted-foreground">
+        ⓘ 文字来自 PhaseHandler.description / flow_steps (类属性). 改代码 → 这里立即同步.
+      </div>
     </div>
   )
 }

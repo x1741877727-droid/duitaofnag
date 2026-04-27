@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 class P4MapSetupHandler(PhaseHandler):
     name = "P4"
+    name_cn = "选地图开打"
+    description = "队长选模式 + 选地图 + 准备开打. 薄壳包装现有 phase_map_setup. OCR 全屏识别."
+    flow_steps = [
+        "选模式 (默认 团队竞技, 可配 settings.target_mode)",
+        "选地图 (默认 狙击团竞, 可配 settings.target_map)",
+        "勾选「准备」按钮",
+        "等队员都准备",
+        "点「开始游戏」",
+    ]
     max_rounds = 1
     round_interval_s = 1.0
 
