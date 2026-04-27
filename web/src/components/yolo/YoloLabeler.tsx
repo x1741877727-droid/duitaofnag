@@ -81,10 +81,14 @@ export function YoloLabeler({
   const fileList = useMemo(() => {
     if (!data) return []
     let list = data.items
-    if (filter === 'remaining') list = list.filter((x) => !x.labeled && !x.skipped)
-    else if (filter === 'labeled') list = list.filter((x) => x.labeled)
+    // remaining: 保留 "未标" + 当前选中的图 (避免保存后当前图从列表消失列表跳到顶)
+    if (filter === 'remaining') {
+      list = list.filter((x) => (!x.labeled && !x.skipped) || x.name === name)
+    } else if (filter === 'labeled') {
+      list = list.filter((x) => x.labeled || x.name === name)
+    }
     return list
-  }, [data, filter])
+  }, [data, filter, name])
 
   // ─── 鼠标交互 (画框) ───
   function clientToNorm(clientX: number, clientY: number): { nx: number; ny: number } | null {
@@ -193,9 +197,15 @@ export function YoloLabeler({
     setSaving(true)
     try {
       await saveLabels(name, boxes)
-      // 刷新文件列表
-      const d = await fetchDataset()
-      setData(d)
+      // 乐观更新本地 (不重新 fetch 整个 dataset, 避免列表重新排序跳到顶)
+      setData((d) => d ? {
+        ...d,
+        items: d.items.map((it) =>
+          it.name === name
+            ? { ...it, labeled: boxes.length > 0, skipped: boxes.length === 0 }
+            : it
+        ),
+      } : d)
     } finally {
       setSaving(false)
     }
@@ -206,18 +216,13 @@ export function YoloLabeler({
     setSaving(true)
     try {
       await saveLabels(name, [])
-      const d = await fetchDataset()
-      setData(d)
-      // 自动跳下一张未标
-      if (d) {
-        const next = d.items.find(
-          (x) => x.name !== name && !x.labeled && !x.skipped,
-        )
-        if (next) {
-          setName(next.name)
-          onChangeName?.(next.name)
-        }
-      }
+      // 乐观更新本地状态
+      setData((d) => d ? {
+        ...d,
+        items: d.items.map((it) =>
+          it.name === name ? { ...it, labeled: false, skipped: true } : it
+        ),
+      } : d)
     } finally {
       setSaving(false)
     }
@@ -624,15 +629,26 @@ export function YoloLabeler({
           <div><span className="font-mono">B</span> 负样本 · <span className="font-mono">E</span> AI 预标 · <span className="font-mono">Del</span> 删最后框</div>
           <div><span className="font-mono">1-9</span> 切类别 · <span className="font-mono">Esc</span> 取消画框</div>
           <div className="pt-1.5 text-foreground/70 border-t border-border mt-1.5">
-            <div className="font-semibold mb-0.5">负样本是什么</div>
+            <div className="font-semibold mb-0.5 text-foreground">负样本 ≠ 某个类的反例</div>
             <div>
-              "干净大厅 / 战斗中 / loading / 直播 banner" 这种 <strong>整张图都没目标</strong> 的截图,
-              点 "标为负样本" 就行 — 系统会写一个空 .txt 标记 "这张我看过了, 但确实没东西",
-              训练时按 1:3 比例自动混进去当背景。
+              YOLO 的负样本是 <strong>整张图都没有任何要检测的目标</strong>,
+              不是给 close_x 单独标"反例"。空 .txt 表示"这张我看过了, 全图无东西"。
+            </div>
+            <div className="mt-1">
+              <span className="font-semibold text-foreground">怎么标:</span>
+            </div>
+            <div className="mt-0.5">
+              · 图里有 close_x → 画 close_x 框 (正样本)
+            </div>
+            <div>
+              · 图里只有 action_btn → 画 action_btn 框, <strong>不用</strong>额外标 close_x
+            </div>
+            <div>
+              · 干净大厅 / 直播 / loading / 战斗中 → 按 B (整张负样本)
             </div>
             <div className="mt-1 text-foreground/60">
-              不会影响其他已标注的图。负样本只挑容易混淆的 (大厅/banner/loading)
-              30-50 张就够, <strong>不需要全标</strong>。
+              YOLO 训练时会自动从负样本里学"这种场景该输出空", 不需要你显式说"这是哪类的反例"。
+              30-50 张容易混淆的负样本就够, 不影响已标注的图。
             </div>
           </div>
         </div>
