@@ -26,8 +26,9 @@ from .runner_service import MultiRunnerService
 
 logger = logging.getLogger(__name__)
 
-# 模块级 service 引用 (api_templates 等 router 用)
+# 模块级 service / config 引用 (api_templates 等 router 用)
 _active_service = None
+_active_config = None
 
 
 # =====================
@@ -207,8 +208,9 @@ def create_app(config: ConfigManager) -> FastAPI:
 
     service = MultiRunnerService()
     # 暴露给其他 router (api_templates 抓实例帧用)
-    global _active_service
+    global _active_service, _active_config
     _active_service = service
+    _active_config = config
 
     # 调试 web UI（独立 0.0.0.0:8901，Mac 浏览器可访问，不影响桌面 webview）
     try:
@@ -243,6 +245,14 @@ def create_app(config: ConfigManager) -> FastAPI:
         logger.info("[api] /api/templates/* 已挂载")
     except Exception as _e:
         logger.warning(f"[api] api_templates 挂载失败: {_e}")
+
+    # YOLO 测试
+    try:
+        from .api_yolo import router as _yolo_router
+        app.include_router(_yolo_router)
+        logger.info("[api] /api/yolo/* 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_yolo 挂载失败: {_e}")
 
     @app.on_event("startup")
     async def startup():

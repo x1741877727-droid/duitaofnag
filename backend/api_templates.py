@@ -62,8 +62,42 @@ def _template_dir() -> Path:
     for p in candidates:
         if p.is_dir():
             return p
-    # 兜底: 回 root/fixtures/templates 即使不存在 (调用方处理)
     return candidates[0]
+
+
+def _meta_dir() -> Path:
+    """元数据目录: 存原图 + 裁剪 bbox JSON.
+    每模版一组: <name>_orig.png + <name>.json
+    """
+    d = _template_dir().parent / "templates_meta"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _read_meta(name: str) -> Optional[dict]:
+    p = _meta_dir() / f"{name}.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _write_meta(name: str, *, orig_filename: str = "", crop_bbox: Optional[list] = None,
+                source: str = "") -> None:
+    p = _meta_dir() / f"{name}.json"
+    try:
+        data = {
+            "name": name,
+            "orig_filename": orig_filename,
+            "crop_bbox": crop_bbox,
+            "source": source,
+            "saved_at": time.time(),
+        }
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"[templates] write_meta err: {e}")
 
 
 # ─── 工具 ───
@@ -171,6 +205,48 @@ async def template_file(name: str):
     p = _template_dir() / f"{name}.png"
     if not p.is_file():
         raise HTTPException(404, "模版不存在")
+    return FileResponse(p, media_type="image/png")
+
+
+@router.get("/api/templates/detail/{name}")
+async def template_detail(name: str):
+    """模版详情: 含元数据 + 原图存在性 + 裁剪 bbox.
+    前端用 crop_bbox 在原图上画矩形, 显示"模版来自这里".
+    """
+    name = _safe_name(name)
+    p = _template_dir() / f"{name}.png"
+    if not p.is_file():
+        raise HTTPException(404, "模版不存在")
+    img = cv2.imread(str(p))
+    h, w = (int(img.shape[0]), int(img.shape[1])) if img is not None else (0, 0)
+    meta = _read_meta(name) or {}
+    orig_filename = meta.get("orig_filename") or ""
+    has_orig = bool(orig_filename) and (_meta_dir() / orig_filename).is_file()
+    return {
+        "name": name,
+        "category": _categorize(name),
+        "width": w,
+        "height": h,
+        "phash": f"0x{_phash_image(img):016x}" if img is not None else "",
+        "has_original": has_orig,
+        "original_url": f"/api/templates/original/{name}" if has_orig else "",
+        "crop_bbox": meta.get("crop_bbox"),     # [x1,y1,x2,y2] 在原图坐标
+        "source": meta.get("source", ""),
+        "saved_at": meta.get("saved_at"),
+    }
+
+
+@router.get("/api/templates/original/{name}")
+async def template_original(name: str):
+    """模版原图 (上传/裁剪源图). 老模版未保留 → 404 让前端显示"原图丢失"."""
+    name = _safe_name(name)
+    meta = _read_meta(name) or {}
+    orig_filename = meta.get("orig_filename") or ""
+    if not orig_filename:
+        raise HTTPException(404, "原图未保留")
+    p = _meta_dir() / orig_filename
+    if not p.is_file():
+        raise HTTPException(404, "原图文件丢失")
     return FileResponse(p, media_type="image/png")
 
 
@@ -316,6 +392,23 @@ def _register_upload():
         ok = cv2.imwrite(str(dst), img)
         if not ok:
             raise HTTPException(500, "保存失败")
+        # 保留原图 + 裁剪 bbox 元数据 (供详情页"看是裁剪源图哪里"用)
+        orig_full = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        crop_bbox: Optional[list] = None
+        orig_filename = ""
+        if orig_full is not None:
+            md = _meta_dir()
+            orig_filename = f"{sname}_orig.png"
+            try:
+                cv2.imwrite(str(md / orig_filename), orig_full,
+                            [cv2.IMWRITE_PNG_COMPRESSION, 5])
+            except Exception:
+                orig_filename = ""
+            if crop_x is not None and crop_y is not None and crop_w is not None and crop_h is not None:
+                crop_bbox = [int(crop_x), int(crop_y),
+                             int(crop_x + crop_w), int(crop_y + crop_h)]
+        _write_meta(sname, orig_filename=orig_filename,
+                    crop_bbox=crop_bbox, source="upload")
         _reload_test_matcher()
         return {
             "ok": True,
@@ -325,6 +418,8 @@ def _register_upload():
             "height": int(img.shape[0]),
             "phash": f"0x{new_phash:016x}",
             "similar": similar,
+            "orig_filename": orig_filename,
+            "crop_bbox": crop_bbox,
         }
 
 
@@ -417,25 +512,25 @@ async def template_test(req: TemplateTestReq):
         shot = _load_screenshot_from_decision(req.decision_id, req.session or "")
         src_kind = f"decision:{req.decision_id}"
     elif req.instance is not None:
-        # 从主 service 抓一帧 (不阻塞主 runner; service 自带 2s 缓存)
-        try:
-            from .runner_service import MultiRunnerService  # noqa: F401
-            from .api import _service_holder  # 见 api.py 注入
-        except Exception:
-            _service_holder = None
-        try:
-            from . import api as _api_mod
-            svc = getattr(_api_mod, "_active_service", None)
-        except Exception:
-            svc = None
+        # 抓帧: runner 启动了用 minicap 流, 没启动直接 ADB 拉 (传 adb_path 触发 fallback)
+        from . import api as _api_mod
+        svc = getattr(_api_mod, "_active_service", None)
+        cfg = getattr(_api_mod, "_active_config", None)
         if svc is None:
             raise HTTPException(503, "主 service 不可用; 试上传图片或选历史决策")
+        adb_path = ""
+        if cfg is not None:
+            try:
+                adb_path = cfg.settings.adb_path or os.path.join(
+                    cfg.settings.ldplayer_path, "adb.exe")
+            except Exception:
+                adb_path = ""
         try:
-            jpg = await svc.get_screenshot(int(req.instance), max_width=0)
+            jpg = await svc.get_screenshot(int(req.instance), adb_path=adb_path, max_width=0)
         except Exception as e:
             raise HTTPException(500, f"截图失败: {e}")
         if jpg is None:
-            raise HTTPException(503, f"实例 #{req.instance} 抓不到画面")
+            raise HTTPException(503, f"实例 #{req.instance} 抓不到画面 (模拟器没开?)")
         arr = np.frombuffer(jpg, dtype=np.uint8)
         shot = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         src_kind = f"instance:{req.instance}"

@@ -58,6 +58,29 @@ export async function fetchTemplateStats(name: string): Promise<TemplateStats> {
   return await r.json()
 }
 
+export interface TemplateDetail {
+  name: string
+  category: string
+  width: number
+  height: number
+  phash: string
+  has_original: boolean
+  original_url: string
+  crop_bbox: number[] | null    // [x1,y1,x2,y2] 在原图坐标
+  source: string
+  saved_at: number | null
+}
+
+export async function fetchTemplateDetail(name: string): Promise<TemplateDetail> {
+  const r = await fetch(`/api/templates/detail/${encodeURIComponent(name)}`)
+  if (!r.ok) throw new Error(`detail ${r.status}`)
+  return await r.json()
+}
+
+export function templateOriginalSrc(name: string): string {
+  return `/api/templates/original/${encodeURIComponent(name)}?t=${Math.floor(Date.now() / 60000)}`
+}
+
 export function templateImgSrc(name: string): string {
   return `/api/templates/file/${encodeURIComponent(name)}?t=${Math.floor(Date.now() / 60000)}`
 }
