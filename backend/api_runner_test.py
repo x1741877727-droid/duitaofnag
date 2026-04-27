@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# 全局取消令牌 (前端按"停止测试" → POST /cancel → set v=True)
+# single_runner._run_v3_phase 每轮检查这个 flag.
+CANCEL_FLAG: dict = {"v": False}
+
 
 # phase 名 → handler class
 _HANDLER_MAP = {
@@ -144,12 +148,15 @@ async def test_phase(req: TestPhaseReq):
 
     handler = handler_cls()
 
+    # 跑前重置取消令牌
+    CANCEL_FLAG["v"] = False
+
     # 跑
     t0 = time.perf_counter()
     error: Optional[str] = None
     ok = False
     try:
-        ok = await runner._run_v3_phase(handler)
+        ok = await runner._run_v3_phase(handler, instance_idx=int(req.instance))
     except Exception as e:
         error = str(e)
         logger.warning(f"[test_phase] _run_v3_phase err: {e}", exc_info=True)
@@ -176,6 +183,13 @@ async def test_phase(req: TestPhaseReq):
         "fresh_runner": fresh,
         "error": error,
     }
+
+
+@router.post("/api/runner/cancel")
+async def cancel_test():
+    """打断当前阶段测试 (set CANCEL_FLAG, _run_v3_phase 每轮检查)."""
+    CANCEL_FLAG["v"] = True
+    return {"ok": True, "msg": "已请求中止, 当前帧跑完即停"}
 
 
 async def _build_test_runner(svc, cfg, instance_idx: int, role: str):

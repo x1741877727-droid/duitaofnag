@@ -117,35 +117,67 @@ export function Header() {
           )}
         </Button>
 
-        {/* 运行控制 */}
-        <Button
-          variant={isRunning ? 'destructive' : 'default'}
-          size="sm"
-          onClick={async () => {
-            setLoading(true)
-            try {
-              if (isRunning) {
-                await fetch('/api/stop', { method: 'POST' })
-                setIsRunning(false)
-                setInstances({})
-              } else {
-                const res = await fetch('/api/start', { method: 'POST' })
-                const json = await res.json()
-                if (json.ok) setIsRunning(true)
-              }
-            } catch {}
-            setLoading(false)
-          }}
-          disabled={loading}
-          className="gap-2 min-w-24"
-        >
-          {isRunning ? (
-            <><Square className="h-4 w-4" />停止</>
-          ) : (
-            <><Play className="h-4 w-4" />{loading ? '启动中...' : '启动'}</>
-          )}
-        </Button>
+        {/* 运行控制 — 主 runner 跑 / 阶段测试跑 都显停止按钮 */}
+        <RunButton loading={loading} setLoading={setLoading} />
       </div>
     </header>
   )
 }
+
+function RunButton({ loading, setLoading }: { loading: boolean; setLoading: (v: boolean) => void }) {
+  const isRunning = useAppStore((s) => s.isRunning)
+  const setIsRunning = useAppStore((s) => s.setIsRunning)
+  const setInstances = useAppStore((s) => s.setInstances)
+  const phaseBusy = useAppStore((s) => s.phaseTester.busy)
+  const phaseProg = useAppStore((s) => s.phaseTester.progress)
+
+  // 阶段测试在跑 → 这个按钮变成"停止测试"
+  if (phaseBusy) {
+    return (
+      <Button
+        variant="destructive"
+        size="sm"
+        onClick={async () => {
+          try { await fetch('/api/runner/cancel', { method: 'POST' }) } catch {}
+        }}
+        className="gap-2 min-w-24"
+        title="停止当前阶段测试"
+      >
+        <Square className="h-4 w-4" />
+        <span className="truncate max-w-[100px]">停测试 {phaseProg ? `· ${phaseProg.split('·')[0].trim()}` : ''}</span>
+      </Button>
+    )
+  }
+
+  // 主 runner 状态
+  return (
+    <Button
+      variant={isRunning ? 'destructive' : 'default'}
+      size="sm"
+      onClick={async () => {
+        setLoading(true)
+        try {
+          if (isRunning) {
+            await fetch('/api/stop', { method: 'POST' })
+            setIsRunning(false)
+            setInstances({})
+          } else {
+            const res = await fetch('/api/start', { method: 'POST' })
+            const json = await res.json()
+            if (json.ok) setIsRunning(true)
+          }
+        } catch {}
+        setLoading(false)
+      }}
+      disabled={loading}
+      className="gap-2 min-w-24"
+    >
+      {isRunning ? (
+        <><Square className="h-4 w-4" />停止</>
+      ) : (
+        <><Play className="h-4 w-4" />{loading ? '启动中...' : '启动'}</>
+      )}
+    </Button>
+  )
+}
+

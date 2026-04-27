@@ -166,13 +166,30 @@ class SingleInstanceRunner:
         )
         return self._v3_ctx
 
-    async def _run_v3_phase(self, handler) -> bool:
-        """用 v3 PhaseHandler 跑一个 phase. 返回 True=NEXT/DONE, False=FAIL/超时."""
+    async def _run_v3_phase(self, handler, instance_idx: int = -1) -> bool:
+        """用 v3 PhaseHandler 跑一个 phase. 返回 True=NEXT/DONE, False=FAIL/超时.
+
+        每帧 wrap recorder.new_decision/finalize, 跟 runner_fsm._loop_phase 一致,
+        以便阶段测试也能写决策档案.
+        """
         from .phase_base import PhaseResult
         from .action_executor import ActionExecutor
+        from .decision_log import get_recorder
+        recorder = get_recorder()
         ctx = self._build_v3_ctx()
+        if instance_idx >= 0:
+            ctx.instance_idx = instance_idx
         await handler.enter(ctx)
+        # 取消令牌: 前端 /api/runner/cancel 可置位
+        try:
+            from ..api_runner_test import CANCEL_FLAG
+        except Exception:
+            CANCEL_FLAG = None
         for rnd in range(handler.max_rounds):
+            if CANCEL_FLAG is not None and CANCEL_FLAG.get("v"):
+                logger.info(f"[{handler.name}] 收到取消信号 → 中止 (R{rnd})")
+                await handler.exit(ctx, PhaseResult.FAIL)
+                return False
             ctx.phase_round = rnd + 1
             try:
                 shot = await self.adb.screenshot()
@@ -182,20 +199,62 @@ class SingleInstanceRunner:
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
+
+            # 开决策记录
+            phash_str = ""
+            try:
+                from .adb_lite import phash as _phash
+                ph = _phash(shot)
+                phash_str = f"0x{int(ph):016x}" if ph else ""
+                ctx.current_phash = phash_str
+            except Exception:
+                pass
+            decision = None
+            try:
+                decision = recorder.new_decision(
+                    instance=ctx.instance_idx,
+                    phase=handler.name,
+                    round_idx=ctx.phase_round,
+                )
+                decision.set_input(shot, phash_str, q=70)
+                ctx.current_decision = decision
+            except Exception as e:
+                logger.debug(f"[{handler.name}] new_decision err: {e}")
+
+            handle_exc = None
+            step = None
             try:
                 step = await handler.handle_frame(ctx)
             except Exception as e:
+                handle_exc = e
                 logger.warning(f"[{handler.name}/R{rnd+1}] handle_frame 异常: {e}", exc_info=True)
-                final = await handler.on_failure(ctx, e)
-                await handler.exit(ctx, final)
-                return False
-            if step.note:
-                logger.info(f"[{handler.name}/R{rnd+1}] {step.note}")
-            if step.action is not None:
+
+            # 实施 action (set_tap/verify 在 ActionExecutor 里写 ctx.current_decision)
+            if step is not None and step.action is not None:
                 try:
                     await ActionExecutor.apply(ctx, step.action)
                 except Exception as e:
                     logger.warning(f"[{handler.name}] ActionExecutor 异常: {e}")
+
+            # finalize
+            try:
+                if decision is not None:
+                    if step is not None:
+                        outcome = step.outcome_hint or _result_to_outcome_str(step.result)
+                        decision.finalize(outcome=outcome, note=step.note or "")
+                    else:
+                        decision.finalize(outcome="phase_exception", note=repr(handle_exc) if handle_exc else "")
+            except Exception as _e:
+                pass
+            ctx.current_decision = None
+
+            if handle_exc is not None:
+                final = await handler.on_failure(ctx, handle_exc)
+                await handler.exit(ctx, final)
+                return False
+
+            if step.note:
+                logger.info(f"[{handler.name}/R{rnd+1}] {step.note}")
             if step.result in (PhaseResult.NEXT, PhaseResult.DONE):
                 await handler.exit(ctx, step.result)
                 return True
@@ -204,7 +263,6 @@ class SingleInstanceRunner:
                 return False
             if step.result == PhaseResult.GAME_RESTART:
                 await handler.exit(ctx, step.result)
-                # 让上层 runner_service 接住 → 翻译成 _GameCrashError
                 raise V3GameRestartRequested(handler.name)
             if step.result == PhaseResult.WAIT:
                 await asyncio.sleep(max(0.0, step.wait_seconds))
@@ -213,6 +271,15 @@ class SingleInstanceRunner:
         logger.warning(f"[{handler.name}] 超 max_rounds={handler.max_rounds} → FAIL")
         await handler.exit(ctx, PhaseResult.FAIL)
         return False
+
+
+def _result_to_outcome_str(r) -> str:
+    from .phase_base import PhaseResult
+    return {
+        PhaseResult.NEXT: "phase_next", PhaseResult.RETRY: "retry",
+        PhaseResult.WAIT: "wait", PhaseResult.FAIL: "phase_fail",
+        PhaseResult.GAME_RESTART: "game_restart", PhaseResult.DONE: "phase_done",
+    }.get(r, str(r))
 
     def _frame_changed(self, shot: np.ndarray, threshold: int = 4) -> bool:
         """pHash 帧差检测：画面没变返回 False，跳过 OCR"""

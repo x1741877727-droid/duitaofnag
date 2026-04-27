@@ -279,18 +279,29 @@ export function PhaseTester() {
       )}
 
       <div className="flex items-center gap-2 flex-wrap">
-        <Button
-          size="sm"
-          disabled={busy || isRunning || selKeys.length === 0}
-          onClick={runAll}
-          className="min-w-[180px]"
-        >
-          {busy ? `跑中… ${progress}` : (
-            useFromConsole && targetsFromConsole.length > 1
+        {busy ? (
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={async () => {
+              try { await fetch('/api/runner/cancel', { method: 'POST' }) } catch {}
+            }}
+            className="min-w-[180px]"
+          >
+            停止测试 ({progress})
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            disabled={isRunning || selKeys.length === 0}
+            onClick={runAll}
+            className="min-w-[180px]"
+          >
+            {useFromConsole && targetsFromConsole.length > 1
               ? `串跑 ${selKeys.length} 阶段 × ${targetsFromConsole.length} 实例`
-              : `串跑 ${selKeys.length} 个阶段`
-          )}
-        </Button>
+              : `串跑 ${selKeys.length} 个阶段`}
+          </Button>
+        )}
         <label className="flex items-center gap-1 text-xs">
           <input
             type="checkbox"
