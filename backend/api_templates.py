@@ -481,6 +481,7 @@ def _get_test_matcher():
         try:
             from .automation.screen_matcher import ScreenMatcher
             _test_matcher = ScreenMatcher(str(_template_dir()))
+            _test_matcher.load_all()   # 必须显式 load, 否则 _templates 为空, match_one 永远返 None
         except Exception as e:
             logger.warning(f"[templates] init ScreenMatcher 失败: {e}")
             _test_matcher = None

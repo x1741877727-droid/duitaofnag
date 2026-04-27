@@ -232,6 +232,7 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     if not os.path.isdir(tmpl_dir):
         tmpl_dir = os.path.join(proj_root, "_internal", "fixtures", "templates")
     matcher = ScreenMatcher(tmpl_dir)
+    matcher.load_all()   # 必须显式 load, 否则 _templates 为空, P2 模板兜底永不命中
 
     # decision_log session 还没初始化 → 用跟 runner_service 同算法的 logs/ 路径
     # (开发: <项目根>/logs/test_TS, exe: <exe目录>/logs/test_TS)
