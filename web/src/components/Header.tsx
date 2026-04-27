@@ -31,102 +31,110 @@ export function Header() {
   }, [instances])
 
   return (
-    <header className="h-12 border-b border-border bg-card flex items-center justify-between px-4 shrink-0">
-      <div className="flex items-center gap-8">
-        <h1 className="text-lg font-bold text-foreground tracking-tight">FightMaster</h1>
-        
-        <nav className="flex items-center gap-1">
+    <header className="h-12 border-b border-border bg-card flex items-center justify-between px-4 shrink-0 gap-3">
+      <div className="flex items-center gap-4 min-w-0">
+        <h1 className="text-lg font-bold text-foreground tracking-tight shrink-0">FightMaster</h1>
+
+        <nav className="flex items-center gap-0.5 min-w-0 overflow-x-auto">
           <Button
             variant={currentView === 'dashboard' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('dashboard')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="运行控制"
           >
             <LayoutDashboard className="h-4 w-4" />
-            运行控制
+            <span className="hidden xl:inline">运行</span>
           </Button>
           <Button
             variant={currentView === 'console' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('console')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="中控台"
           >
             <Activity className="h-4 w-4" />
-            中控台
+            <span className="hidden xl:inline">中控台</span>
           </Button>
           <Button
             variant={currentView === 'archive' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('archive')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="决策档案"
           >
             <Archive className="h-4 w-4" />
-            决策档案
+            <span className="hidden xl:inline">档案</span>
           </Button>
           <Button
             variant={currentView === 'templates' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('templates')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="模版库"
           >
             <Image className="h-4 w-4" />
-            模版库
+            <span className="hidden xl:inline">模版</span>
           </Button>
           <Button
             variant={currentView === 'yolo' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('yolo')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="YOLO"
           >
             <Crosshair className="h-4 w-4" />
-            YOLO
+            <span className="hidden xl:inline">YOLO</span>
           </Button>
           <Button
             variant={currentView === 'memory' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('memory')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="记忆库"
           >
             <Brain className="h-4 w-4" />
-            记忆库
+            <span className="hidden xl:inline">记忆</span>
           </Button>
           <Button
             variant={currentView === 'perf' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('perf')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="性能监控"
           >
             <BarChart3 className="h-4 w-4" />
-            性能
+            <span className="hidden xl:inline">性能</span>
           </Button>
           <Button
             variant={currentView === 'settings' ? 'secondary' : 'ghost'}
             size="sm"
             onClick={() => setCurrentView('settings')}
-            className="gap-2"
+            className="gap-1.5 px-2 shrink-0"
+            title="设置"
           >
             <Settings className="h-4 w-4" />
-            设置
+            <span className="hidden xl:inline">设置</span>
           </Button>
         </nav>
       </div>
 
-      <div className="flex items-center gap-5">
+      <div className="flex items-center gap-3 shrink-0">
         {/* 状态统计 */}
-        <div className="flex items-center gap-5 text-sm">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3 text-sm whitespace-nowrap">
+          <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-info" />
-            <span className="text-muted-foreground">运行中</span>
+            <span className="text-muted-foreground">运行</span>
             <span className="font-semibold text-foreground">{statusCounts.running}</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-success" />
-            <span className="text-muted-foreground">已就绪</span>
+            <span className="text-muted-foreground">就绪</span>
             <span className="font-semibold text-foreground">{statusCounts.ready}</span>
           </div>
           {statusCounts.errors > 0 && (
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-error" />
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-destructive" />
               <span className="text-muted-foreground">错误</span>
               <span className="font-semibold text-foreground">{statusCounts.errors}</span>
             </div>

@@ -139,19 +139,45 @@ class FrameMemory:
         w, h = size_wh
         ts = int(time.time())
 
+        # 预先准备 snapshot 写入的 helper
+        def _save_snapshot() -> str:
+            """落盘当前帧 + 红圈点击位置, 返回相对文件名 (失败返 '')."""
+            try:
+                import cv2
+                annot = frame.copy()
+                cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
+                cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
+                fname = f"{target_name}_{int(time.time() * 1000)}.jpg"
+                fpath = self._snap_dir / fname
+                if cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 70]):
+                    return fname
+            except Exception as e:
+                logger.debug(f"[memory_l1] snapshot save err: {e}")
+            return ""
+
         with self._lock:
             existing_id = None
+            existing_snap = ""
             for row in self._db.execute(
-                "SELECT id, phash FROM frame_action "
+                "SELECT id, phash, snapshot_path FROM frame_action "
                 "WHERE target_name = ? AND ABS(action_x - ?) < 30 AND ABS(action_y - ?) < 30",
                 (target_name, x, y),
             ):
-                rid, stored_phash_str = row
+                rid, stored_phash_str, snap_p = row
                 if phash_distance(cur_phash, int(stored_phash_str)) < 3:
                     existing_id = rid
+                    existing_snap = snap_p or ""
                     break
 
             if existing_id is not None:
+                # 旧记录无 snapshot → 趁此次写一份 (保证"所有记忆都有快照")
+                if success and not existing_snap:
+                    new_snap = _save_snapshot()
+                    if new_snap:
+                        self._db.execute(
+                            "UPDATE frame_action SET snapshot_path = ? WHERE id = ?",
+                            (new_snap, existing_id),
+                        )
                 if success:
                     self._db.execute(
                         "UPDATE frame_action SET "
@@ -174,19 +200,7 @@ class FrameMemory:
                 #     下次同 phash 还会被 query 当成"历史成功" 复用)
                 if not success:
                     return
-                # 落盘快照 (本帧 + 红圈标点击位置)
-                snap_rel = ""
-                try:
-                    import cv2
-                    annot = frame.copy()
-                    cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
-                    cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
-                    fname = f"{target_name}_{int(time.time() * 1000)}.jpg"
-                    fpath = self._snap_dir / fname
-                    cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                    snap_rel = fname
-                except Exception as e:
-                    logger.debug(f"[memory_l1] snapshot save err: {e}")
+                snap_rel = _save_snapshot()
                 self._db.execute(
                     "INSERT INTO frame_action "
                     "(target_name, phash, action_x, action_y, action_w, action_h, "
