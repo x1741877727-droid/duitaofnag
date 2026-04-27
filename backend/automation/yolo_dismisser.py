@@ -503,6 +503,31 @@ class YoloDismisser:
                 target_class = "close_x"
                 target_conf = tgt.conf
 
+            # 优先级 1.5: 模板 close_x_* 兜底 (YOLO 漏检公告 / 活动 / 对话框 X)
+            # 这些模板高准确率 (0.85+), 但 v2 主路径之前没用, GuardedADB 关后丢失了
+            if tap_xy is None and matcher is not None:
+                for tn in (
+                    "close_x_announce", "close_x_dialog", "close_x_activity",
+                    "close_x_gold", "close_x_signin", "close_x_newplay",
+                    "close_x_return", "close_x_white_big",
+                ):
+                    h = matcher.match_one(shot, tn, threshold=0.80)
+                    if h:
+                        tap_xy = (h.cx, h.cy, f"模板 {tn}({h.confidence:.2f})")
+                        target_class = "template_close_x"
+                        target_conf = h.confidence
+                        logger.info(
+                            f"[Y{rnd + 1}] 模板兜底命中 {tn} @ ({h.cx},{h.cy}) "
+                            f"conf={h.confidence:.2f}"
+                        )
+                        tmpl_tier = _TR(
+                            tier=0, name=f"模板·{tn}",
+                            duration_ms=0.0, early_exit=True,
+                            note=f"YOLO 漏检, 模板兜底命中 {tn}",
+                        )
+                        decision.add_tier(tmpl_tier)
+                        break
+
             # 优先级 2：action_btn — 但要 OCR 排除 nav 按钮
             elif tap_xy is None and actions:
                 tgt = actions[0]
@@ -539,10 +564,42 @@ class YoloDismisser:
                     )
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
 
+                # 兜底 B0: outside_lobby + 卡 5 轮 → 检查是不是登录页
+                # (自动登录失败兜底: 公告关掉后回到登录页, 必须 tap 微信登录)
+                # 用 OCR 一次找 "微信登录/QQ登录" 文字 (卡住才跑 OCR, 不影响日常)
+                if lobby_hit is None and empty_dets_streak >= 5:
+                    try:
+                        ocr_inst = self._get_ocr_for_cta()
+                        if ocr_inst is not None:
+                            hits = ocr_inst._ocr_all(shot) or []
+                            for h in hits:
+                                t = getattr(h, "text", "")
+                                if "微信登录" in t or "QQ登录" in t or "扫码登录" in t:
+                                    cx = getattr(h, "cx", 0)
+                                    cy = getattr(h, "cy", 0)
+                                    if cx and cy:
+                                        tap_xy = (cx, cy, f"登录兜底('{t[:8]}')")
+                                        target_class = "login_btn"
+                                        target_conf = 0.85
+                                        ocr_text = t
+                                        logger.warning(
+                                            f"[Y{rnd + 1}] 登录页兜底 → tap '{t}' "
+                                            f"@ ({cx},{cy}) (自动登录失败)"
+                                        )
+                                        login_tier = _TR(
+                                            tier=3, name="登录页兜底",
+                                            duration_ms=0.0, early_exit=True,
+                                            note=f"OCR 找到登录按钮: {t}",
+                                        )
+                                        decision.add_tier(login_tier)
+                                        break
+                    except Exception as _e:
+                        logger.debug(f"[login] err: {_e}")
+
                 # 兜底 B: outside_lobby (lobby 模板未命中) + X 找不到 → 必须找 CTA 才能回大厅
                 # 强引导活动 (砍价 / 立即领取) 设计上只有 CTA 出路, 必须点
                 # popup_in_lobby (lobby 模板命中) 时不进, 等下一轮 (避免误参与活动)
-                if lobby_hit is None:
+                if tap_xy is None and lobby_hit is None:
                     try:
                         from .cta_detector import find_main_cta, NAV_BLACKLIST
                         ocr_inst = self._get_ocr_for_cta()

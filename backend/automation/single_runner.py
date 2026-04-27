@@ -392,47 +392,73 @@ class SingleInstanceRunner:
 
         await self.adb.start_app(GAME_PACKAGE)
 
-        # 轮询等待加载完成（不固定等待，快电脑秒过，慢电脑也能等到）
-        # GuardedADB 会自动处理加载中弹出的系统弹窗（内存提醒等）
-        for attempt in range(60):  # 最多60次 × 1.5s = 90秒
+        # v2-6: P1 完成判定多源 OR (零 OCR), 12 实例并发也不爆 CPU.
+        # P1 只负责"脱离加载黑屏 + 出现可交互 UI", 后续大厅/弹窗/登录页让 P2 处理.
+        #
+        # 任一命中即 P1 done:
+        #   ① YOLO 任何 dets > 0  (close_x / action_btn 出现 = 弹窗/按钮可见)
+        #   ② 模板 lobby_start_btn / lobby_start_game (大厅)
+        #   ③ 模板 close_x_* 任一 (公告 / 活动 / 对话框 弹窗)
+        #
+        # 老 OCR 路径完全废弃 (实测 12 实例并发跑全屏 OCR 240s/分钟 CPU).
+        from .yolo_dismisser import YoloDismisser
+        yolo_avail = YoloDismisser.is_available()
+        # close_x_* 系列模板, 公告/活动/对话框/签到 等弹窗 X 高准确率
+        close_x_template_names = [
+            "close_x_announce", "close_x_dialog", "close_x_activity",
+            "close_x_gold", "close_x_signin", "close_x_newplay",
+            "close_x_return", "close_x_white_big",
+        ]
+
+        for attempt in range(60):  # 60 × 1.5s = 90s
             await asyncio.sleep(1.5)
-            shot = await self.adb.screenshot()  # 守卫自动清弹窗
+            shot = await self.adb.screenshot()
             if shot is None:
                 continue
 
-            # YOLO 训练数据采集：launch_game 阶段最容易遇到首次启动弹窗（公告/活动/周年）
+            # YOLO 训练数据采集 (公告/活动/周年弹窗) 保留
             try:
                 from .screenshot_collector import collect as _yolo_collect
                 _yolo_collect(shot, tag="launch_game")
             except Exception:
                 pass
 
-            # 模板快速检查大厅（~20ms，每轮都做）
+            # ① 模板检测大厅 (~5ms, 现有逻辑)
             if self.matcher and self.matcher.is_at_lobby(shot):
-                logger.info("[阶段1] 游戏已在大厅（模板检测）")
-                self.dbg.log_screenshot(shot, tag="game_loaded")
+                logger.info(f"[阶段1] R{attempt+1}: 大厅模板命中 → done")
+                self.dbg.log_screenshot(shot, tag="p1_done_lobby")
                 return True
 
-            # 帧差跳过：画面没变就不跑 OCR
-            if not self._frame_changed(shot):
-                continue
+            # ② 模板检测 close_x 系列 (~15ms)
+            if self.matcher:
+                for tn in close_x_template_names:
+                    h = self.matcher.match_one(shot, tn, threshold=0.80)
+                    if h:
+                        logger.info(
+                            f"[阶段1] R{attempt+1}: 模板 {tn}({h.confidence:.2f}) 命中 → done"
+                        )
+                        self.dbg.log_screenshot(shot, tag=f"p1_done_template_{tn}")
+                        return True
 
-            # 用OCR检测当前画面
-            hits = self.ocr_dismisser.ocr_screen(shot)
-            all_text = " ".join(h.text for h in hits)
-            logger.info(f"[阶段1] 加载中R{attempt+1}: OCR={all_text[:80]}")
+            # ③ YOLO 推理 (~30ms, 任何 dets > 0 即认为脱离加载黑屏)
+            if yolo_avail:
+                try:
+                    dets = YoloDismisser.detect(shot)
+                    if dets:
+                        names = ",".join(f"{d.name}({d.conf:.2f})" for d in dets[:3])
+                        logger.info(
+                            f"[阶段1] R{attempt+1}: YOLO 检到 {len(dets)} 个目标 [{names}] → done"
+                        )
+                        self.dbg.log_screenshot(shot, tag="p1_done_yolo")
+                        return True
+                except Exception as _e:
+                    logger.debug(f"[阶段1] YOLO 推理失败: {_e}")
 
-            # 每5次保存标注截图（OCR命中位置可视化，用于定 ROI）
+            # 都没命中, log 进度 (不跑 OCR, 不识别版权文字)
             if (attempt + 1) % 5 == 0:
-                self.dbg.log_ocr_annotated(shot, hits, tag=f"loading_R{attempt+1}", roi_desc="加载检测")
+                logger.info(f"[阶段1] R{attempt+1}: 等待中 (无 UI 元素出现)")
 
-            # 检测到大厅标志或弹窗标志 → 加载完成
-            if any(kw in all_text for kw in ["开始游戏", "公告", "活动", "更新公告", "立即前往"]):
-                logger.info("[阶段1] 游戏加载完成，进入弹窗清理阶段")
-                self.dbg.log_screenshot(shot, tag="game_loaded")
-                return True
-
-        logger.warning("[阶段1] 游戏加载超时(90s)")
+        logger.warning("[阶段1] 游戏加载超时 90s, 都没识别到任何可交互 UI")
         return False
 
     # ================================================================
