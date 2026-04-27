@@ -288,6 +288,12 @@ class YoloDismisser:
             logger.warning(f"[memory] 初始化失败 (非致命): {_e}")
         memory_target = "dismiss_popups"  # 主循环统一用这个 target_name
 
+        # v2-7 Memory 延迟写入: 缓冲 (frame_phash_int, action_xy, method) 列表
+        # 只有当 P2 整体 success (return DismissResult(True, ...)) 时才 commit 进 Memory.
+        # 中间 tap 错了即使 verify 过 (画面变了), 也不污染 Memory.
+        # 这是修"YOLO 把公告图标当 close_x → tap → 弹公告 phash 变 → 错误 Memory 写入" 根因.
+        pending_memory_writes: list = []  # list[(frame_copy, action_xy, method)]
+
         # v2-4 细粒度时间记录: 从 dismiss_all 开始的累计 ms
         _phase_start_ts = time.perf_counter()
         _t_first_popup_seen_ms = -1.0
@@ -295,6 +301,24 @@ class YoloDismisser:
         _t_first_dismiss_ok_ms = -1.0
         def _ms_since_start() -> float:
             return round((time.perf_counter() - _phase_start_ts) * 1000, 1)
+
+        def _commit_pending_to_memory() -> int:
+            """P2 success 时调一次, 把缓冲的 tap 全部写入 Memory.
+            返回 commit 条数."""
+            if not memory or not pending_memory_writes:
+                return 0
+            n = 0
+            for (frame, axy, method) in pending_memory_writes:
+                try:
+                    memory.remember(
+                        frame, target_name=memory_target,
+                        action_xy=axy, success=True,
+                    )
+                    n += 1
+                except Exception as _me:
+                    logger.debug(f"[memory] commit err: {_me}")
+            pending_memory_writes.clear()
+            return n
 
         # v2 P2 四元信号融合判大厅 — 替代旧"连续 2 次模板命中"简化逻辑
         # 修半透明弹窗误判 bug: 模板命中 + close_x=0 + action_btn=0 +
@@ -424,6 +448,9 @@ class YoloDismisser:
                         outcome="lobby_confirmed_quad",
                         note=f"四元融合 OK · 关闭 {popups_closed} 个弹窗 · {quad_r.note}",
                     )
+                    _n_commit = _commit_pending_to_memory()
+                    if _n_commit:
+                        logger.info(f"[Y{rnd + 1}] 🧠 Memory commit {_n_commit} 条 (P2 success)")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
                 # 模板命中但 quad 不通过 → 仍清弹窗 (说明有遮罩或 close_x 在)
                 if lobby_hit is not None:
@@ -440,6 +467,9 @@ class YoloDismisser:
                             outcome="lobby_confirmed_legacy",
                             note=f"模板连续命中 {LOBBY_CONFIRM_NEEDED} 次 · 关闭 {popups_closed} 个弹窗",
                         )
+                        _n_commit = _commit_pending_to_memory()
+                        if _n_commit:
+                            logger.info(f"[Y{rnd + 1}] 🧠 Memory commit {_n_commit} 条 (P2 success)")
                         return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
                     decision.finalize(
                         outcome=f"lobby_pending_{lobby_confirm}/{LOBBY_CONFIRM_NEEDED}",
@@ -562,6 +592,9 @@ class YoloDismisser:
                         outcome="lobby_confirmed_empty",
                         note=f"连续 {empty_dets_streak} 轮 YOLO 无目标 + 模板命中 lobby_start_btn",
                     )
+                    _n_commit = _commit_pending_to_memory()
+                    if _n_commit:
+                        logger.info(f"[Y{rnd + 1}] 🧠 Memory commit {_n_commit} 条 (P2 success)")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
 
                 # 兜底 B0: outside_lobby + 卡 5 轮 → 检查是不是登录页 (自动登录失败兜底)
@@ -744,21 +777,24 @@ class YoloDismisser:
                                     f"[时间] dismiss_popups: 第一次成功关闭 "
                                     f"+{_t_first_dismiss_ok_ms:.0f}ms"
                                 )
-                            # ── Memory L1 写入 (成功) ──
-                            # 任何成功 tap 都入库, 下次见同 phash 直接秒过
-                            if memory is not None:
+                            # ── Memory L1 缓冲 (延迟写入) ──
+                            # 不立即写, 缓冲到 P2 全程结束 + return success 时才 commit.
+                            # 避免"中间 tap 错了画面变了" 污染 Memory.
+                            # tap 来源是 memory_hit 时不缓冲 (避免 Memory 自我强化循环).
+                            if memory is not None and target_class != "memory_hit":
                                 try:
-                                    memory.remember(
-                                        shot, target_name=memory_target,
-                                        action_xy=(tap_xy[0], tap_xy[1]),
-                                        success=True,
-                                    )
+                                    pending_memory_writes.append((
+                                        shot.copy(),
+                                        (tap_xy[0], tap_xy[1]),
+                                        target_class,
+                                    ))
                                     logger.info(
-                                        f"[Y{rnd + 1}] 🧠 Memory 写入 "
-                                        f"({tap_xy[0]},{tap_xy[1]}) method={target_class}"
+                                        f"[Y{rnd + 1}] 🧠 Memory 缓冲 "
+                                        f"({tap_xy[0]},{tap_xy[1]}) method={target_class} "
+                                        f"(待 P2 success 后 commit, 当前 buffer={len(pending_memory_writes)})"
                                     )
                                 except Exception as _me:
-                                    logger.debug(f"[memory] write err: {_me}")
+                                    logger.debug(f"[memory] buffer err: {_me}")
                     except Exception as _ee:
                         logger.debug(f"[Y{rnd + 1}] expectation verify err: {_ee}")
             except Exception:
