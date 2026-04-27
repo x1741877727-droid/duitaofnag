@@ -270,6 +270,14 @@ def create_app(config: ConfigManager) -> FastAPI:
     except Exception as _e:
         logger.warning(f"[api] api_runner_test 挂载失败: {_e}")
 
+    # 性能监控
+    try:
+        from .api_perf import router as _perf_router
+        app.include_router(_perf_router)
+        logger.info("[api] /api/perf/* 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_perf 挂载失败: {_e}")
+
     @app.on_event("startup")
     async def startup():
         ws_manager.start_drain()
