@@ -25,7 +25,8 @@ from .adb_lite import phash, phash_distance
 
 @dataclass
 class LobbyQuadResult:
-    """四元融合判定结果. is_lobby 是最终结论, 其他字段供日志/前端可视化."""
+    """五元融合判定结果. is_lobby 是最终结论, 其他字段供日志/前端可视化.
+    历史名 Quad = 旧 4 信号, 现在加了 dialog 是 5 信号 (类名保持兼容)."""
     is_lobby: bool
     template_hit: bool
     template_conf: float
@@ -35,6 +36,7 @@ class LobbyQuadResult:
     has_overlay: bool
     phash_stable_frames: int
     phash_stable_required: int
+    yolo_dialog_count: int = 0   # 弹窗本体直接检测 (新训类, 未训时恒为 0 不影响判定)
     note: str = ""
 
 
@@ -151,6 +153,8 @@ class LobbyQuadDetector:
         t_hit, t_conf, t_name = self._check_template(frame, matcher, names)
         close_x = self._count_yolo(yolo_detections, "close_x")
         action_btn = self._count_yolo(yolo_detections, "action_btn")
+        # dialog 类是新训弹窗本体. 模型未训时 _count_yolo 返 0, 整条信号失效不影响判定 — 安全降级.
+        dialog = self._count_yolo(yolo_detections, "dialog")
         has_overlay = self._check_overlay(frame)
         stable_n, stable = self._check_phash_stable(frame)
 
@@ -158,12 +162,13 @@ class LobbyQuadDetector:
             t_hit
             and close_x == 0
             and action_btn == 0
+            and dialog == 0
             and not has_overlay
             and stable
         )
 
         if is_lobby:
-            note = "all 4 signals OK"
+            note = "all 5 signals OK"
         else:
             reasons = []
             if not t_hit:
@@ -172,6 +177,8 @@ class LobbyQuadDetector:
                 reasons.append(f"close_x={close_x}")
             if action_btn > 0:
                 reasons.append(f"action_btn={action_btn}")
+            if dialog > 0:
+                reasons.append(f"dialog={dialog}")
             if has_overlay:
                 reasons.append("overlay")
             if not stable:
@@ -185,6 +192,7 @@ class LobbyQuadDetector:
             template_name=t_name,
             yolo_close_x_count=close_x,
             yolo_action_btn_count=action_btn,
+            yolo_dialog_count=dialog,
             has_overlay=has_overlay,
             phash_stable_frames=stable_n,
             phash_stable_required=self.stable_required,
