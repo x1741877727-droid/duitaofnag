@@ -190,13 +190,28 @@ class SingleInstanceRunner:
         if instance_idx >= 0:
             ctx.instance_idx = instance_idx
         await handler.enter(ctx)
-        # 取消令牌: 前端 /api/runner/cancel 可置位
+        # 取消令牌 (前端 /api/runner/cancel 可置位)
         try:
             from ..api_runner_test import CANCEL_FLAG
         except Exception:
             CANCEL_FLAG = None
+
+        def _cancelled() -> bool:
+            return CANCEL_FLAG is not None and bool(CANCEL_FLAG.get("v"))
+
+        async def _interruptible_sleep(seconds: float) -> bool:
+            """分段 sleep, 每 200ms 检查 cancel. 返回 True 表示被取消."""
+            elapsed = 0.0
+            while elapsed < seconds:
+                if _cancelled():
+                    return True
+                chunk = min(0.2, seconds - elapsed)
+                await asyncio.sleep(chunk)
+                elapsed += chunk
+            return False
+
         for rnd in range(handler.max_rounds):
-            if CANCEL_FLAG is not None and CANCEL_FLAG.get("v"):
+            if _cancelled():
                 logger.info(f"[{handler.name}] 收到取消信号 → 中止 (R{rnd})")
                 await handler.exit(ctx, PhaseResult.FAIL)
                 return False
@@ -274,10 +289,12 @@ class SingleInstanceRunner:
             if step.result == PhaseResult.GAME_RESTART:
                 await handler.exit(ctx, step.result)
                 raise V3GameRestartRequested(handler.name)
-            if step.result == PhaseResult.WAIT:
-                await asyncio.sleep(max(0.0, step.wait_seconds))
-            else:
-                await asyncio.sleep(handler.round_interval_s)
+            # 分段 sleep + cancel check (用户点'停止'后最长延迟 200ms)
+            sleep_s = max(0.0, step.wait_seconds) if step.result == PhaseResult.WAIT else handler.round_interval_s
+            if await _interruptible_sleep(sleep_s):
+                logger.info(f"[{handler.name}] 取消信号 (sleep 期间) → 中止 (R{rnd})")
+                await handler.exit(ctx, PhaseResult.FAIL)
+                return False
         logger.warning(f"[{handler.name}] 超 max_rounds={handler.max_rounds} → FAIL")
         await handler.exit(ctx, PhaseResult.FAIL)
         return False

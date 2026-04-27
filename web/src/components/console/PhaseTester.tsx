@@ -91,24 +91,25 @@ export function PhaseTester() {
       timestamp: Date.now() / 1000,
       instance: 'SYS',
       level: 'info',
-      message: `[阶段测试] 开始: ${selKeys.join(' → ')} × ${targets.length} 实例 (#${targets.join(',#')}) · 角色 ${selRole}`,
+      message: `[阶段测试] 并发跑 ${targets.length} 实例 × ${selKeys.length} 阶段 (${selKeys.join(' → ')}) #${targets.join(',#')} 角色 ${selRole}`,
     })
 
-    let cursor = 0
-    let stopped = false
-    for (const tgt of targets) {
-      if (stopped) break
-      for (let i = 0; i < selKeys.length; i++) {
-        cursor += 1
-        const phase = selKeys[i]
-        const prog = `${cursor}/${total} · #${tgt} ${phase}`
-        setPhaseTester({ progress: prog })
+    // 进度计数器 (closure shared by parallel tasks)
+    let done = 0
+    const updateProg = () => setPhaseTester({ progress: `${done}/${total}` })
+
+    // 每实例独立跑自己的阶段链 (像主 runner 多实例并发)
+    async function runOneInstance(tgt: number): Promise<void> {
+      for (const phase of selKeys) {
         addLog({
           timestamp: Date.now() / 1000,
-          instance: tgt,
-          level: 'info',
-          message: `[阶段测试 ${prog}] 开始 ${phase}…`,
+          instance: tgt, level: 'info',
+          message: `[阶段测试 #${tgt}] 开始 ${phase}…`,
         })
+        let ok = false
+        let errMsg = ''
+        let phaseName = phase
+        let duration = 0
         try {
           const t0 = performance.now()
           const r = await fetch('/api/runner/test_phase', {
@@ -117,54 +118,49 @@ export function PhaseTester() {
             body: JSON.stringify({ instance: tgt, phase, role: selRole }),
           })
           const data = await r.json()
-          const dur = performance.now() - t0
+          duration = data.duration_ms ?? (performance.now() - t0)
           if (!r.ok) {
-            const errMsg = data.detail || data.error || `HTTP ${r.status}`
-            addPhaseResult({
-              phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
-              ok: false, error: errMsg,
-            })
-            addLog({
-              timestamp: Date.now() / 1000,
-              instance: tgt, level: 'error',
-              message: `[阶段测试] #${tgt} ${phase} 失败: ${errMsg}`,
-            })
-            if (!keepGoing) { stopped = true; break }
-            continue
+            errMsg = data.detail || data.error || `HTTP ${r.status}`
+          } else {
+            ok = data.ok
+            phaseName = data.phase_name || phase
+            errMsg = data.error || ''
           }
-          addPhaseResult({
-            phase: `#${tgt}/${phase}`,
-            phase_name: `#${tgt} ${data.phase_name || phase}`,
-            ok: data.ok, duration_ms: data.duration_ms, error: data.error,
-          })
-          addLog({
-            timestamp: Date.now() / 1000,
-            instance: tgt,
-            level: data.ok ? 'info' : 'warn',
-            message: `[阶段测试] #${tgt} ${data.phase_name || phase} ${data.ok ? '✓ 完成' : '✗ 失败'} (${(data.duration_ms || dur).toFixed(0)}ms)${data.error ? ' — ' + data.error : ''}`,
-          })
-          if (!data.ok && !keepGoing) { stopped = true; break }
         } catch (e) {
-          addPhaseResult({
-            phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
-            ok: false, error: String(e),
-          })
-          addLog({
-            timestamp: Date.now() / 1000,
-            instance: tgt, level: 'error',
-            message: `[阶段测试] #${tgt} ${phase} 异常: ${e}`,
-          })
-          if (!keepGoing) { stopped = true; break }
+          errMsg = String(e)
+        }
+        done += 1
+        updateProg()
+        addPhaseResult({
+          phase: `#${tgt}/${phase}`,
+          phase_name: `#${tgt} ${phaseName}`,
+          ok, duration_ms: duration, error: errMsg,
+        })
+        addLog({
+          timestamp: Date.now() / 1000,
+          instance: tgt,
+          level: ok ? 'info' : (errMsg ? 'error' : 'warn'),
+          message: `[阶段测试] #${tgt} ${phaseName} ${ok ? '✓ 完成' : '✗ 失败'} (${duration.toFixed(0)}ms)${errMsg ? ' — ' + errMsg : ''}`,
+        })
+        if (!ok && !keepGoing) {
+          // 该实例链停, 但其他实例继续
+          return
         }
       }
     }
+
+    // 并发起所有实例
+    await Promise.allSettled(targets.map(runOneInstance))
+
     addLog({
       timestamp: Date.now() / 1000,
       instance: 'SYS',
       level: 'info',
-      message: `[阶段测试] 全部跑完 ${cursor}/${total}${stopped ? ' (中途停)' : ''}`,
+      message: `[阶段测试] 全部跑完 ${done}/${total}`,
     })
+    // 跑完后清空结果区 + 进度 (按用户要求, 不留垃圾)
     setPhaseTester({ busy: false, progress: '' })
+    setTimeout(() => clearPhaseResults(), 100)
   }
 
   const allKeys = phases.map((p) => p.key)
