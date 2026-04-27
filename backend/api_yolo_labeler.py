@@ -458,3 +458,77 @@ async def add_class(req: AddClassReq):
     cur.append(name)
     _write_classes(cur)
     return {"ok": True, "classes": cur, "new_id": len(cur) - 1}
+
+
+# ─── /api/labeler/preannotate/{name} ───
+# 用 latest.onnx 跑 inference, 返回 normalized YOLO 框给前端预填.
+# 用户只需修补 (调框/删错/加漏), 比从零画快 5-10x.
+# 注意: 当前模型只训了已有类 (close_x/action_btn). 新类 (如 dialog_box)
+# 第一批必须手标种子集, baseline 训出来后才能预标该类.
+
+@router.post("/api/labeler/preannotate/{filename}")
+async def labeler_preannotate(filename: str):
+    """对单张图跑 YOLO 推理, 返回 normalized boxes 给前端预填."""
+    filename = _safe_filename(filename)
+    raw, _, _ = _yolo_paths()
+    img_path = None
+    for ext in (".png", ".jpg"):
+        full = raw / (os.path.splitext(filename)[0] + ext)
+        if full.is_file():
+            img_path = full
+            break
+    if img_path is None:
+        raise HTTPException(404, "图片不存在")
+
+    img = cv2.imread(str(img_path))
+    if img is None:
+        raise HTTPException(500, "图片解码失败")
+    h, w = img.shape[:2]
+
+    try:
+        from .automation.yolo_dismisser import YoloDismisser
+    except Exception as e:
+        raise HTTPException(500, f"YOLO 模块导入失败: {e}")
+
+    det = YoloDismisser._shared()
+    if not det.is_available():
+        raise HTTPException(
+            503,
+            "YOLO 模型未加载 (latest.onnx 不存在或加载失败). "
+            "需要先训一版 baseline 上传, 才能用预标注.",
+        )
+
+    t0 = time.perf_counter()
+    try:
+        detections = det.detect(img)
+    except Exception as e:
+        logger.warning(f"[preannotate] inference err: {e}", exc_info=True)
+        raise HTTPException(500, f"推理失败: {e}")
+    dur_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    classes = _read_classes()
+    boxes = []
+    for d in detections:
+        cx_n = ((d.x1 + d.x2) / 2) / w
+        cy_n = ((d.y1 + d.y2) / 2) / h
+        w_n = (d.x2 - d.x1) / w
+        h_n = (d.y2 - d.y1) / h
+        cls_name = classes[d.cls] if 0 <= d.cls < len(classes) else f"cls{d.cls}"
+        boxes.append({
+            "class_id": int(d.cls),
+            "class_name": cls_name,
+            "cx": float(cx_n),
+            "cy": float(cy_n),
+            "w": float(w_n),
+            "h": float(h_n),
+            "score": float(d.conf),
+        })
+
+    return {
+        "ok": True,
+        "filename": filename,
+        "image_size": [w, h],
+        "duration_ms": dur_ms,
+        "boxes": boxes,
+        "count": len(boxes),
+    }

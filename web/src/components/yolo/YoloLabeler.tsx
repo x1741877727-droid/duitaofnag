@@ -10,8 +10,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
-  fetchDataset, datasetImgSrc, fetchLabels, saveLabels, type DatasetList,
-  type LabelBox,
+  fetchDataset, datasetImgSrc, fetchLabels, saveLabels, preannotateLabels,
+  fetchYoloInfo,
+  type DatasetList, type LabelBox, type YoloInfo,
 } from '@/lib/yoloApi'
 
 const CLASS_COLORS = ['#ef4444', '#22c55e', '#a855f7', '#f59e0b']
@@ -30,6 +31,9 @@ export function YoloLabeler({
   const [activeClass, setActiveClass] = useState<number>(0)
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiHint, setAiHint] = useState<string>('')
+  const [yoloInfo, setYoloInfo] = useState<YoloInfo | null>(null)
   const [drag, setDrag] = useState<{ startNx: number; startNy: number; box: LabelBox } | null>(null)
 
   // 缩放 / 平移 (transform 套在 <img> 上, 不影响 normalized 坐标计算)
@@ -51,7 +55,19 @@ export function YoloLabeler({
         onChangeName?.(first.name)
       }
     }).catch(() => {})
+    // 拿模型状态: 决定 AI 预标注按钮可不可用 / 哪些类已训
+    fetchYoloInfo().then(setYoloInfo).catch(() => setYoloInfo(null))
   }, [])
+
+  // 模型已训的类名集合 (用来判断当前 activeClass 是否能被 AI 预标)
+  const trainedClassSet = useMemo(
+    () => new Set((yoloInfo?.classes || []).map((c) => c.toLowerCase())),
+    [yoloInfo],
+  )
+  const modelOk = !!yoloInfo?.available
+  const currentClassTrained = classes[activeClass]
+    ? trainedClassSet.has(classes[activeClass].toLowerCase())
+    : false
 
   useEffect(() => {
     if (!name) return
@@ -209,6 +225,15 @@ export function YoloLabeler({
 
   function nextImg() {
     if (!data) return
+    // 优先在当前过滤列表里找下一张; 找不到再 fallback 到全局未标
+    const list = fileList
+    const i = list.findIndex((x) => x.name === name)
+    if (i >= 0 && i < list.length - 1) {
+      const nxt = list[i + 1]
+      setName(nxt.name)
+      onChangeName?.(nxt.name)
+      return
+    }
     const next = data.items.find(
       (x) => x.name !== name && !x.labeled && !x.skipped,
     )
@@ -217,6 +242,117 @@ export function YoloLabeler({
       onChangeName?.(next.name)
     }
   }
+
+  function prevImg() {
+    if (!data) return
+    const list = fileList
+    const i = list.findIndex((x) => x.name === name)
+    if (i > 0) {
+      const prev = list[i - 1]
+      setName(prev.name)
+      onChangeName?.(prev.name)
+    }
+  }
+
+  // ─── AI 预标注: 调用 latest.onnx 推理, 把结果加到 boxes 里, 用户修补即可 ───
+  async function aiPreannotate() {
+    if (!name || aiBusy) return
+    setAiBusy(true)
+    setAiHint('')
+    try {
+      const r = await preannotateLabels(name)
+      if (r.count === 0) {
+        setAiHint('AI 没检到任何目标 (新类需先手标种子集)')
+      } else {
+        // 合并: 已有手标的不动, 把 AI 预测的加进去
+        setBoxes((bs) => [
+          ...bs,
+          ...r.boxes.map((b) => ({
+            class_id: b.class_id, cx: b.cx, cy: b.cy, w: b.w, h: b.h,
+          })),
+        ])
+        setAiHint(`AI 加了 ${r.count} 框 (${r.duration_ms}ms), 检查并修补`)
+      }
+    } catch (e: any) {
+      setAiHint(`AI 失败: ${(e?.message || e).toString().slice(0, 80)}`)
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  // ─── 键盘快捷键 ───
+  // S: 保存 / D|→|Space: 下一张 / A|←: 上一张 / B: 标负样本
+  // 1-9: 切类别 / Backspace|Delete: 删最后一个框 / E: AI 预标注 / Esc: 取消画框
+  useEffect(() => {
+    function isTypingTarget(t: EventTarget | null): boolean {
+      if (!t || !(t instanceof HTMLElement)) return false
+      const tag = t.tagName
+      return tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable
+    }
+    function onKey(e: KeyboardEvent) {
+      if (isTypingTarget(e.target)) return
+      // Ctrl+S 保存
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        if (name && !saving) save()
+        return
+      }
+      // 单键 (无修饰)
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const k = e.key.toLowerCase()
+      // 数字 1-9 切类
+      if (/^[1-9]$/.test(e.key)) {
+        const idx = parseInt(e.key, 10) - 1
+        if (idx < classes.length) {
+          setActiveClass(idx)
+          e.preventDefault()
+        }
+        return
+      }
+      switch (k) {
+        case 's':
+          if (name && !saving) save()
+          e.preventDefault()
+          break
+        case 'd':
+        case 'arrowright':
+        case ' ':
+          if (name) nextImg()
+          e.preventDefault()
+          break
+        case 'a':
+        case 'arrowleft':
+          if (name) prevImg()
+          e.preventDefault()
+          break
+        case 'b':
+          if (name && !saving) skip()
+          e.preventDefault()
+          break
+        case 'e':
+          if (name && !aiBusy) aiPreannotate()
+          e.preventDefault()
+          break
+        case 'backspace':
+        case 'delete':
+          if (boxes.length > 0) {
+            setBoxes((bs) => bs.slice(0, -1))
+            e.preventDefault()
+          }
+          break
+        case 'escape':
+          if (drag) {
+            setDrag(null)
+            e.preventDefault()
+          }
+          break
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // 依赖项故意省略 nextImg/prevImg/save/skip/aiPreannotate (函数每次渲染都新, 但闭包里读 state 都是最新的, useEffect 只挂一次也行) —
+    // 但为安全起见, 把所有 state 列出来让 effect 重挂, 闭包内函数引用始终最新
+  }, [name, saving, aiBusy, boxes, drag, classes.length, fileList, data])
 
   // 显示用 (图片渲染坐标 → 框 px)
   function renderBoxStyle(b: LabelBox): React.CSSProperties | null {
@@ -353,23 +489,37 @@ export function YoloLabeler({
       <div className="rounded-lg border border-border bg-card p-3 space-y-3 overflow-y-auto">
         <div>
           <div className="text-xs font-semibold mb-1">类别 (画框时用此类)</div>
-          {classes.map((c, idx) => (
-            <button
-              key={c}
-              onClick={() => setActiveClass(idx)}
-              className={`block w-full text-left mb-1 px-2 py-1.5 rounded border-2 text-xs ${
-                activeClass === idx ? 'font-bold' : 'opacity-70'
-              }`}
-              style={{
-                borderColor: CLASS_COLORS[idx % CLASS_COLORS.length],
-                background: activeClass === idx ? `${CLASS_COLORS[idx % CLASS_COLORS.length]}22` : 'transparent',
-              }}
-            >
-              <span className="font-mono">[{idx}] {c}</span>
-            </button>
-          ))}
+          {classes.map((c, idx) => {
+            const trained = trainedClassSet.has(c.toLowerCase())
+            return (
+              <button
+                key={c}
+                onClick={() => setActiveClass(idx)}
+                className={`block w-full text-left mb-1 px-2 py-1.5 rounded border-2 text-xs ${
+                  activeClass === idx ? 'font-bold' : 'opacity-70'
+                }`}
+                style={{
+                  borderColor: CLASS_COLORS[idx % CLASS_COLORS.length],
+                  background: activeClass === idx ? `${CLASS_COLORS[idx % CLASS_COLORS.length]}22` : 'transparent',
+                }}
+                title={trained
+                  ? '当前模型已训过此类, 可被 AI 预标'
+                  : '当前模型未训过此类 — 需先手标 50+ 张并训 baseline, AI 预标才会出此类的框'
+                }
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono flex-1 truncate">[{idx}] {c}</span>
+                  {!trained && yoloInfo && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-muted-foreground/20 text-muted-foreground font-mono">
+                      未训
+                    </span>
+                  )}
+                </div>
+              </button>
+            )
+          })}
           <div className="text-[10px] text-muted-foreground mt-1">
-            数字键 1-{classes.length} 切换类别
+            数字键 1-{Math.min(9, classes.length)} 切换类别
           </div>
         </div>
 
@@ -405,11 +555,38 @@ export function YoloLabeler({
         <div className="space-y-1">
           <Button
             size="sm"
+            disabled={!name || aiBusy || !modelOk}
+            onClick={aiPreannotate}
+            variant="secondary"
+            className="w-full"
+            title={
+              !modelOk
+                ? 'YOLO 模型未加载 (latest.onnx 不存在). 上传训好的模型才能用 AI 预标注'
+                : !currentClassTrained
+                  ? `当前类 "${classes[activeClass] || ''}" 模型还没训过 — AI 预标只会出已训类 (${yoloInfo?.classes.join('/')}) 的框, 当前类要先手标 50+ 张并重训`
+                  : '用 latest.onnx 推理预填框, 你只需修补 (E)'
+            }
+          >
+            {aiBusy ? 'AI 推理中…' : (
+              !modelOk ? 'AI 预标注 (模型未上传)' : 'AI 预标注 (E)'
+            )}
+          </Button>
+          {aiHint && (
+            <div className="text-[10px] text-muted-foreground px-1">{aiHint}</div>
+          )}
+          {modelOk && !currentClassTrained && (
+            <div className="text-[10px] text-warning/90 leading-snug px-1">
+              当前类 <span className="font-mono">{classes[activeClass]}</span> 模型未训, AI 不会预填此类框 (会预填: <span className="font-mono">{yoloInfo?.classes.join(', ')}</span>)
+            </div>
+          )}
+
+          <Button
+            size="sm"
             disabled={!name || saving}
             onClick={save}
             className="w-full"
           >
-            {saving ? '保存中…' : `保存 (${boxes.length} 框)`}
+            {saving ? '保存中…' : `保存 (${boxes.length} 框) (S)`}
           </Button>
           <Button
             size="sm"
@@ -417,22 +594,47 @@ export function YoloLabeler({
             disabled={!name || saving}
             onClick={skip}
             className="w-full"
+            title="此图无任何 dialog/close_x/action_btn 等目标 — 训练时当背景图用 (不影响其他已标注图)"
           >
-            标为「跳过 / 背景」
+            标为负样本 (无目标) (B)
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={!name}
-            onClick={nextImg}
-            className="w-full"
-          >
-            下一张未标 →
-          </Button>
+          <div className="grid grid-cols-2 gap-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!name}
+              onClick={prevImg}
+            >
+              ← 上一张 (A)
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!name}
+              onClick={nextImg}
+            >
+              下一张 (D) →
+            </Button>
+          </div>
         </div>
 
-        <div className="text-[10px] text-muted-foreground">
-          提示：左键拖框画框；标注完点保存；不需要 / 没目标 → 标「跳过」 (背景图，对训练有用)
+        <div className="text-[10px] text-muted-foreground space-y-0.5 leading-relaxed">
+          <div className="font-semibold text-foreground">键盘快捷键</div>
+          <div><span className="font-mono">S</span> 保存 · <span className="font-mono">D</span>/→ 下张 · <span className="font-mono">A</span>/← 上张</div>
+          <div><span className="font-mono">B</span> 负样本 · <span className="font-mono">E</span> AI 预标 · <span className="font-mono">Del</span> 删最后框</div>
+          <div><span className="font-mono">1-9</span> 切类别 · <span className="font-mono">Esc</span> 取消画框</div>
+          <div className="pt-1.5 text-foreground/70 border-t border-border mt-1.5">
+            <div className="font-semibold mb-0.5">负样本是什么</div>
+            <div>
+              "干净大厅 / 战斗中 / loading / 直播 banner" 这种 <strong>整张图都没目标</strong> 的截图,
+              点 "标为负样本" 就行 — 系统会写一个空 .txt 标记 "这张我看过了, 但确实没东西",
+              训练时按 1:3 比例自动混进去当背景。
+            </div>
+            <div className="mt-1 text-foreground/60">
+              不会影响其他已标注的图。负样本只挑容易混淆的 (大厅/banner/loading)
+              30-50 张就够, <strong>不需要全标</strong>。
+            </div>
+          </div>
         </div>
       </div>
     </div>

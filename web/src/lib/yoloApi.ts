@@ -173,3 +173,28 @@ export async function addLabelClass(name: string): Promise<{ ok: boolean; classe
   }
   return await r.json()
 }
+
+export interface PreannotateBox extends LabelBox {
+  class_name: string
+  score: number
+}
+
+export interface PreannotateResp {
+  ok: boolean
+  filename: string
+  image_size: [number, number]
+  duration_ms: number
+  boxes: PreannotateBox[]
+  count: number
+}
+
+export async function preannotateLabels(name: string): Promise<PreannotateResp> {
+  const r = await fetch(`/api/labeler/preannotate/${encodeURIComponent(name)}`, {
+    method: 'POST',
+  })
+  if (!r.ok) {
+    const t = await r.text()
+    throw new Error(`preannotate ${r.status} ${t.slice(0, 300)}`)
+  }
+  return await r.json()
+}
