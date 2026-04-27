@@ -288,11 +288,18 @@ class YoloDismisser:
             logger.warning(f"[memory] 初始化失败 (非致命): {_e}")
         memory_target = "dismiss_popups"  # 主循环统一用这个 target_name
 
-        # v2-7 Memory 延迟写入: 缓冲 (frame_phash_int, action_xy, method) 列表
-        # 只有当 P2 整体 success (return DismissResult(True, ...)) 时才 commit 进 Memory.
-        # 中间 tap 错了即使 verify 过 (画面变了), 也不污染 Memory.
-        # 这是修"YOLO 把公告图标当 close_x → tap → 弹公告 phash 变 → 错误 Memory 写入" 根因.
+        # v2-7 Memory 延迟写入
         pending_memory_writes: list = []  # list[(frame_copy, action_xy, method)]
+
+        # v2-8 登录页状态机 (用户方案):
+        #   看到登录页 → 不 tap, 开始 20s 计时
+        #   20s 后还在登录页 → 自动登录失效 → tap 微信登录
+        #   登录失效 tap 3 次都不进大厅 → P2 fail (runner_service 会 kill 重启游戏)
+        login_first_seen_ts: Optional[float] = None      # 第一次见登录页时间戳
+        login_consecutive_seen: int = 0                  # 连续多少帧见登录页 (≥2 才算稳定)
+        login_failed_tap_count: int = 0                  # 主动 tap 微信登录次数
+        LOGIN_WAIT_SECONDS = 20.0                        # 等待自动登录的时间
+        LOGIN_MAX_RETAP = 3                              # 最多主动 tap 几次后放弃
 
         # v2-4 细粒度时间记录: 从 dismiss_all 开始的累计 ms
         _phase_start_ts = time.perf_counter()
@@ -597,56 +604,69 @@ class YoloDismisser:
                         logger.info(f"[Y{rnd + 1}] 🧠 Memory commit {_n_commit} 条 (P2 success)")
                     return DismissResult(True, popups_closed, "lobby", rnd + 1, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=_ms_since_start())
 
-                # 兜底 B0: outside_lobby + 卡 5 轮 → 检查是不是登录页 (自动登录失败兜底)
-                # 优先模板 (5ms), 模板都没命中再退到 OCR (200ms)
-                if lobby_hit is None and empty_dets_streak >= 5 and matcher is not None:
-                    # 模板路径: lobby_login_btn (微信) / lobby_login_btn_qq (QQ)
+                # ── 兜底 B0: 登录页状态机 (用户方案 v2-8) ──
+                # 看到登录页不立即 tap, 给游戏 20s 自动登录时间.
+                # 20s 后还在登录页 → 自动登录失效 → tap 微信登录.
+                # 多次 tap 失败 → P2 fail (runner_service 走 game_restart).
+                #
+                # 登录页判定 (连续 2 帧才算稳定, 防瞬态误检):
+                _login_btn_hit = None
+                if lobby_hit is None and matcher is not None:
                     for tn in ("lobby_login_btn", "lobby_login_btn_qq"):
                         h = matcher.match_one(shot, tn, threshold=0.80)
                         if h:
-                            tap_xy = (h.cx, h.cy, f"登录模板 {tn}({h.confidence:.2f})")
-                            target_class = "login_btn"
-                            target_conf = h.confidence
-                            logger.warning(
-                                f"[Y{rnd + 1}] 登录页兜底 (模板 {tn}) → tap "
-                                f"@ ({h.cx},{h.cy}) (自动登录失败)"
-                            )
-                            login_tier = _TR(
-                                tier=0, name=f"登录模板·{tn}",
-                                duration_ms=0.0, early_exit=True,
-                                note=f"模板兜底登录: conf={h.confidence:.2f}",
-                            )
-                            decision.add_tier(login_tier)
+                            _login_btn_hit = (h, tn)
                             break
-                    # 模板都没命中, OCR 二级兜底 (兼容老/新版本游戏 UI 变化)
-                    if tap_xy is None:
-                        try:
-                            ocr_inst = self._get_ocr_for_cta()
-                            if ocr_inst is not None:
-                                hits = ocr_inst._ocr_all(shot) or []
-                                for h in hits:
-                                    t = getattr(h, "text", "")
-                                    if "微信登录" in t or "QQ登录" in t or "扫码登录" in t:
-                                        cx = getattr(h, "cx", 0)
-                                        cy = getattr(h, "cy", 0)
-                                        if cx and cy:
-                                            tap_xy = (cx, cy, f"登录OCR('{t[:8]}')")
-                                            target_class = "login_btn"
-                                            target_conf = 0.85
-                                            ocr_text = t
-                                            logger.warning(
-                                                f"[Y{rnd + 1}] 登录页兜底 (OCR) → tap "
-                                                f"'{t}' @ ({cx},{cy})"
-                                            )
-                                            login_tier = _TR(
-                                                tier=3, name="登录OCR兜底",
-                                                duration_ms=0.0, early_exit=True,
-                                                note=f"OCR 找到登录按钮: {t}",
-                                            )
-                                            decision.add_tier(login_tier)
-                                            break
-                        except Exception as _e:
-                            logger.debug(f"[login] err: {_e}")
+
+                if _login_btn_hit is not None:
+                    login_consecutive_seen += 1
+                    if login_first_seen_ts is None and login_consecutive_seen >= 2:
+                        login_first_seen_ts = time.time()
+                        logger.info(
+                            f"[Y{rnd + 1}] 见登录页 (稳定 {login_consecutive_seen} 帧) → "
+                            f"开始 {LOGIN_WAIT_SECONDS:.0f}s 等待自动登录"
+                        )
+
+                    # 已开始计时 + 20s 已过 → 主动 tap
+                    if (login_first_seen_ts is not None
+                            and time.time() - login_first_seen_ts >= LOGIN_WAIT_SECONDS):
+                        if login_failed_tap_count >= LOGIN_MAX_RETAP:
+                            # 主动 tap 多次都没用 → P2 fail
+                            logger.error(
+                                f"[Y{rnd + 1}] 登录失效 tap {login_failed_tap_count} 次仍在登录页 "
+                                f"→ P2 fail (game_restart)"
+                            )
+                            decision.finalize(
+                                outcome="login_persistent_fail",
+                                note=f"主动 tap {login_failed_tap_count} 次后仍在登录页",
+                            )
+                            return DismissResult(False, popups_closed, "timeout", self.max_rounds, t_first_popup_seen_ms=_t_first_popup_seen_ms, t_first_tap_ms=_t_first_tap_ms, t_first_dismiss_ok_ms=_t_first_dismiss_ok_ms, t_lobby_confirmed_ms=-1.0)
+
+                        h, tn = _login_btn_hit
+                        tap_xy = (h.cx, h.cy, f"登录失效兜底 {tn}({h.confidence:.2f})")
+                        target_class = "login_btn"
+                        target_conf = h.confidence
+                        login_failed_tap_count += 1
+                        elapsed = time.time() - login_first_seen_ts
+                        logger.warning(
+                            f"[Y{rnd + 1}] 自动登录 {elapsed:.0f}s 仍在登录页 → "
+                            f"主动 tap {tn} ({login_failed_tap_count}/{LOGIN_MAX_RETAP})"
+                        )
+                        login_tier = _TR(
+                            tier=0, name=f"登录失效兜底·{tn}",
+                            duration_ms=0.0, early_exit=True,
+                            note=f"等 {elapsed:.0f}s 还在登录页, 主动 tap (#{login_failed_tap_count})",
+                        )
+                        decision.add_tier(login_tier)
+                        # 重置计时器, 给这次 tap 又 20s 加载时间
+                        login_first_seen_ts = time.time()
+                else:
+                    # 不在登录页, 重置状态
+                    if login_first_seen_ts is not None:
+                        logger.info(f"[Y{rnd + 1}] 离开登录页, 重置计时器")
+                    login_first_seen_ts = None
+                    login_consecutive_seen = 0
+                    login_failed_tap_count = 0
 
                 # 兜底 B: outside_lobby (lobby 模板未命中) + X 找不到 → 必须找 CTA 才能回大厅
                 # 强引导活动 (砍价 / 立即领取) 设计上只有 CTA 出路, 必须点
