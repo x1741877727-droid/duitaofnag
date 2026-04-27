@@ -136,9 +136,45 @@ def build_nuitka():
                 if fn.endswith(('.py', '.pyc')):
                     py_count += 1
         print(f"Source files in output: {py_count} (should be 0)")
+        _link_logs_to_project_root(target)
     else:
         print(f"Output: {OUTPUT_DIR}")
     print("=" * 60)
+
+
+def _link_logs_to_project_root(dist_dir: str):
+    """build 完后把 dist/GameBot/logs 建成 junction 指向项目根 logs/.
+    没这个的话: PyInstaller build 清 dist 会顺便清掉 exe 之前跑过的所有 sessions —
+    用户决策档案突然消失. junction 让 exe 写 logs 实际落到项目根, 跨 build 持久化,
+    且 dev/exe 共享同一份历史."""
+    if not os.path.isdir(dist_dir):
+        return
+    link_path = os.path.join(dist_dir, "logs")
+    target = os.path.join(ROOT, "logs")
+    os.makedirs(target, exist_ok=True)
+    # build 刚清过 dist, link_path 一般不存在; 防御性处理 (旧 junction 残留 / 普通目录)
+    if os.path.exists(link_path) or os.path.islink(link_path):
+        try:
+            if os.path.isdir(link_path) and not os.path.islink(link_path):
+                import shutil
+                shutil.rmtree(link_path)
+            else:
+                os.remove(link_path)
+        except Exception as e:
+            print(f"  WARN: 清理旧 logs 失败 ({e}), 跳过 junction")
+            return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", link_path, target],
+                check=True, capture_output=True, text=True,
+            )
+            print(f"  logs junction: {link_path} -> {target}")
+        except subprocess.CalledProcessError as e:
+            print(f"  WARN: junction 失败: {e.stderr or e}")
+    else:
+        os.symlink(target, link_path)
+        print(f"  logs symlink: {link_path} -> {target}")
 
 
 def build_pyinstaller():
@@ -224,6 +260,7 @@ coll = COLLECT(exe, a.binaries, a.datas, name='GameBot')
         exe_path = os.path.join(dist_dir, "GameBot.exe")
         print(f"Exe: {exe_path}")
         print(f"Exists: {os.path.exists(exe_path)}")
+        _link_logs_to_project_root(dist_dir)
     print("=" * 60)
 
 
