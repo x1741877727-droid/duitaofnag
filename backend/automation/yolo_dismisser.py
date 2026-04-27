@@ -52,12 +52,43 @@ TAP_CONF_CLOSE = 0.50   # 点击 close_x 下限
 TAP_CONF_ACTION = 0.50  # 点击 action_btn 下限
 NMS_IOU = 0.45
 
-# 主操作按钮文字若含这些词，视为"跳出大厅"的导航按钮，不点
-# 跟 popup_rules.json 共用关键词体系（之后可挪进去支持热加载）
-NAV_WORDS = (
-    "前往", "参加", "进入", "查看活动", "去看看", "立即前往", "前往观赛",
-    "去活动", "我要参加", "查看",
+# 按钮文字分级词典 — 决定"多个 action_btn 选哪个点"
+# 优先级: CLOSE > ACCEPT > NAV (NAV 永不点); 优先级匹配 (前面的关键词命中就停)
+# 用户原话: "取消大于收下"
+
+# P1 关闭/拒绝类 — 最安全, 永远不会跳出大厅
+CLOSE_WORDS = (
+    "关闭", "取消", "稍后", "暂不", "下次", "再想想", "再看看", "再说",
+    "不再提醒", "不再显示", "跳过", "略过", "拒绝",
 )
+
+# P2 收下/确认类 — 关弹窗 (动作完成后弹窗消失, 不跳出大厅)
+ACCEPT_WORDS = (
+    "收下", "我收下了", "领取", "立即领取", "确定", "确认",
+    "知道了", "我知道了", "好的", "已了解", "了解", "继续", "下一步",
+    "立即砍价", "砍价", "完成",
+)
+
+# P3 导航/前往类 — 绝对不点 (会跳出大厅去别的界面)
+NAV_WORDS = (
+    "前往", "前往观赛", "立即前往", "参加", "我要参加", "进入",
+    "查看", "查看活动", "去看看", "去活动",
+)
+
+
+def _classify_button_text(text: str) -> str:
+    """按钮文字分类. 返回 'close' | 'accept' | 'nav' | 'unknown'.
+    优先级 CLOSE > ACCEPT > NAV — 处理 "立即砍价" 这种含 "立即"(NAV) 也含 "砍价"(ACCEPT)
+    的边界, 让 ACCEPT 优先于 NAV; "暂不开通" 含 "暂不"(CLOSE) 也含 "开通", CLOSE 优先."""
+    if not text:
+        return "unknown"
+    if any(w in text for w in CLOSE_WORDS):
+        return "close"
+    if any(w in text for w in ACCEPT_WORDS):
+        return "accept"
+    if any(w in text for w in NAV_WORDS):
+        return "nav"
+    return "unknown"
 
 
 @dataclass
@@ -667,26 +698,74 @@ class YoloDismisser:
                         decision.add_tier(tmpl_tier)
                         break
 
-            # 优先级 2：action_btn — 但要 OCR 排除 nav 按钮
+            # 优先级 2: action_btn — OCR 分类后按优先级选 (CLOSE > ACCEPT > 单按钮兜底)
             elif tap_xy is None and actions:
-                tgt = actions[0]
-                roi_box = [max(0, tgt.x1), max(0, tgt.y1), tgt.x2, tgt.y2]
-                roi = shot[roi_box[1]:roi_box[3], roi_box[0]:roi_box[2]]
-                text, ocr_hits_log = self._ocr_bbox_with_hits(roi, roi_box)
-                ocr_text = text
-                # 记录 OCR Tier 到 Decision（带 ROI 框）
+                # 遍历所有 action_btn, 每个 OCR + 分类
                 from .decision_log import TierRecord as _TR
-                tier_ocr = _TR(tier=3, name="OCR-bbox",
-                               duration_ms=0.0,
-                               note=f"在 action_btn bbox 内 OCR")
-                decision.save_ocr_roi(tier_ocr, shot, roi=roi_box, hits=ocr_hits_log)
-                decision.add_tier(tier_ocr)
-                if any(nav in text for nav in NAV_WORDS):
-                    logger.info(f"[Y{rnd + 1}] action_btn 含 nav 词 '{text[:30]}'，跳过")
-                else:
-                    tap_xy = (tgt.cx, tgt.cy, f"action_btn({tgt.conf:.2f},{text[:20]})")
+                classified: list[tuple[Detection, str, str]] = []  # (det, text, category)
+                for tgt in actions:
+                    roi_box = [max(0, tgt.x1), max(0, tgt.y1), tgt.x2, tgt.y2]
+                    roi = shot[roi_box[1]:roi_box[3], roi_box[0]:roi_box[2]]
+                    text, ocr_hits_log = self._ocr_bbox_with_hits(roi, roi_box)
+                    cat = _classify_button_text(text)
+                    classified.append((tgt, text, cat))
+                    # 每个按钮独立记一个 OCR tier
+                    tier_ocr = _TR(tier=3, name=f"OCR-{cat}",
+                                   duration_ms=0.0,
+                                   note=f"action_btn ROI: '{text[:30]}' → {cat}")
+                    decision.save_ocr_roi(tier_ocr, shot, roi=roi_box, hits=ocr_hits_log)
+                    decision.add_tier(tier_ocr)
+
+                # 特殊规则 (P0): 成对 "取消" + "确定" = 系统操作确认型对话框
+                # 例: "无法连接服务器" → 取消=放弃卡死, 确定=重试恢复 → 必点确定
+                # 其他 case 仅 CLOSE 或 ACCEPT 之一出现, 不触发此规则.
+                texts = [t for _, t, _ in classified]
+                has_queding = any("确定" in t for t in texts)
+                has_quxiao = any("取消" in t for t in texts)
+
+                chosen = None
+                chosen_reason = ""
+
+                if has_queding and has_quxiao and len(classified) >= 2:
+                    # 操作确认型 → 点"确定"
+                    for d, t, _c in classified:
+                        if "确定" in t:
+                            chosen = (d, t)
+                            chosen_reason = "confirm_dialog"
+                            break
+
+                # 默认优先级: CLOSE > ACCEPT > (单按钮非 NAV 兜底)
+                if chosen is None:
+                    for cat in ("close", "accept"):
+                        matches = [(d, t) for (d, t, c) in classified if c == cat]
+                        if matches:
+                            chosen = matches[0]
+                            chosen_reason = cat
+                            break
+
+                # 兜底: 单按钮且不是 NAV → 点 (用户原话: "弹窗内只有一个按钮就点")
+                if chosen is None and len(classified) == 1:
+                    only = classified[0]
+                    if only[2] != "nav":
+                        chosen = (only[0], only[1])
+                        chosen_reason = f"single_{only[2]}"
+
+                if chosen is not None:
+                    tgt, text = chosen
+                    tap_xy = (tgt.cx, tgt.cy, f"action_btn[{chosen_reason}]({tgt.conf:.2f},{text[:20]})")
                     target_class = "action_btn"
                     target_conf = tgt.conf
+                    ocr_text = text
+                    logger.info(
+                        f"[Y{rnd + 1}] action_btn 选 [{chosen_reason}] '{text[:30]}' "
+                        f"({len(classified)} 个候选)"
+                    )
+                else:
+                    # 没匹配上 — 多按钮且全是 NAV 或 unknown, 太危险跳过
+                    cats_summary = ", ".join(f"{c}={t[:15]}" for _, t, c in classified)
+                    logger.info(
+                        f"[Y{rnd + 1}] action_btn 全跳过 (无安全选择): {cats_summary}"
+                    )
 
             if tap_xy is None:
                 # 啥都没识别 → 可能加载中 / 干净大厅 / outside_lobby 强引导
