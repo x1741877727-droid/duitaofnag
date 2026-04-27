@@ -98,6 +98,7 @@ export type ConsoleView =
   | 'archive'        // 决策档案 (历史会话)
   | 'templates'      // 模版库
   | 'yolo'           // YOLO (测试 / 数据集 / 标注 / 采集 / 模型)
+  | 'memory'         // 记忆库 (Memory L1 浏览)
   | 'perf'           // 性能
   | 'settings'
 

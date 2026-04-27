@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair } from 'lucide-react'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair, Brain } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export function Header() {
@@ -80,6 +80,15 @@ export function Header() {
           >
             <Crosshair className="h-4 w-4" />
             YOLO
+          </Button>
+          <Button
+            variant={currentView === 'memory' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setCurrentView('memory')}
+            className="gap-2"
+          >
+            <Brain className="h-4 w-4" />
+            记忆库
           </Button>
           <Button
             variant={currentView === 'perf' ? 'secondary' : 'ghost'}

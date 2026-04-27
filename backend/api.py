@@ -278,6 +278,14 @@ def create_app(config: ConfigManager) -> FastAPI:
     except Exception as _e:
         logger.warning(f"[api] api_perf 挂载失败: {_e}")
 
+    # 记忆库
+    try:
+        from .api_memory import router as _mem_router
+        app.include_router(_mem_router)
+        logger.info("[api] /api/memory/* 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_memory 挂载失败: {_e}")
+
     @app.on_event("startup")
     async def startup():
         ws_manager.start_drain()
