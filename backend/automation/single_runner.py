@@ -804,17 +804,45 @@ class SingleInstanceRunner:
         if d1:
             d1.set_input(shot, q=70)
 
-        # 优先用 lobby_start_game (用户裁的"开始"按钮), 兜底 lobby_start_btn (旧模板)
-        hit = self.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
-        tmpl_used = "lobby_start_game"
-        if hit is None:
-            hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
-            tmpl_used = "lobby_start_btn"
+        # P4-1 retry: 4 次尝试, 每次跑 模板 lobby_start_game → lobby_start_btn → OCR 兜底,
+        # 全 miss 后 sleep [0.25/0.4/1.0] 再来一次. 最坏 1.65s 延迟但抗 cold OCR/动画.
+        _P4_RETRY_SLEEPS = [0.25, 0.4, 1.0]
+        hit = None
+        tmpl_used = ""
+        ocr_hits = []
+        found = None
+        p4_1_attempts = 0
+        for _retry in range(len(_P4_RETRY_SLEEPS) + 1):  # 4 次
+            p4_1_attempts = _retry + 1
+            # 模板 1: lobby_start_game (用户裁的)
+            hit = self.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
+            tmpl_used = "lobby_start_game"
+            # 模板 2: lobby_start_btn (旧)
+            if hit is None:
+                hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+                tmpl_used = "lobby_start_btn"
+            if hit is not None:
+                break
+            # 模板都 miss → OCR 兜底
+            ocr_hits = ocr._ocr_all(shot)
+            found = next((h for h in ocr_hits if "开始游戏" in h.text), None)
+            if found is not None:
+                tmpl_used = "OCR·开始游戏"
+                break
+            # 全 miss, retry
+            if _retry < len(_P4_RETRY_SLEEPS):
+                _sleep_s = _P4_RETRY_SLEEPS[_retry]
+                _slog(f"[P4-1] attempt {p4_1_attempts} 模板+OCR 全 miss → sleep {_sleep_s}s 重试")
+                await asyncio.sleep(_sleep_s)
+                shot_r = await self.adb.screenshot()
+                if shot_r is not None:
+                    shot = shot_r
+
         if hit:
             if d1:
                 d1.add_tier(TierRecord(
                     tier=0, name=f"模板·{tmpl_used}", early_exit=True,
-                    note=f"模板命中 conf={hit.confidence:.2f}, cx={hit.cx} cy={hit.cy}",
+                    note=f"模板命中 conf={hit.confidence:.2f}, cx={hit.cx} cy={hit.cy}, 尝试 {p4_1_attempts} 次",
                     templates=[TemplateMatch(
                         name=tmpl_used, score=float(hit.confidence),
                         hit=True, bbox=[int(hit.cx - hit.w/2), int(hit.cy - hit.h/2),
@@ -826,35 +854,41 @@ class SingleInstanceRunner:
                            target_conf=float(hit.confidence), screenshot=shot)
             await self.adb.tap(hit.cx, hit.cy + 60)
             _slog(f"[阶段6] 模板定位'开始游戏' conf={hit.confidence:.2f} → tap ({hit.cx},{hit.cy+60})")
-            if d1: d1.finalize(outcome="opened_panel", note="模板命中 → 已 tap")
-        else:
-            # OCR 兜底
-            ocr_hits = ocr._ocr_all(shot)
-            found = next((h for h in ocr_hits if "开始游戏" in h.text), None)
+            if d1: d1.finalize(outcome="opened_panel", note=f"模板命中(第 {p4_1_attempts} 次) → 已 tap")
+        elif found is not None:
             if d1:
                 _hits = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
                                   cx=h.cx, cy=h.cy) for h in ocr_hits[:30]]
                 tier_p1 = TierRecord(
                     tier=3, name="OCR·全屏",
-                    note=f"模板没命中 → OCR 找'开始游戏' (识别 {len(ocr_hits)} 文字)",
+                    note=f"模板没命中 → OCR 找'开始游戏' (识别 {len(ocr_hits)} 文字, 尝试 {p4_1_attempts} 次)",
                     ocr_hits=_hits,
                 )
                 d1.add_tier(tier_p1)
-                # 全屏 OCR: roi=整张图
                 _h, _w = shot.shape[:2]
                 d1.save_ocr_roi(tier_p1, shot, roi=[0, 0, _w, _h], hits=_hits)
-            if found:
-                if d1:
-                    d1.set_tap(int(found.cx), int(found.cy + 60), method="OCR",
-                               target_class="开始游戏", target_text=found.text, screenshot=shot)
-                await self.adb.tap(found.cx, found.cy + 60)
-                _slog(f"[阶段6] OCR 兜底找到'开始游戏' → tap ({found.cx},{found.cy+60})")
-                if d1: d1.finalize(outcome="opened_panel", note="OCR 兜底命中")
-            else:
-                _slog("[阶段6] 找不到'开始游戏'按钮")
-                if d1: d1.finalize(outcome="failed", note="模板+OCR 都没找到开始游戏")
-                self._restore_guard()
-                return False
+                d1.set_tap(int(found.cx), int(found.cy + 60), method="OCR",
+                           target_class="开始游戏", target_text=found.text, screenshot=shot)
+            await self.adb.tap(found.cx, found.cy + 60)
+            _slog(f"[阶段6] OCR 兜底找到'开始游戏' → tap ({found.cx},{found.cy+60})")
+            if d1: d1.finalize(outcome="opened_panel", note=f"OCR 兜底命中(第 {p4_1_attempts} 次)")
+        else:
+            _slog(f"[阶段6] {p4_1_attempts} 次都没找到'开始游戏'按钮")
+            if d1:
+                # 给档案画上最后一帧的 OCR 结果, 方便 debug
+                _hits = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                  cx=h.cx, cy=h.cy) for h in ocr_hits[:30]]
+                tier_p1 = TierRecord(
+                    tier=3, name="OCR·全屏",
+                    note=f"{p4_1_attempts} 次全 miss (识别 {len(ocr_hits)} 文字)",
+                    ocr_hits=_hits,
+                )
+                d1.add_tier(tier_p1)
+                _h, _w = shot.shape[:2]
+                d1.save_ocr_roi(tier_p1, shot, roi=[0, 0, _w, _h], hits=_hits)
+                d1.finalize(outcome="failed", note=f"模板+OCR {p4_1_attempts} 次全 miss")
+            self._restore_guard()
+            return False
 
         # 等面板动画 (打开按钮 → 面板淡入). 用 0.3s 而不是 0.8s, 即使拍到过渡帧 P4-2 内部 OCR 也会 retry
         await asyncio.sleep(0.3)
@@ -875,29 +909,51 @@ class SingleInstanceRunner:
 
         import time as _tm
 
-        # P4-2 自己 OCR list_center, 顺便把"是否团竞"判出来. 不在 P4-1 里提前探测了.
-        _pt = _tm.perf_counter()
-        list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                     if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
-        _slog(f"[P4-2 PERF] OCR list_center: {(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(list_hits)} 文字)")
-
-        # OCR 找 团竞 tab
-        _pt = _tm.perf_counter()
-        if has_left_roi:
-            left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs") if shot is not None else []
-        else:
-            full = ocr._ocr_all(shot) if shot is not None else []
-            left_hits = [h for h in full if h.cx < w_img * 0.16]
-        _slog(f"[P4-2 PERF] OCR left_tabs: {(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(left_hits)} 文字)")
-        team_battle_hit = next((h for h in left_hits if "团队竞技" in h.text), None)
-
+        # P4-2 加 retry: 4 次尝试, 失败后递增 sleep [0.25, 0.4, 1.0]s.
+        # 最坏总 wait 1.65s 但能救回 cold OCR 第一帧空 / 面板动画过渡的情况.
         team_battle_keywords = ["团竞手册", "团竞详情", "军备团竞", "经典团竞",
                                 "击团竞", "迷你战争", "轮换团竞", "突变团竞"]
-        all_text = " ".join(h.text for h in list_hits)
-        is_team_battle = (
-            any(OcrDismisser.fuzzy_match(all_text, kw) for kw in team_battle_keywords)
-            or any(kw in h.text for h in list_hits for kw in map_keywords)
-        )
+        _RETRY_SLEEPS = [0.25, 0.4, 1.0]   # 3 个间隔 → 4 次尝试
+        list_hits = []
+        left_hits = []
+        team_battle_hit = None
+        is_team_battle = False
+        p4_2_attempts = 0
+        for _retry in range(len(_RETRY_SLEEPS) + 1):  # 4 次
+            p4_2_attempts = _retry + 1
+            _pt = _tm.perf_counter()
+            list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                         if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
+            _slog(f"[P4-2 PERF] attempt {p4_2_attempts}: OCR list_center "
+                  f"{(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(list_hits)} 文字)")
+
+            _pt = _tm.perf_counter()
+            if has_left_roi:
+                left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs") if shot is not None else []
+            else:
+                full = ocr._ocr_all(shot) if shot is not None else []
+                left_hits = [h for h in full if h.cx < w_img * 0.16]
+            _slog(f"[P4-2 PERF] attempt {p4_2_attempts}: OCR left_tabs "
+                  f"{(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(left_hits)} 文字)")
+            team_battle_hit = next((h for h in left_hits if "团队竞技" in h.text), None)
+
+            all_text = " ".join(h.text for h in list_hits)
+            is_team_battle = (
+                any(OcrDismisser.fuzzy_match(all_text, kw) for kw in team_battle_keywords)
+                or any(kw in h.text for h in list_hits for kw in map_keywords)
+            )
+
+            # 成功条件: 已在团竞 (list_hits 含关键词) OR 找到了团竞 tab 可点
+            if is_team_battle or team_battle_hit:
+                break
+            # 还需要 retry: 用 _RETRY_SLEEPS[_retry] 间隔, 重新截屏
+            if _retry < len(_RETRY_SLEEPS):
+                _sleep_s = _RETRY_SLEEPS[_retry]
+                _slog(f"[P4-2] attempt {p4_2_attempts} miss → sleep {_sleep_s}s 重试")
+                await asyncio.sleep(_sleep_s)
+                shot_r = await self.adb.screenshot()
+                if shot_r is not None:
+                    shot = shot_r
 
         if d2:
             _pt = _tm.perf_counter()
@@ -994,11 +1050,30 @@ class SingleInstanceRunner:
         _slog(f"[P4-2→P4-3 PERF] gather(map+fill+confirm): {(_tm.perf_counter()-_pt)*1000:.0f}ms")
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 子 decision 3: P4-3-map  选地图
+        # 子 decision 3: P4-3-map  选地图. 加 retry: gather 第一次没找到地图就重新 OCR list_center
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         d3 = _make_d("3-map")
         if d3 and shot is not None:
             d3.set_input(shot, q=70)
+
+        p4_3_attempts = 1  # gather 那次算第 1 次
+        if map_hit is None:
+            for _retry in range(len(_P4_RETRY_SLEEPS)):
+                _sleep_s = _P4_RETRY_SLEEPS[_retry]
+                _slog(f"[P4-3] map_hit miss → sleep {_sleep_s}s 重新 OCR list_center")
+                await asyncio.sleep(_sleep_s)
+                shot_r = await self.adb.screenshot()
+                if shot_r is not None:
+                    shot = shot_r
+                _pt = _tm.perf_counter()
+                list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                             if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
+                p4_3_attempts += 1
+                _slog(f"[P4-3 PERF] retry {_retry+1}: OCR list_center "
+                      f"{(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(list_hits)} 文字)")
+                map_hit = _find_map_in_hits()
+                if map_hit:
+                    break
 
         _list_roi_px = (_roi_pixels("map_panel_list_center", shot) if has_list_roi
                          else [0, 0, w_img, (shot.shape[0] if shot is not None else 0)])
@@ -1010,7 +1085,7 @@ class SingleInstanceRunner:
                                          cx=map_hit.cx, cy=map_hit.cy)]
                 tier_p3 = TierRecord(
                     tier=3, name="OCR·list_center", early_exit=True,
-                    note=f"找到 '{map_hit.text}' (匹配 {map_keywords})",
+                    note=f"找到 '{map_hit.text}' (匹配 {map_keywords}, 尝试 {p4_3_attempts} 次)",
                     ocr_hits=_list_hits_d,
                 )
                 d3.add_tier(tier_p3)
@@ -1027,7 +1102,7 @@ class SingleInstanceRunner:
                                          cx=h.cx, cy=h.cy) for h in list_hits[:30]]
                 tier_p3 = TierRecord(
                     tier=3, name="OCR·list_center",
-                    note=f"未找到 '{self.target_map}' (关键词 {map_keywords})",
+                    note=f"未找到 '{self.target_map}' (关键词 {map_keywords}, {p4_3_attempts} 次全 miss)",
                     ocr_hits=_list_hits_d,
                 )
                 d3.add_tier(tier_p3)
@@ -1042,6 +1117,23 @@ class SingleInstanceRunner:
         if d4 and shot is not None:
             d4.set_input(shot, q=70)
 
+        # P4-3 可能 retry 过, shot 已变, 用新 shot 重新算 fill_state.
+        # 同时加 retry: ROI 已配置但 fill_state 仍 None (截屏问题) → sleep + 重试.
+        p4_4_attempts = 1
+        if has_fill_roi:
+            fill_state = await _check_fill_checkbox()
+            for _retry in range(len(_P4_RETRY_SLEEPS)):
+                if fill_state is not None:
+                    break
+                _sleep_s = _P4_RETRY_SLEEPS[_retry]
+                _slog(f"[P4-4] fill_state 为空 → sleep {_sleep_s}s 重新截屏")
+                await asyncio.sleep(_sleep_s)
+                shot_r = await self.adb.screenshot()
+                if shot_r is not None:
+                    shot = shot_r
+                fill_state = await _check_fill_checkbox()
+                p4_4_attempts += 1
+
         if fill_state is not None:
             ratio = fill_state["ratio"]
             rgb = fill_state["rgb"]
@@ -1049,7 +1141,7 @@ class SingleInstanceRunner:
             tier_note = (
                 f"ROI={tuple(bbox)} 平均RGB={rgb} "
                 f"橙色={fill_state['orange']}/{fill_state['total']} "
-                f"({ratio*100:.1f}%) 阈值=10%"
+                f"({ratio*100:.1f}%) 阈值=10% (尝试 {p4_4_attempts} 次)"
             )
             if d4:
                 tier_p4 = TierRecord(
@@ -1090,35 +1182,74 @@ class SingleInstanceRunner:
         d5 = _make_d("5-confirm")
         if d5 and shot_d5 is not None:
             d5.set_input(shot_d5, q=70)
-        # 优先用专门裁的 queding 模板, 兜底 btn_1
+
+        # P4-5 retry: queding → btn_1 (带区域约束) → OCR ROI/全屏 全 miss 才进 retry,
+        # sleep [0.25/0.4/1.0] 重新截屏后再试. 任何一级命中即 break.
         confirm_tmpl_fresh = None
         confirm_tmpl_used = "queding"
-        try:
-            if shot_d5 is not None:
-                confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "queding", threshold=0.7)
-                if confirm_tmpl_fresh is None:
-                    confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "btn_1", threshold=0.7)
-                    confirm_tmpl_used = "btn_1"
-        except Exception:
+        confirm_hit_ocr = None
+        ocr_tier_name = ""
+        ocr_tier_note = ""
+        confirm_hits_last: list = []
+        _btn_roi_px_last = None
+        p4_5_attempts = 0
+        for _retry in range(len(_P4_RETRY_SLEEPS) + 1):  # 4 次
+            p4_5_attempts = _retry + 1
             confirm_tmpl_fresh = None
-
-        # 区域约束: 通用按钮模板可能误命中, 限制只接受地图面板右下角.
-        # 确定按钮实测 rel≈(0.93, 0.94). 留余量: cx/w > 0.80, cy/h ∈ [0.80, 0.98]
-        # queding 是专门裁的可放宽, btn_1 必须卡区域.
-        if confirm_tmpl_fresh and shot_d5 is not None and confirm_tmpl_used == "btn_1":
-            _h_d5, _w_d5 = shot_d5.shape[:2]
-            rel_x = confirm_tmpl_fresh.cx / max(1, _w_d5)
-            rel_y = confirm_tmpl_fresh.cy / max(1, _h_d5)
-            if not (rel_x > 0.80 and 0.80 < rel_y < 0.98):
-                _slog(f"[阶段6] btn_1 命中位置 ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) "
-                      f"rel=({rel_x:.2f},{rel_y:.2f}) 不在确定按钮区域 → 拒绝, 走 OCR")
+            confirm_tmpl_used = "queding"
+            try:
+                if shot_d5 is not None:
+                    confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "queding", threshold=0.7)
+                    if confirm_tmpl_fresh is None:
+                        confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "btn_1", threshold=0.7)
+                        confirm_tmpl_used = "btn_1"
+            except Exception:
                 confirm_tmpl_fresh = None
+
+            # 区域约束: btn_1 通用模板必须卡在确定按钮区域 (cx/w > 0.80, cy/h ∈ [0.80, 0.98])
+            if confirm_tmpl_fresh and shot_d5 is not None and confirm_tmpl_used == "btn_1":
+                _h_d5, _w_d5 = shot_d5.shape[:2]
+                rel_x = confirm_tmpl_fresh.cx / max(1, _w_d5)
+                rel_y = confirm_tmpl_fresh.cy / max(1, _h_d5)
+                if not (rel_x > 0.80 and 0.80 < rel_y < 0.98):
+                    _slog(f"[阶段6] btn_1 命中位置 ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) "
+                          f"rel=({rel_x:.2f},{rel_y:.2f}) 不在确定按钮区域 → 拒绝")
+                    confirm_tmpl_fresh = None
+
+            if confirm_tmpl_fresh:
+                break  # 模板命中, 不需要 OCR
+
+            # OCR 兜底
+            shot = shot_d5
+            has_confirm_roi = "map_panel_btn_confirm" in avail_rois
+            if has_confirm_roi:
+                confirm_hits_last = ocr._ocr_roi_named(shot, "map_panel_btn_confirm") if shot is not None else []
+                _btn_roi_px_last = _roi_pixels("map_panel_btn_confirm", shot)
+                ocr_tier_name = "OCR·btn_confirm"
+                ocr_tier_note = f"模板没命中 → OCR ROI 找'确定' ({len(confirm_hits_last)} 文字)"
+            else:
+                confirm_hits_last = ocr._ocr_all(shot) if shot is not None else []
+                _btn_roi_px_last = None
+                ocr_tier_name = "OCR·全屏(右侧)"
+                ocr_tier_note = f"模板没命中 → OCR 全屏找'确定' (右侧 cx>{int(w_img*0.78)})"
+            confirm_hit_ocr = next((h for h in confirm_hits_last if "确定" in h.text
+                                    and (has_confirm_roi or h.cx > w_img * 0.78)), None)
+            if confirm_hit_ocr:
+                break
+            # 全 miss → retry
+            if _retry < len(_P4_RETRY_SLEEPS):
+                _sleep_s = _P4_RETRY_SLEEPS[_retry]
+                _slog(f"[P4-5] attempt {p4_5_attempts} 模板+OCR 全 miss → sleep {_sleep_s}s 重试")
+                await asyncio.sleep(_sleep_s)
+                shot_r = await self.adb.screenshot()
+                if shot_r is not None:
+                    shot_d5 = shot_r
 
         if confirm_tmpl_fresh:
             if d5:
                 d5.add_tier(TierRecord(
                     tier=0, name=f"模板·{confirm_tmpl_used}", early_exit=True,
-                    note=f"确定按钮模板命中 conf={confirm_tmpl_fresh.confidence:.2f}",
+                    note=f"确定按钮模板命中 conf={confirm_tmpl_fresh.confidence:.2f}, 尝试 {p4_5_attempts} 次",
                     templates=[TemplateMatch(
                         name=confirm_tmpl_used, score=float(confirm_tmpl_fresh.confidence),
                         hit=True,
@@ -1132,44 +1263,40 @@ class SingleInstanceRunner:
                            method="模板", target_class="确定",
                            target_conf=float(confirm_tmpl_fresh.confidence), screenshot=shot_d5)
             await self.adb.tap(confirm_tmpl_fresh.cx, confirm_tmpl_fresh.cy)
-            _slog(f"[阶段6] 确定 {confirm_tmpl_used} 模板命中(fresh) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
-            if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl_fresh.confidence:.2f}")
-        else:
-            # OCR 兜底: 优先用 map_panel_btn_confirm ROI, 没配再走全屏右侧过滤
-            shot = shot_d5  # 用 fresh shot 做后续 OCR
-            has_confirm_roi = "map_panel_btn_confirm" in avail_rois
-            if has_confirm_roi:
-                confirm_hits = ocr._ocr_roi_named(shot, "map_panel_btn_confirm") if shot is not None else []
-                _btn_roi_px = _roi_pixels("map_panel_btn_confirm", shot)
-                tier_name = "OCR·btn_confirm"
-                tier_note = f"模板没命中 → OCR ROI 找'确定' ({len(confirm_hits)} 文字)"
-            else:
-                confirm_hits = ocr._ocr_all(shot) if shot is not None else []
-                _btn_roi_px = None
-                tier_name = "OCR·全屏(右侧)"
-                tier_note = f"模板没命中 → OCR 全屏找'确定' (右侧 cx>{int(w_img*0.78)})"
-
-            confirm_hit = next((h for h in confirm_hits if "确定" in h.text
-                                and (has_confirm_roi or h.cx > w_img * 0.78)), None)
+            _slog(f"[阶段6] 确定 {confirm_tmpl_used} 模板命中(尝试 {p4_5_attempts} 次) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
+            if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl_fresh.confidence:.2f} (尝试 {p4_5_attempts} 次)")
+        elif confirm_hit_ocr:
+            shot = shot_d5
             if d5:
                 _full_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
-                                    cx=h.cx, cy=h.cy) for h in confirm_hits[:30]]
-                tier_p5o = TierRecord(tier=3, name=tier_name, note=tier_note, ocr_hits=_full_d)
+                                    cx=h.cx, cy=h.cy) for h in confirm_hits_last[:30]]
+                tier_p5o = TierRecord(tier=3, name=ocr_tier_name,
+                                       note=ocr_tier_note + f" (尝试 {p4_5_attempts} 次)",
+                                       ocr_hits=_full_d)
                 d5.add_tier(tier_p5o)
                 _h5, _w5 = (shot.shape[:2] if shot is not None else (0, 0))
-                _roi_use = _btn_roi_px if _btn_roi_px else [0, 0, _w5, _h5]
+                _roi_use = _btn_roi_px_last if _btn_roi_px_last else [0, 0, _w5, _h5]
                 d5.save_ocr_roi(tier_p5o, shot, roi=_roi_use, hits=_full_d)
-            if confirm_hit:
-                if d5:
-                    d5.set_tap(int(confirm_hit.cx), int(confirm_hit.cy),
-                               method="OCR", target_class="确定",
-                               target_text=confirm_hit.text, screenshot=shot)
-                await self.adb.tap(confirm_hit.cx, confirm_hit.cy)
-                _slog(f"[阶段6] OCR 兜底命中确定 → tap ({confirm_hit.cx},{confirm_hit.cy})")
-                if d5: d5.finalize(outcome="confirmed", note="OCR 兜底命中")
-            else:
-                _slog("[阶段6] 找不到确定按钮")
-                if d5: d5.finalize(outcome="failed", note="模板+OCR 都没找到确定")
+                d5.set_tap(int(confirm_hit_ocr.cx), int(confirm_hit_ocr.cy),
+                           method="OCR", target_class="确定",
+                           target_text=confirm_hit_ocr.text, screenshot=shot)
+            await self.adb.tap(confirm_hit_ocr.cx, confirm_hit_ocr.cy)
+            _slog(f"[阶段6] OCR 兜底命中确定 (尝试 {p4_5_attempts} 次) → tap ({confirm_hit_ocr.cx},{confirm_hit_ocr.cy})")
+            if d5: d5.finalize(outcome="confirmed", note=f"OCR 兜底命中 (尝试 {p4_5_attempts} 次)")
+        else:
+            _slog(f"[阶段6] {p4_5_attempts} 次都没找到确定按钮")
+            if d5:
+                # 把最后一次 OCR 的 hits 写进去, 方便档案 debug
+                _full_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                    cx=h.cx, cy=h.cy) for h in confirm_hits_last[:30]]
+                tier_p5o = TierRecord(tier=3, name=ocr_tier_name or "OCR·全屏",
+                                       note=f"{p4_5_attempts} 次模板+OCR 全 miss",
+                                       ocr_hits=_full_d)
+                d5.add_tier(tier_p5o)
+                _h5, _w5 = (shot_d5.shape[:2] if shot_d5 is not None else (0, 0))
+                _roi_use = _btn_roi_px_last if _btn_roi_px_last else [0, 0, _w5, _h5]
+                d5.save_ocr_roi(tier_p5o, shot_d5, roi=_roi_use, hits=_full_d)
+                d5.finalize(outcome="failed", note=f"模板+OCR {p4_5_attempts} 次全 miss")
 
         # 恢复守卫 + 总耗时
         if hasattr(self.adb, 'guard_enabled'):
