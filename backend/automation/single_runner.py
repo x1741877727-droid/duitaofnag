@@ -1187,44 +1187,76 @@ class SingleInstanceRunner:
     async def phase_team_create(self) -> Optional[str]:
         """队长创建队伍并获取 game scheme URL（通过二维码）
 
-        流程：点组队 → 组队码tab → 二维码组队 → 截屏解码QR →
-              curl获取game scheme → 关闭面板
+        拆 5 条独立 sub-decision (跟 P4 一样, 档案能逐条点开看图):
+          P3a-1-open    找"组队"按钮 + tap
+          P3a-2-tab     切"组队码" tab (含中部弹窗处理)
+          P3a-3-qr      点"二维码组队"
+          P3a-4-decode  截屏 + QR 解码 → fetch scheme URL
+          P3a-5-close   关闭面板
 
         Returns:
             game scheme URL (如 "pubgmhd1106467070://?tmid:xxx,rlid:xxx,...")
-            队员用 am start -d <url> 一条命令直接加入，不需要任何UI操作
         """
+        from .decision_log import get_recorder, TierRecord, OcrHit as _OcrHit
+        recorder = get_recorder()
+        inst_idx = getattr(self._v3_ctx, "instance_idx", 0) if self._v3_ctx else 0
+
+        def _make_d(sub_name: str):
+            try:
+                return recorder.new_decision(
+                    instance=inst_idx, phase=f"P3a-{sub_name}", round_idx=1)
+            except Exception as e:
+                logger.debug(f"new_decision err: {e}")
+                return None
+
+        def _roi_pixels(name: str, img):
+            if img is None:
+                return None
+            try:
+                from .roi_config import get as _rg
+                rx1, ry1, rx2, ry2, _ = _rg(name)
+                ph, pw = img.shape[:2]
+                return [max(0, int(pw * rx1)), max(0, int(ph * ry1)),
+                        min(pw, int(pw * rx2)), min(ph, int(ph * ry2))]
+            except Exception:
+                return None
+
         self.phase = Phase.TEAM_CREATE
         logger.info("[阶段4] 队长创建队伍")
 
-        # 禁用守卫
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = False
 
         shot = await self.adb.screenshot()
         self.dbg.log_screenshot(shot, tag="team_create_start")
-
         ocr = OcrDismisser()
 
-        # ── 步骤1: 找"组队"入口并点击 ──
-        # 左侧栏竖排小文字，全图 OCR 经常误识别 → 裁剪左侧 10% + 放大 3 倍
-        self.dbg.log_step("阶段4", "步骤1", "找组队按钮")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 1: P3a-1-open  找"组队"入口并点击
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d1 = _make_d("1-open")
+        if d1 and shot is not None:
+            d1.set_input(shot, q=70)
         clicked = False
+        last_left_hits: list = []
         for attempt in range(3):
             shot = await self.adb.screenshot()
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
             self.dbg.log_screenshot(shot, f"attempt{attempt}")
-            # ROI: team_btn_left (config/roi.yaml)
             left_hits = ocr._ocr_roi_named(shot, "team_btn_left")
+            last_left_hits = left_hits
             self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队"):
                     self.dbg.log_match("组队", h, fuzzy=True)
-                    logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
+                    if d1:
+                        d1.set_tap(int(h.cx), int(h.cy), method="OCR",
+                                   target_class="组队按钮", target_text=h.text,
+                                   screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
-                    self.dbg.log_action("tap", h.cx, h.cy)
+                    logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
                     clicked = True
                     break
             if clicked:
@@ -1232,159 +1264,278 @@ class SingleInstanceRunner:
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "队友"):
                     tap_y = max(h.cy - 100, 50)
-                    self.dbg.log_match("队友", h, fuzzy=True)
-                    logger.info(f"[阶段4] 通过'找队友'定位组队 ({h.cx},{tap_y})")
+                    if d1:
+                        d1.set_tap(int(h.cx), int(tap_y), method="OCR",
+                                   target_class="组队按钮(经队友定位)",
+                                   target_text=h.text, screenshot=shot)
                     await self.adb.tap(h.cx, tap_y)
-                    self.dbg.log_action("tap", h.cx, tap_y, "通过队友定位")
+                    logger.info(f"[阶段4] 通过'找队友'定位组队 ({h.cx},{tap_y})")
                     clicked = True
                     break
             if clicked:
                 break
             await asyncio.sleep(0.5)
 
+        if d1:
+            _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                cx=h.cx, cy=h.cy) for h in last_left_hits[:15]]
+            tier1 = TierRecord(
+                tier=3, name="OCR·team_btn_left", early_exit=clicked,
+                note=f"找'组队'按钮 (尝试 {attempt+1} 次), 命中={clicked}, "
+                     f"识别 {len(last_left_hits)} 文字",
+                ocr_hits=_hits_d,
+            )
+            d1.add_tier(tier1)
+            d1.save_ocr_roi(tier1, shot, roi=_roi_pixels("team_btn_left", shot),
+                            hits=_hits_d)
+            d1.finalize(outcome="opened" if clicked else "failed",
+                        note="点开组队界面" if clicked else "找不到组队按钮")
         if not clicked:
-            self.dbg.log_fail("未找到组队按钮", left_hits if 'left_hits' in dir() else [])
             logger.warning("[阶段4] 未找到组队按钮")
             self._restore_guard()
             return None
 
-        # ── 步骤2: 等面板出现，点底部"组队码"tab ──
-        # 只扫底部和中部 ROI，不做全屏 OCR
-        tab_clicked = False
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 2: P3a-2-tab  切"组队码" tab (中部弹窗处理在此 tier 里)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         await asyncio.sleep(0.8)  # 等面板动画
+        d2 = _make_d("2-tab")
+        shot_d2 = await self.adb.screenshot()
+        if d2 and shot_d2 is not None:
+            d2.set_input(shot_d2, q=70)
+        tab_clicked = False
+        last_bottom_hits: list = []
+        popup_seen = False
         for attempt in range(5):
-            shot = await self.adb.screenshot()
+            shot = await self.adb.screenshot() if attempt > 0 else shot_d2
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
 
-            # 检查中部是否有"使用组队码加入"弹窗 — team_code_popup_mid
+            # 中部"使用组队码加入"弹窗
             mid_hits = ocr._ocr_roi_named(shot, "team_code_popup_mid")
             mid_text = " ".join(h.text for h in mid_hits)
             if any(OcrDismisser.fuzzy_match(mid_text, kw) for kw in ["加入队伍", "使用组队码"]):
+                popup_seen = True
                 for h in mid_hits:
                     if OcrDismisser.fuzzy_match(h.text, "取消"):
-                        logger.info(f"[阶段4] 弹窗出现，点击取消 ({h.cx},{h.cy})")
+                        logger.info(f"[阶段4] 弹窗出现, 点击取消 ({h.cx},{h.cy})")
                         await self.adb.tap(h.cx, h.cy)
                         await asyncio.sleep(0.5)
                         break
                 continue
 
-            # 找底部"组队码"tab — team_code_tab_bottom
+            # 底部"组队码"tab
             bottom_hits = ocr._ocr_roi_named(shot, "team_code_tab_bottom")
+            last_bottom_hits = bottom_hits
             for h in bottom_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队码"):
-                    logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
+                    if d2:
+                        d2.set_tap(int(h.cx), int(h.cy), method="OCR",
+                                   target_class="组队码 tab", target_text=h.text,
+                                   screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
+                    logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
                     tab_clicked = True
                     break
             if tab_clicked:
                 break
             await asyncio.sleep(0.3)
 
-        # ── 步骤3: 在组队码面板找"二维码组队"并点击 ──
-        # ROI: 左侧栏 (0~25% 宽度) + 放大
+        if d2:
+            _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                cx=h.cx, cy=h.cy) for h in last_bottom_hits[:15]]
+            note = f"切组队码 tab (popup_seen={popup_seen}), 命中={tab_clicked}"
+            tier2 = TierRecord(
+                tier=3, name="OCR·team_code_tab_bottom", early_exit=tab_clicked,
+                note=note, ocr_hits=_hits_d,
+            )
+            d2.add_tier(tier2)
+            d2.save_ocr_roi(tier2, shot,
+                            roi=_roi_pixels("team_code_tab_bottom", shot),
+                            hits=_hits_d)
+            d2.finalize(outcome="tab_switched" if tab_clicked else "failed",
+                        note=note)
+        if not tab_clicked:
+            logger.warning("[阶段4] 未切到组队码 tab")
+            self._restore_guard()
+            return None
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 3: P3a-3-qr  点"二维码组队"
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         await asyncio.sleep(0.5)
+        d3 = _make_d("3-qr")
+        shot_d3 = await self.adb.screenshot()
+        if d3 and shot_d3 is not None:
+            d3.set_input(shot_d3, q=70)
         qr_clicked = False
+        last_qr_hits: list = []
         for attempt in range(4):
-            shot = await self.adb.screenshot()
+            shot = await self.adb.screenshot() if attempt > 0 else shot_d3
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
             left_hits = ocr._ocr_roi_named(shot, "qr_team_btn_left")
+            last_qr_hits = left_hits
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "二维码"):
-                    logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
+                    if d3:
+                        d3.set_tap(int(h.cx), int(h.cy), method="OCR",
+                                   target_class="二维码组队", target_text=h.text,
+                                   screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
+                    logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
                     qr_clicked = True
                     break
             if qr_clicked:
                 break
             await asyncio.sleep(0.3)
 
+        if d3:
+            _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                cx=h.cx, cy=h.cy) for h in last_qr_hits[:15]]
+            tier3 = TierRecord(
+                tier=3, name="OCR·qr_team_btn_left", early_exit=qr_clicked,
+                note=f"找'二维码组队', 命中={qr_clicked}",
+                ocr_hits=_hits_d,
+            )
+            d3.add_tier(tier3)
+            d3.save_ocr_roi(tier3, shot,
+                            roi=_roi_pixels("qr_team_btn_left", shot),
+                            hits=_hits_d)
+            d3.finalize(outcome="qr_opened" if qr_clicked else "failed",
+                        note=tier3.note)
         if not qr_clicked:
             logger.warning("[阶段4] 未找到二维码组队入口")
             self._restore_guard()
             return None
 
-        # ── 步骤4: 截屏解码 QR 码 ──
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 4: P3a-4-decode  截屏 + QR 解码 + fetch scheme
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         await asyncio.sleep(0.5)
+        d4 = _make_d("4-decode")
+        shot_d4 = await self.adb.screenshot()
+        if d4 and shot_d4 is not None:
+            d4.set_input(shot_d4, q=70)
         qr_url = ""
+        decode_attempts = 0
         for attempt in range(5):
-            shot = await self.adb.screenshot()
+            decode_attempts = attempt + 1
+            shot = await self.adb.screenshot() if attempt > 0 else shot_d4
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
-
-            # OpenCV QR 解码（放大3倍+二值化提高识别率）
-            # 裁剪区从 config/roi.yaml::qr_decode_crop 读
             from .roi_config import get as _roi_get
             _x1, _y1, _x2, _y2, _qr_scale = _roi_get("qr_decode_crop")
-            h, w = shot.shape[:2]
-            crop = shot[int(h * _y1):int(h * _y2), int(w * _x1):int(w * _x2)]
-            big = cv2.resize(crop, (0, 0), fx=_qr_scale, fy=_qr_scale, interpolation=cv2.INTER_CUBIC)
+            h_img, w_img = shot.shape[:2]
+            crop = shot[int(h_img * _y1):int(h_img * _y2),
+                        int(w_img * _x1):int(w_img * _x2)]
+            big = cv2.resize(crop, (0, 0), fx=_qr_scale, fy=_qr_scale,
+                              interpolation=cv2.INTER_CUBIC)
             gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
-
             detector = cv2.QRCodeDetector()
             data, _, _ = detector.detectAndDecode(thresh)
             if data:
                 qr_url = data
                 logger.info(f"[阶段4] QR码解码成功: {data[:60]}...")
                 break
-            logger.debug(f"[阶段4] QR码解码失败，重试 {attempt+1}/5")
+            logger.debug(f"[阶段4] QR码解码失败, 重试 {attempt+1}/5")
             await asyncio.sleep(0.5)
 
-        if not qr_url:
-            logger.error("[阶段4] 无法解码QR码")
-            self._restore_guard()
-            return None
-
-        # ── 步骤5: 请求URL获取 game scheme ──
+        # fetch game scheme via HTTP
         game_scheme = ""
-        try:
-            import urllib.request
-            loop = asyncio.get_event_loop()
+        if qr_url:
+            try:
+                import urllib.request
+                loop = asyncio.get_event_loop()
+                def _fetch_scheme(url: str) -> str:
+                    req = urllib.request.Request(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 7.1.2)"
+                    })
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        html = resp.read().decode("utf-8", errors="ignore")
+                    import re
+                    match = re.search(r'(pubgmhd\d+://[^"\']+)', html)
+                    return match.group(1) if match else ""
+                game_scheme = await loop.run_in_executor(None, _fetch_scheme, qr_url)
+            except Exception as e:
+                logger.error(f"[阶段4] 获取 game scheme 失败: {e}")
 
-            def _fetch_scheme(url: str) -> str:
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 7.1.2)"
-                })
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    html = resp.read().decode("utf-8", errors="ignore")
-                # 提取 game scheme: pubgmhd1106467070://...
-                import re
-                match = re.search(r'(pubgmhd\d+://[^"\']+)', html)
-                return match.group(1) if match else ""
-
-            # QR URL 可能是 http，需要跟随重定向到 https
-            game_scheme = await loop.run_in_executor(None, _fetch_scheme, qr_url)
-        except Exception as e:
-            logger.error(f"[阶段4] 获取 game scheme 失败: {e}")
+        if d4:
+            note = (f"QR解码尝试 {decode_attempts} 次, qr_url={'有' if qr_url else '无'}, "
+                    f"game_scheme={'有' if game_scheme else '无'}")
+            tier4 = TierRecord(
+                tier=4, name="QR·decode+fetch", early_exit=bool(game_scheme),
+                note=note,
+                ocr_roi=_roi_pixels("qr_decode_crop", shot),
+            )
+            d4.add_tier(tier4)
+            # QR 区域可视化 (无 OCR hits, 只画 ROI)
+            d4.save_ocr_roi(tier4, shot,
+                            roi=_roi_pixels("qr_decode_crop", shot),
+                            hits=[])
+            d4.finalize(outcome="scheme_ok" if game_scheme else "decode_fail",
+                        note=note + (f"\nscheme={game_scheme[:80]}" if game_scheme else ""))
 
         if not game_scheme:
-            logger.error("[阶段4] 未能提取 game scheme URL")
+            logger.error("[阶段4] 无法解码QR码 / 获取 scheme")
             self._restore_guard()
             return None
-
         logger.info(f"[阶段4] game scheme: {game_scheme}")
 
-        # ── 步骤6: 关闭面板 ──
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 5: P3a-5-close  关闭面板
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d5 = _make_d("5-close")
+        shot_d5 = await self.adb.screenshot()
+        if d5 and shot_d5 is not None:
+            d5.set_input(shot_d5, q=70)
+        last_close_hit = None
+        last_method = ""
+        closed = False
         for _ in range(4):
             shot = await self.adb.screenshot()
             if shot is None:
                 break
-            if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7):
+            if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7) \
+               or self.matcher.match_one(shot, "lobby_start_game", threshold=0.7):
+                closed = True
                 break
             close = self.matcher.find_dialog_close(shot)
             if close:
+                last_close_hit = close
+                last_method = "模板·close_x"
                 logger.info(f"[阶段4] 关闭按钮 ({close.cx},{close.cy})")
+                if d5:
+                    d5.set_tap(int(close.cx), int(close.cy), method="模板",
+                               target_class="关闭按钮", target_conf=float(close.confidence),
+                               screenshot=shot)
                 await self.adb.tap(close.cx, close.cy)
                 await asyncio.sleep(0.3)
                 continue
-            h, w = shot.shape[:2]
-            await self.adb.tap(w * 3 // 4, h // 2)
+            h_img, w_img = shot.shape[:2]
+            tap_x, tap_y = w_img * 3 // 4, h_img // 2
+            last_method = "外部空白"
+            if d5 and last_close_hit is None:
+                # 第一次 fallback 也记一次 set_tap, 让档案能看到点哪
+                d5.set_tap(int(tap_x), int(tap_y), method="空白",
+                           target_class="面板外空白(兜底)", screenshot=shot)
+            await self.adb.tap(tap_x, tap_y)
             await asyncio.sleep(0.3)
+
+        if d5:
+            tier5 = TierRecord(
+                tier=0 if last_method.startswith("模板") else 4,
+                name=last_method or "关闭面板",
+                early_exit=closed,
+                note=f"关面板, 已回大厅={closed}, 方法={last_method or '未触发'}",
+            )
+            d5.add_tier(tier5)
+            d5.finalize(outcome="closed" if closed else "maybe_closed",
+                        note=f"已回大厅={closed}")
 
         logger.info("[阶段4] 已关闭组队面板")
         shot = await self.adb.screenshot()
@@ -1438,50 +1589,113 @@ class SingleInstanceRunner:
     async def phase_team_join(self, game_scheme_url: str) -> bool:
         """队员通过 game scheme URL 直接加入队伍
 
-        一条 ADB 命令直接加入，不需要任何 UI 操作。
-        多队完全并行，每台模拟器各自收到独立的 ADB 命令，零冲突。
+        拆 2 条 sub-decision (跟 P4/P3a 一样, 档案能逐条看图):
+          P3b-1-launch  am start scheme://
+          P3b-2-verify  轮询 OCR "取消准备" 验证已加入
 
         Args:
             game_scheme_url: 游戏内部 scheme URL
                 如 "pubgmhd1106467070://?tmid:xxx,rlid:xxx,t:xxx,p:2"
         """
+        from .decision_log import get_recorder, TierRecord, OcrHit as _OcrHit
+        recorder = get_recorder()
+        inst_idx = getattr(self._v3_ctx, "instance_idx", 0) if self._v3_ctx else 0
+
+        def _make_d(sub_name: str):
+            try:
+                return recorder.new_decision(
+                    instance=inst_idx, phase=f"P3b-{sub_name}", round_idx=1)
+            except Exception as e:
+                logger.debug(f"new_decision err: {e}")
+                return None
+
         self.phase = Phase.TEAM_JOIN
         logger.info(f"[阶段5] 队员加入队伍 (scheme: {game_scheme_url[:50]}...)")
 
         raw_adb = getattr(self.adb, '_adb', self.adb)
         loop = asyncio.get_event_loop()
 
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 1: P3b-1-launch  am start scheme
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         shot = await self.adb.screenshot()
         self.dbg.log_screenshot(shot, tag="team_join_start")
+        d1 = _make_d("1-launch")
+        if d1 and shot is not None:
+            d1.set_input(shot, q=70)
 
-        # 一条命令直接加入
         output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell",
             f"am start -a android.intent.action.VIEW -d '{game_scheme_url}'"
         )
-        logger.info(f"[阶段5] am start 结果: {output.strip()}")
+        out_short = (output or "").strip()
+        logger.info(f"[阶段5] am start 结果: {out_short[:200]}")
 
-        # 验证是否成功加入：轮询检查左上角是否出现"取消准备"
+        # am start 失败信号: stderr 含 "Error", 没有 "Starting" / "Activity"
+        launch_ok = ("Error" not in out_short) and bool(out_short)
+        if d1:
+            tier1 = TierRecord(
+                tier=4, name="ADB·am start",
+                early_exit=launch_ok,
+                note=f"scheme={game_scheme_url[:80]}\nam_start_output={out_short[:200]}",
+            )
+            d1.add_tier(tier1)
+            d1.finalize(
+                outcome="launched" if launch_ok else "launch_failed",
+                note=f"am start {'OK' if launch_ok else '失败'}: {out_short[:120]}",
+            )
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 2: P3b-2-verify  轮询验证 "取消准备"
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d2 = _make_d("2-verify")
+        ocr = OcrDismisser()
+        joined = False
+        last_hits: list = []
+        last_shot = None
+        attempt_idx = 0
         for attempt in range(10):
+            attempt_idx = attempt + 1
             await asyncio.sleep(1)
             shot = await raw_adb.screenshot()
             if shot is None:
                 continue
-            # "取消准备" 按钮出现 = 成功加入队伍
-            ocr = OcrDismisser()
+            last_shot = shot
             hits = ocr._ocr_all(shot)
+            last_hits = hits
             for h in hits:
                 if "取消" in h.text and "准备" in h.text:
                     logger.info("[阶段5] 队员加入完成 ✓（检测到取消准备）")
                     self.dbg.log_screenshot(shot, tag="team_join_done")
-                    return True
-            # 模板兜底
-            if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7):
-                # 还在大厅，没加入
+                    joined = True
+                    break
+            if joined:
+                break
+            # 还在大厅 → 继续等
+            if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7) \
+               or self.matcher.match_one(shot, "lobby_start_game", threshold=0.7):
                 continue
 
-        logger.warning("[阶段5] 队员加入超时，未检测到取消准备")
-        return False
+        if d2:
+            if last_shot is not None:
+                d2.set_input(last_shot, q=70)
+            _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                cx=h.cx, cy=h.cy) for h in last_hits[:15]]
+            tier2 = TierRecord(
+                tier=3, name="OCR·全屏(取消准备)", early_exit=joined,
+                note=f"轮询 {attempt_idx} 次, 加入={joined}",
+                ocr_hits=_hits_d,
+            )
+            d2.add_tier(tier2)
+            if last_shot is not None:
+                _h, _w = last_shot.shape[:2]
+                d2.save_ocr_roi(tier2, last_shot, roi=[0, 0, _w, _h], hits=_hits_d)
+            d2.finalize(outcome="joined" if joined else "timeout",
+                        note=f"轮询 {attempt_idx} 次后{'确认加入' if joined else '超时'}")
+
+        if not joined:
+            logger.warning("[阶段5] 队员加入超时，未检测到取消准备")
+        return joined
 
     # ================================================================
     # 主运行循环
