@@ -2,6 +2,10 @@
  * 模版库 API 客户端封装.
  */
 
+export type Preprocessing = 'grayscale' | 'clahe' | 'binarize' | 'sharpen' | 'invert' | 'edge'
+
+export const ALL_PREPROC: Preprocessing[] = ['grayscale', 'clahe', 'binarize', 'sharpen', 'invert', 'edge']
+
 export interface TemplateMeta {
   name: string
   category: string
@@ -11,6 +15,10 @@ export interface TemplateMeta {
   width: number
   height: number
   phash: string
+  preprocessing: Preprocessing[]
+  threshold: number      // 0 = 用默认 (0.80)
+  source_w: number
+  source_h: number
 }
 
 export interface TemplateListResp {
@@ -98,6 +106,38 @@ export interface TestArgs {
   image_b64?: string
   threshold?: number
   use_edge?: boolean
+  preprocessing?: Preprocessing[]   // 临时覆盖 yaml 持久值
+}
+
+export interface SaveMetaArgs {
+  name: string
+  preprocessing?: Preprocessing[]   // 显式 [] = 清空; undefined = 不动
+  threshold?: number                // 0 = 不动 (向后兼容)
+}
+
+export interface PreviewResp {
+  name: string
+  preprocessing: Preprocessing[]
+  original_b64: string
+  processed_b64: string
+  size: [number, number]
+}
+
+export async function saveTemplateMeta(args: SaveMetaArgs): Promise<{ ok: boolean; name: string; meta: any }> {
+  const r = await fetch('/api/templates/save_meta', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
+  })
+  if (!r.ok) throw new Error(`save_meta ${r.status} ${(await r.text()).slice(0, 300)}`)
+  return await r.json()
+}
+
+export async function fetchTemplatePreview(name: string, preprocessing: Preprocessing[]): Promise<PreviewResp> {
+  const q = preprocessing.length ? `?preprocessing=${encodeURIComponent(preprocessing.join(','))}` : ''
+  const r = await fetch(`/api/templates/preview/${encodeURIComponent(name)}${q}`)
+  if (!r.ok) throw new Error(`preview ${r.status}`)
+  return await r.json()
 }
 
 export async function testTemplate(args: TestArgs): Promise<TemplateTestResult> {

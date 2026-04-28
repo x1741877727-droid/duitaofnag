@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -100,6 +101,57 @@ def _write_meta(name: str, *, orig_filename: str = "", crop_bbox: Optional[list]
         logger.debug(f"[templates] write_meta err: {e}")
 
 
+# ─── 匹配元数据 (yaml: preprocessing / threshold / source_w/h) ───
+
+VALID_PREPROC = ("grayscale", "clahe", "binarize", "sharpen", "invert", "edge")
+
+
+def _read_match_meta(name: str) -> dict:
+    """读 templates_meta/<name>.yaml. 不存在返 {}."""
+    p = _meta_dir() / f"{name}.yaml"
+    if not p.is_file():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        logger.debug(f"[templates] read_match_meta {name} err: {e}")
+        return {}
+
+
+def _write_match_meta(name: str, *, preprocessing: Optional[list] = None,
+                      threshold: Optional[float] = None,
+                      source_w: Optional[int] = None,
+                      source_h: Optional[int] = None) -> None:
+    """写 templates_meta/<name>.yaml. 字段为 None 则不动 (保留旧值);
+    preprocessing 显式传 [] 表示清空."""
+    p = _meta_dir() / f"{name}.yaml"
+    cur = _read_match_meta(name)
+    if preprocessing is not None:
+        # 校验每项都在白名单
+        cleaned = [m for m in preprocessing if m in VALID_PREPROC]
+        cur["preprocessing"] = cleaned
+    if threshold is not None:
+        cur["threshold"] = float(threshold)
+    if source_w is not None:
+        cur["source_w"] = int(source_w)
+    if source_h is not None:
+        cur["source_h"] = int(source_h)
+    # backup 一份
+    try:
+        if p.is_file():
+            bak = p.with_suffix(f".yaml.bak.{int(time.time())}")
+            shutil.copyfile(p, bak)
+    except Exception:
+        pass
+    try:
+        import yaml
+        p.write_text(yaml.safe_dump(cur, allow_unicode=True, sort_keys=False),
+                     encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[templates] write_match_meta {name} err: {e}")
+
+
 # ─── 工具 ───
 
 
@@ -172,6 +224,7 @@ async def list_templates():
                 if img is None:
                     continue
                 h, w = img.shape[:2]
+                mm = _read_match_meta(f.stem)
                 items.append({
                     "name": f.stem,
                     "category": _categorize(f.stem),
@@ -181,6 +234,10 @@ async def list_templates():
                     "width": int(w),
                     "height": int(h),
                     "phash": f"0x{_phash_image(img):016x}",
+                    "preprocessing": list(mm.get("preprocessing") or []),
+                    "threshold": float(mm.get("threshold") or 0.0),  # 0 = 用默认
+                    "source_w": int(mm.get("source_w") or 0),
+                    "source_h": int(mm.get("source_h") or 0),
                 })
             except Exception as e:
                 logger.debug(f"[templates] skip {f}: {e}")
@@ -437,6 +494,13 @@ class TemplateTestReq(BaseModel):
     image_b64: Optional[str] = None       # 上传 base64 图片直接测
     threshold: Optional[float] = None
     use_edge: bool = False
+    preprocessing: Optional[list] = None  # 临时 preprocessing list (覆盖 yaml 持久值)
+
+
+class SaveMatchMetaReq(BaseModel):
+    name: str
+    preprocessing: Optional[list] = None  # 显式 [] = 清空; None = 不动
+    threshold: Optional[float] = None     # None = 不动
 
 
 def _load_screenshot_from_decision(decision_id: str, session: str = "") -> Optional[np.ndarray]:
@@ -540,6 +604,10 @@ async def template_test(req: TemplateTestReq):
         raise HTTPException(400, "未提供有效的源 (image_b64 / decision_id / instance)")
 
     from .automation.template_test import run_test
+    # preprocessing 校验 (白名单过滤)
+    pp = None
+    if req.preprocessing is not None:
+        pp = [m for m in req.preprocessing if m in VALID_PREPROC]
     r = run_test(
         template_name=name,
         matcher=matcher,
@@ -547,9 +615,83 @@ async def template_test(req: TemplateTestReq):
         threshold=req.threshold,
         use_edge=req.use_edge,
         annotate=True,
+        preprocessing=pp,
     )
     from dataclasses import asdict as _asd
     out = _asd(r)
     out["source"] = src_kind
     out["source_image_size"] = [int(shot.shape[1]), int(shot.shape[0])]
     return JSONResponse(out)
+
+
+# ─── POST /api/templates/save_meta — 保存 yaml 持久化 preprocessing/threshold ───
+
+
+@router.post("/api/templates/save_meta")
+async def template_save_meta(req: SaveMatchMetaReq):
+    name = _safe_name(req.name)
+    p = _template_dir() / f"{name}.png"
+    if not p.is_file():
+        raise HTTPException(404, "模版不存在")
+    # 校验 preprocessing 白名单
+    pp = req.preprocessing
+    if pp is not None:
+        bad = [m for m in pp if m not in VALID_PREPROC]
+        if bad:
+            raise HTTPException(400, f"未知预处理: {bad}, 合法: {VALID_PREPROC}")
+    _write_match_meta(name, preprocessing=pp, threshold=req.threshold)
+    # 让生产 matcher 重载 (下次 match_one 用新配置)
+    _reload_test_matcher()
+    try:
+        from . import api as _api_mod
+        svc = getattr(_api_mod, "_active_service", None)
+        if svc is not None:
+            # 主 service 的 matcher (跑生产) 也重新 load 一次, 让新 preprocessing 立即生效
+            for slot in getattr(svc, "_runner_slots", {}).values() or {}:
+                runner = getattr(slot, "runner", None)
+                m = getattr(runner, "matcher", None) if runner else None
+                if m is not None:
+                    try:
+                        m.load_all()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return {"ok": True, "name": name, "meta": _read_match_meta(name)}
+
+
+# ─── GET /api/templates/preview/<name>?preprocessing=edge,clahe ───
+
+
+@router.get("/api/templates/preview/{name}")
+async def template_preview(name: str, preprocessing: str = Query("")):
+    """返回模版图 + 应用 preprocessing 后的可视化, 用于 UI 直观看 edge/clahe 效果.
+    response: {original_b64, processed_b64, preprocessing: list}
+    """
+    name = _safe_name(name)
+    p = _template_dir() / f"{name}.png"
+    if not p.is_file():
+        raise HTTPException(404, "模版不存在")
+    img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(500, "模版读取失败")
+    pp_list = [m.strip() for m in preprocessing.split(",") if m.strip() in VALID_PREPROC]
+    processed = img
+    if pp_list:
+        try:
+            from .automation.image_preproc import apply_preprocessing
+            processed = apply_preprocessing(img, pp_list)
+        except Exception as e:
+            logger.warning(f"[templates] preview preprocess err: {e}")
+    def _b64(im):
+        ok, buf = cv2.imencode(".png", im)
+        if not ok:
+            return ""
+        return "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+    return {
+        "name": name,
+        "preprocessing": pp_list,
+        "original_b64": _b64(img),
+        "processed_b64": _b64(processed),
+        "size": [int(img.shape[1]), int(img.shape[0])],
+    }

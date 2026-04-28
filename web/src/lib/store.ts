@@ -97,6 +97,7 @@ export type ConsoleView =
   | 'console'        // 中控台 (实时观察 + 反向控制)
   | 'archive'        // 决策档案 (历史会话)
   | 'templates'      // 模版库
+  | 'template-tuner' // 模版调试 (preprocessing 校准)
   | 'yolo'           // YOLO (测试 / 数据集 / 标注 / 采集 / 模型)
   | 'ocr'            // OCR 调试 (ROI 校准 + OCR 实测)
   | 'memory'         // 记忆库 (Memory L1 浏览)

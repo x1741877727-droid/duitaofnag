@@ -9,6 +9,7 @@ import { LogDrawer } from '@/components/log-panel'
 import { Console } from '@/components/console/Console'
 import { Archive } from '@/components/archive/Archive'
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary'
+import { TemplateTuner } from '@/components/template/TemplateTuner'
 import { YoloView } from '@/components/yolo/YoloView'
 import { OcrTuner } from '@/components/ocr/OcrTuner'
 import { MemoryView } from '@/components/memory/MemoryView'
@@ -56,7 +57,7 @@ function App() {
         <main className="flex-1 overflow-y-auto p-4">
           <div
             className={
-              currentView === 'console' || currentView === 'yolo' || currentView === 'ocr' || currentView === 'templates' || currentView === 'memory' || currentView === 'archive' || currentView === 'perf'
+              currentView === 'console' || currentView === 'yolo' || currentView === 'ocr' || currentView === 'templates' || currentView === 'template-tuner' || currentView === 'memory' || currentView === 'archive' || currentView === 'perf'
                 ? 'h-full animate-page'
                 : 'max-w-5xl mx-auto animate-page'
             }
@@ -66,6 +67,7 @@ function App() {
             {currentView === 'console' && <Console />}
             {currentView === 'archive' && <Archive />}
             {currentView === 'templates' && <TemplateLibrary />}
+            {currentView === 'template-tuner' && <TemplateTuner />}
             {currentView === 'yolo' && <YoloView />}
             {currentView === 'ocr' && <OcrTuner />}
             {currentView === 'memory' && <MemoryView />}

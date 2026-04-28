@@ -78,6 +78,7 @@ def run_test(
     threshold: Optional[float] = None,
     use_edge: bool = False,
     annotate: bool = True,
+    preprocessing: Optional[list] = None,
 ) -> TestResult:
     """跑一次 dryrun: matcher.match_one + 画框 + 返回 TestResult."""
     t0 = time.perf_counter()
@@ -90,7 +91,7 @@ def run_test(
     try:
         hit = matcher.match_one(
             screenshot, template_name, threshold=threshold,
-            use_edge=use_edge,
+            use_edge=use_edge, preprocessing=preprocessing,
         )
     except Exception as e:
         logger.warning(f"[template_test] match_one err: {e}")

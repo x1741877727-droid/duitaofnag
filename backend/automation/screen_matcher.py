@@ -185,12 +185,14 @@ class ScreenMatcher:
         multi_scale: bool = True,
         use_edge: bool = False,
         scales: "list[float] | None" = None,
+        preprocessing: "list | None" = None,
     ) -> Optional[MatchHit]:
         """匹配单个模板，返回命中或None
 
         Args:
             use_edge: 使用 Canny 边缘检测匹配，对光照/对比度变化更鲁棒
             scales: 显式指定 scale 列表（覆盖 multi_scale 默认值）
+            preprocessing: 临时 preprocessing list, 覆盖模板 yaml 持久值 (调试用)
         """
         if template_name not in self._templates:
             return None
@@ -198,7 +200,11 @@ class ScreenMatcher:
         _m_t0 = __import__('time').perf_counter()
         tdata = self._templates[template_name]
         default_th = tdata["threshold"]
-        preproc = list(tdata.get("preprocessing") or [])
+        # preprocessing 参数显式给 → 用它; 否则用 yaml 里的
+        if preprocessing is not None:
+            preproc = list(preprocessing)
+        else:
+            preproc = list(tdata.get("preprocessing") or [])
         th = threshold if threshold is not None else default_th
 
         # use_edge=True 是历史 API, 等价于 preprocessing=["edge"]
