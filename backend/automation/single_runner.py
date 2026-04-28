@@ -874,16 +874,22 @@ class SingleInstanceRunner:
         if d2 and shot is not None:
             d2.set_input(shot, q=70)
 
+        import time as _tm
+
         # P4-2 自己 OCR list_center, 顺便把"是否团竞"判出来. 不在 P4-1 里提前探测了.
+        _t = _tm.perf_counter()
         list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
                      if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
+        _slog(f"[P4-2 PERF] OCR list_center: {(_tm.perf_counter()-_t)*1000:.0f}ms ({len(list_hits)} 文字)")
 
         # OCR 找 团竞 tab
+        _t = _tm.perf_counter()
         if has_left_roi:
             left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs") if shot is not None else []
         else:
             full = ocr._ocr_all(shot) if shot is not None else []
             left_hits = [h for h in full if h.cx < w_img * 0.16]
+        _slog(f"[P4-2 PERF] OCR left_tabs: {(_tm.perf_counter()-_t)*1000:.0f}ms ({len(left_hits)} 文字)")
         team_battle_hit = next((h for h in left_hits if "团队竞技" in h.text), None)
 
         team_battle_keywords = ["团竞手册", "团竞详情", "军备团竞", "经典团竞",
@@ -895,6 +901,7 @@ class SingleInstanceRunner:
         )
 
         if d2:
+            _t = _tm.perf_counter()
             _left_hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
                                     cx=h.cx, cy=h.cy) for h in left_hits[:15]]
             tier_p2 = TierRecord(
@@ -907,6 +914,7 @@ class SingleInstanceRunner:
                             roi=_roi_pixels("map_panel_left_tabs", shot) if has_left_roi
                                 else [0, 0, int(w_img * 0.16), shot.shape[0] if shot is not None else 0],
                             hits=_left_hits_d)
+            _slog(f"[P4-2 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_t)*1000:.0f}ms")
 
         if not is_team_battle:
             if team_battle_hit:
@@ -931,7 +939,9 @@ class SingleInstanceRunner:
                 return False
         else:
             _slog("[阶段6] 已在团竞, 跳过切换")
+            _t = _tm.perf_counter()
             if d2: d2.finalize(outcome="skipped", note=f"已在团竞 ({len(list_hits)} 文字含关键词)")
+            _slog(f"[P4-2 PERF] finalize: {(_tm.perf_counter()-_t)*1000:.0f}ms")
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 并发: 选地图 (CPU) + 补位 ROI 颜色 (像素) + 确定模板 (CPU)
@@ -976,11 +986,13 @@ class SingleInstanceRunner:
             except Exception:
                 return None
 
+        _t = _tm.perf_counter()
         map_hit, fill_state, confirm_tmpl = await asyncio.gather(
             asyncio.to_thread(_find_map_in_hits),
             _check_fill_checkbox(),
             asyncio.to_thread(_find_confirm_template),
         )
+        _slog(f"[P4-2→P4-3 PERF] gather(map+fill+confirm): {(_tm.perf_counter()-_t)*1000:.0f}ms")
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 3: P4-3-map  选地图
