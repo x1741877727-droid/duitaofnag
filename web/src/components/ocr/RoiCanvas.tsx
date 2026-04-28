@@ -1,43 +1,49 @@
 /**
- * RoiCanvas — 显示帧 + ROI 红框 + 鼠标拖框调整.
+ * RoiCanvas — 显示帧 + ROI 红框 + 鼠标拖框调整 + 点击放大.
  *
- * - 鼠标左键按下 → 开始画新框 (会覆盖现有 rect)
- * - 拖动 → 实时显示
- * - 松开 → 调用 onRectChange (传归一化坐标)
- * - 可选 ocrHits prop: 在帧上叠加 OCR 文字框 (绿色)
+ * 关键 bug 修复: 之前 wrap div 跟 img 不严格等比例 → 鼠标在 letterbox
+ * 空白区拖框, 红框落到画面外. 改成 clientToNorm 用 img.getBoundingClientRect,
+ * 鼠标必须在 img 元素内才响应; ROI/OCR overlay 也都基于 img rect 而非 wrap.
+ *
+ * 点击放大: 全屏 modal 显示大图 + ROI 框 + OCR 框, ESC / 点击外部关闭.
  */
 import { useRef, useState } from 'react'
 import type { OcrHit } from '@/lib/roiApi'
 
 interface Props {
-  imageSrc: string                                       // data:image/jpeg;base64,...
-  imageSize: [number, number]                            // [w, h] 原图尺寸
-  rect: [number, number, number, number]                 // 归一化 [x1,y1,x2,y2]
+  imageSrc: string
+  imageSize: [number, number]
+  rect: [number, number, number, number]
   onRectChange?: (rect: [number, number, number, number]) => void
-  ocrHits?: OcrHit[]                                     // 可选: 叠加 OCR 框
+  ocrHits?: OcrHit[]
   className?: string
+  enableZoom?: boolean    // 默认 true, 点图标放大
 }
 
-export function RoiCanvas({ imageSrc, imageSize, rect, onRectChange, ocrHits, className }: Props) {
-  const wrapRef = useRef<HTMLDivElement | null>(null)
+export function RoiCanvas({ imageSrc, imageSize, rect, onRectChange, ocrHits, className, enableZoom = true }: Props) {
+  const imgRef = useRef<HTMLImageElement | null>(null)
   const [drag, setDrag] = useState<{ startNx: number; startNy: number; cur: [number, number, number, number] } | null>(null)
+  const [zoomed, setZoomed] = useState(false)
 
   function clientToNorm(clientX: number, clientY: number): { nx: number; ny: number } | null {
-    const wrap = wrapRef.current
-    if (!wrap) return null
-    const r = wrap.getBoundingClientRect()
-    const nx = (clientX - r.left) / r.width
-    const ny = (clientY - r.top) / r.height
+    const img = imgRef.current
+    if (!img) return null
+    const r = img.getBoundingClientRect()
+    if (r.width <= 0 || r.height <= 0) return null
+    // 鼠标必须在 img 内 (避免 letterbox 空白区拖框)
+    if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) {
+      return null
+    }
     return {
-      nx: Math.max(0, Math.min(1, nx)),
-      ny: Math.max(0, Math.min(1, ny)),
+      nx: Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+      ny: Math.max(0, Math.min(1, (clientY - r.top) / r.height)),
     }
   }
 
   function onMouseDown(e: React.MouseEvent) {
     if (e.button !== 0) return
     const p = clientToNorm(e.clientX, e.clientY)
-    if (!p) return
+    if (!p) return  // 鼠标在 img 外, 不响应
     e.preventDefault()
     setDrag({ startNx: p.nx, startNy: p.ny, cur: [p.nx, p.ny, p.nx, p.ny] })
   }
@@ -62,78 +68,124 @@ export function RoiCanvas({ imageSrc, imageSize, rect, onRectChange, ocrHits, cl
     setDrag(null)
   }
 
-  // 显示框: 拖动中用 drag.cur, 否则用 prop rect
   const displayRect = drag ? drag.cur : rect
-  const [dx1, dy1, dx2, dy2] = displayRect
   const [iw, ih] = imageSize
 
-  return (
-    <div
-      ref={wrapRef}
-      className={`relative bg-foreground select-none ${className || ''}`}
-      style={{ aspectRatio: iw && ih ? `${iw} / ${ih}` : '16 / 9', cursor: 'crosshair' }}
-      onMouseDown={onMouseDown}
-      onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}
-      onMouseLeave={onMouseUp}
-    >
-      {imageSrc ? (
-        <img
-          src={imageSrc}
-          alt="frame"
-          draggable={false}
-          className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-        />
-      ) : (
-        <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-          点 "抓帧" 加载画面
-        </div>
-      )}
+  // 渲染主画布 (内嵌 + 大图 modal 共用)
+  function renderCanvas(isModal: boolean) {
+    return (
+      <div
+        className="relative w-full h-full flex items-center justify-center bg-foreground select-none"
+        onMouseDown={isModal ? undefined : onMouseDown}
+        onMouseMove={isModal ? undefined : onMouseMove}
+        onMouseUp={isModal ? undefined : onMouseUp}
+        onMouseLeave={isModal ? undefined : onMouseUp}
+        style={{ cursor: isModal ? 'default' : 'crosshair' }}
+      >
+        {imageSrc ? (
+          <>
+            {/* img 用 inline-block, ROI/OCR 框 absolute 跟着 img */}
+            <div className="relative max-w-full max-h-full" style={{ aspectRatio: `${iw} / ${ih}` }}>
+              <img
+                ref={isModal ? undefined : imgRef}
+                src={imageSrc}
+                alt="frame"
+                draggable={false}
+                className="block w-full h-full object-contain pointer-events-none"
+              />
 
-      {/* ROI 红框 */}
-      {imageSrc && (dx2 > dx1) && (dy2 > dy1) && (
-        <div
-          className="absolute pointer-events-none border-2 border-destructive bg-destructive/10"
-          style={{
-            left: `${dx1 * 100}%`,
-            top: `${dy1 * 100}%`,
-            width: `${(dx2 - dx1) * 100}%`,
-            height: `${(dy2 - dy1) * 100}%`,
-          }}
-        >
-          <div className="absolute -top-5 left-0 px-1 py-0.5 bg-destructive text-white text-[10px] font-mono rounded-sm">
-            ROI · {((dx2 - dx1) * iw).toFixed(0)} × {((dy2 - dy1) * ih).toFixed(0)} px
-          </div>
-        </div>
-      )}
+              {/* ROI 红框 */}
+              {(displayRect[2] > displayRect[0]) && (displayRect[3] > displayRect[1]) && (
+                <div
+                  className="absolute pointer-events-none border-2 border-destructive bg-destructive/10"
+                  style={{
+                    left: `${displayRect[0] * 100}%`,
+                    top: `${displayRect[1] * 100}%`,
+                    width: `${(displayRect[2] - displayRect[0]) * 100}%`,
+                    height: `${(displayRect[3] - displayRect[1]) * 100}%`,
+                  }}
+                >
+                  <div className="absolute -top-5 left-0 px-1 py-0.5 bg-destructive text-white text-[10px] font-mono rounded-sm whitespace-nowrap">
+                    ROI · {((displayRect[2] - displayRect[0]) * iw).toFixed(0)} × {((displayRect[3] - displayRect[1]) * ih).toFixed(0)} px
+                  </div>
+                </div>
+              )}
 
-      {/* OCR 文字框叠加 (绿色) */}
-      {imageSrc && ocrHits && iw > 0 && ih > 0 && ocrHits.map((h, i) => {
-        if (!h.box || h.box.length !== 4) return null
-        const xs = h.box.map(([x]) => x)
-        const ys = h.box.map(([, y]) => y)
-        const minX = Math.min(...xs) / iw
-        const minY = Math.min(...ys) / ih
-        const maxX = Math.max(...xs) / iw
-        const maxY = Math.max(...ys) / ih
-        return (
-          <div
-            key={i}
-            className="absolute pointer-events-none border-[1.5px] border-success bg-success/10"
-            style={{
-              left: `${minX * 100}%`,
-              top: `${minY * 100}%`,
-              width: `${(maxX - minX) * 100}%`,
-              height: `${(maxY - minY) * 100}%`,
-            }}
-            title={`${h.text} (${(h.conf * 100).toFixed(0)}%)`}
-          >
-            <div className="absolute -top-4 left-0 px-1 bg-success/90 text-white text-[9px] font-mono rounded-sm whitespace-nowrap">
-              {h.text}
+              {/* OCR 文字框 (绿色) */}
+              {ocrHits && iw > 0 && ih > 0 && ocrHits.map((h, i) => {
+                if (!h.box || h.box.length !== 4) return null
+                const xs = h.box.map(([x]) => x)
+                const ys = h.box.map(([, y]) => y)
+                const minX = Math.min(...xs) / iw
+                const minY = Math.min(...ys) / ih
+                const maxX = Math.max(...xs) / iw
+                const maxY = Math.max(...ys) / ih
+                return (
+                  <div
+                    key={i}
+                    className="absolute pointer-events-none border-[1.5px] border-success bg-success/10"
+                    style={{
+                      left: `${minX * 100}%`,
+                      top: `${minY * 100}%`,
+                      width: `${(maxX - minX) * 100}%`,
+                      height: `${(maxY - minY) * 100}%`,
+                    }}
+                    title={`${h.text} (${(h.conf * 100).toFixed(0)}%)`}
+                  >
+                    <div className="absolute -top-4 left-0 px-1 bg-success/90 text-white text-[9px] font-mono rounded-sm whitespace-nowrap">
+                      {h.text}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
+
+            {/* 放大按钮 (右上角) */}
+            {!isModal && enableZoom && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setZoomed(true) }}
+                className="absolute top-1.5 right-1.5 px-2 py-1 bg-black/60 hover:bg-black/80 text-white text-[10px] rounded font-mono"
+                title="点击放大查看"
+              >
+                放大 ⤢
+              </button>
+            )}
+          </>
+        ) : (
+          <div className="text-muted-foreground text-sm">点 "抓帧" 加载画面</div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className={className}>
+        {renderCanvas(false)}
+      </div>
+
+      {/* 放大 modal */}
+      {zoomed && imageSrc && (
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4"
+          onClick={() => setZoomed(false)}
+          onKeyDown={(e) => e.key === 'Escape' && setZoomed(false)}
+          tabIndex={-1}
+        >
+          <button
+            onClick={() => setZoomed(false)}
+            className="absolute top-4 right-4 px-3 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded font-mono text-xs"
+          >
+            关闭 (ESC)
+          </button>
+          <div
+            className="max-w-[95vw] max-h-[95vh] w-full h-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {renderCanvas(true)}
           </div>
-        )
-      })}
-    </div>
+        </div>
+      )}
+    </>
   )
 }
