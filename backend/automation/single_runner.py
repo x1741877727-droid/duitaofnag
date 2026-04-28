@@ -1443,28 +1443,104 @@ class SingleInstanceRunner:
             d4.set_input(shot_d4, q=70)
         qr_url = ""
         decode_attempts = 0
+        decode_winner = ""  # 哪种策略最后赢了 (打 PERF)
+        # 试 pyzbar 是否能 import (装了用, 没装走 cv2)
+        try:
+            from pyzbar import pyzbar as _pyzbar
+            _has_pyzbar = True
+        except Exception:
+            _pyzbar = None
+            _has_pyzbar = False
+
+        def _try_decode(crop_bgr: np.ndarray) -> tuple[str, str]:
+            """对一张已裁剪的 crop 跑 5 种策略, 返回 (data, winner_name).
+            winner_name 空字符串 = 全失败."""
+            if crop_bgr is None or crop_bgr.size == 0:
+                return "", ""
+            big = cv2.resize(crop_bgr, (0, 0), fx=_qr_scale, fy=_qr_scale,
+                              interpolation=cv2.INTER_CUBIC)
+            gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+
+            # ① pyzbar 直接读灰度
+            if _has_pyzbar:
+                try:
+                    res = _pyzbar.decode(gray)
+                    if res:
+                        d = res[0].data.decode("utf-8", errors="ignore")
+                        if d:
+                            return d, "pyzbar·gray"
+                except Exception:
+                    pass
+
+            # ② pyzbar + OTSU 自适应阈值 (整图自动定阈)
+            if _has_pyzbar:
+                try:
+                    _, otsu = cv2.threshold(gray, 0, 255,
+                                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    res = _pyzbar.decode(otsu)
+                    if res:
+                        d = res[0].data.decode("utf-8", errors="ignore")
+                        if d:
+                            return d, "pyzbar·otsu"
+                except Exception:
+                    pass
+
+            # ③ pyzbar + 局部自适应阈值 (抗光照不均)
+            if _has_pyzbar:
+                try:
+                    adapt = cv2.adaptiveThreshold(
+                        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv2.THRESH_BINARY, 21, 5)
+                    res = _pyzbar.decode(adapt)
+                    if res:
+                        d = res[0].data.decode("utf-8", errors="ignore")
+                        if d:
+                            return d, "pyzbar·adaptive"
+                except Exception:
+                    pass
+
+            # ④ cv2 内置 QRCodeDetector + OTSU
+            try:
+                _, otsu = cv2.threshold(gray, 0, 255,
+                                         cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                d, _, _ = cv2.QRCodeDetector().detectAndDecode(otsu)
+                if d:
+                    return d, "cv2·otsu"
+            except Exception:
+                pass
+
+            # ⑤ cv2 内置 QRCodeDetector + 硬阈值 128 (老路径, 兜底)
+            try:
+                _, hard = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
+                d, _, _ = cv2.QRCodeDetector().detectAndDecode(hard)
+                if d:
+                    return d, "cv2·hard128"
+            except Exception:
+                pass
+
+            return "", ""
+
+        from .roi_config import get as _roi_get
+        _x1, _y1, _x2, _y2, _qr_scale = _roi_get("qr_decode_crop")
+
         for attempt in range(5):
             decode_attempts = attempt + 1
             shot = await self.adb.screenshot() if attempt > 0 else shot_d4
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
-            from .roi_config import get as _roi_get
-            _x1, _y1, _x2, _y2, _qr_scale = _roi_get("qr_decode_crop")
             h_img, w_img = shot.shape[:2]
             crop = shot[int(h_img * _y1):int(h_img * _y2),
                         int(w_img * _x1):int(w_img * _x2)]
-            big = cv2.resize(crop, (0, 0), fx=_qr_scale, fy=_qr_scale,
-                              interpolation=cv2.INTER_CUBIC)
-            gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
-            detector = cv2.QRCodeDetector()
-            data, _, _ = detector.detectAndDecode(thresh)
+            _qr_t0 = _tm.perf_counter()
+            data, winner = _try_decode(crop)
+            _qr_dur = (_tm.perf_counter() - _qr_t0) * 1000
             if data:
                 qr_url = data
-                logger.info(f"[阶段4] QR码解码成功: {data[:60]}...")
+                decode_winner = winner
+                logger.info(f"[阶段4] QR 解码成功 by {winner} ({_qr_dur:.0f}ms): {data[:60]}...")
                 break
-            logger.debug(f"[阶段4] QR码解码失败, 重试 {attempt+1}/5")
+            logger.info(f"[阶段4] QR 解码失败 attempt {attempt+1}/5 (5 种策略全 miss, {_qr_dur:.0f}ms)")
             await asyncio.sleep(0.5)
 
         # fetch game scheme via HTTP
@@ -1487,7 +1563,9 @@ class SingleInstanceRunner:
                 logger.error(f"[阶段4] 获取 game scheme 失败: {e}")
 
         if d4:
-            note = (f"QR解码尝试 {decode_attempts} 次, qr_url={'有' if qr_url else '无'}, "
+            note = (f"QR解码尝试 {decode_attempts} 次, "
+                    f"赢家策略={decode_winner or '无'}, "
+                    f"qr_url={'有' if qr_url else '无'}, "
                     f"game_scheme={'有' if game_scheme else '无'}")
             tier4 = TierRecord(
                 tier=4, name="QR·decode+fetch", early_exit=bool(game_scheme),
