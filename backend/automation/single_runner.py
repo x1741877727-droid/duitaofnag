@@ -769,46 +769,45 @@ class SingleInstanceRunner:
                 logger.error("[阶段6] 找不到'开始游戏'按钮")
                 return False
 
-        # ── 轮询等面板打开 (优先用 list_center ROI 数文字, 没全屏 OCR 那么慢) ──
-        hits = []                          # 全屏 hits, 留给老路径回退用
-        center_hits_for_wait = []
-        prev_count = 0
+        # ── 等面板打开: 简单粗暴 sleep 1s 然后跑一次 OCR (面板渲染很快, 1s 够了) ──
+        # 老逻辑等"OCR 文字数量稳定" 太保守, 实测每次循环 1.5s 跑 10 次 = 15s, 不必要.
         try:
             from .roi_config import all_names as _all_roi
             has_list_roi = "map_panel_list_center" in set(_all_roi())
         except Exception:
             has_list_roi = False
-        for _ in range(15):
-            await asyncio.sleep(0.3)        # 0.4 → 0.3, 反正 ROI OCR 快
+
+        await asyncio.sleep(1.0)              # 等面板动画
+        shot = await self.adb.screenshot()
+        if shot is None:
+            logger.warning("[阶段6] 截图失败")
+            self._restore_guard()
+            return False
+        if has_list_roi:
+            hits = ocr._ocr_roi_named(shot, "map_panel_list_center")
+        else:
+            hits = ocr._ocr_all(shot)
+
+        # 没识别到足够文字 → 再等 1s 重试 (面板可能加载更慢)
+        if len(hits) < 3:
+            await asyncio.sleep(1.0)
             shot = await self.adb.screenshot()
             if shot is None:
-                continue
-            if has_list_roi:
-                # ROI OCR 数地图列表文字数量 (面板加载完一般 >= 5 个地图)
-                center_hits_for_wait = ocr._ocr_roi_named(shot, "map_panel_list_center")
-                cnt = len(center_hits_for_wait)
-                if cnt >= 5 and abs(cnt - prev_count) < 3:
-                    # 用 list_center hits 当 hits 给后面老路径回退用 (虽然不全, 但 ROI 化路径不依赖)
-                    hits = center_hits_for_wait
-                    break
-                prev_count = cnt
-            else:
-                # 老路径: 全屏 OCR 数文字 (仅 yaml 没 ROI 时)
-                hits = ocr._ocr_all(shot)
-                if len(hits) > 30 and abs(len(hits) - prev_count) < 5:
-                    break
-                prev_count = len(hits)
+                logger.warning("[阶段6] 重试截图失败")
+                self._restore_guard()
+                return False
+            hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                    if has_list_roi else ocr._ocr_all(shot))
 
-        if has_list_roi:
-            if len(center_hits_for_wait) < 3:
-                logger.warning("[阶段6] 地图面板未打开 (中心 ROI < 3 文字)")
-                return False
-            logger.info(f"[阶段6] 面板已打开 (中心 ROI {len(center_hits_for_wait)} 文字)")
-        else:
-            if len(hits) < 20:
-                logger.warning("[阶段6] 地图面板未打开")
-                return False
-            logger.info(f"[阶段6] 面板已打开 ({len(hits)}个文字)")
+        min_hits = 3 if has_list_roi else 20
+        if len(hits) < min_hits:
+            logger.warning(f"[阶段6] 地图面板未打开 ({len(hits)} < {min_hits} 文字)")
+            self._restore_guard()
+            return False
+        logger.info(
+            f"[阶段6] 面板已打开 ({len(hits)} 个文字, "
+            f"{'list_center ROI' if has_list_roi else '全屏'})"
+        )
         self.dbg.log_screenshot(shot, tag="map_panel")
         self.dbg.log_ocr(hits, roi_desc="地图面板")
         h_img, w = shot.shape[:2]
