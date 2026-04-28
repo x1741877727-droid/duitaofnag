@@ -781,6 +781,18 @@ class SingleInstanceRunner:
         has_left_roi = "map_panel_left_tabs" in avail_rois
         has_fill_roi = "map_panel_fill_checkbox" in avail_rois
 
+        def _roi_pixels(name: str, img):
+            """把归一化 ROI 转成像素 bbox [x1,y1,x2,y2]; 失败返回 None"""
+            if img is None:
+                return None
+            try:
+                rx1, ry1, rx2, ry2, _ = _roi_get(name)
+                ph, pw = img.shape[:2]
+                return [max(0, int(pw * rx1)), max(0, int(ph * ry1)),
+                        min(pw, int(pw * rx2)), min(ph, int(ph * ry2))]
+            except Exception:
+                return None
+
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 1: P4-1-open  打开地图面板 (模板找开始游戏 → tap 模式名)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -815,12 +827,17 @@ class SingleInstanceRunner:
             ocr_hits = ocr._ocr_all(shot)
             found = next((h for h in ocr_hits if "开始游戏" in h.text), None)
             if d1:
-                d1.add_tier(TierRecord(
+                _hits = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                  cx=h.cx, cy=h.cy) for h in ocr_hits[:30]]
+                tier_p1 = TierRecord(
                     tier=3, name="OCR·全屏",
                     note=f"模板没命中 → OCR 找'开始游戏' (识别 {len(ocr_hits)} 文字)",
-                    ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
-                                       cx=h.cx, cy=h.cy) for h in ocr_hits[:30]],
-                ))
+                    ocr_hits=_hits,
+                )
+                d1.add_tier(tier_p1)
+                # 全屏 OCR: roi=整张图
+                _h, _w = shot.shape[:2]
+                d1.save_ocr_roi(tier_p1, shot, roi=[0, 0, _w, _h], hits=_hits)
             if found:
                 if d1:
                     d1.set_tap(int(found.cx), int(found.cy + 60), method="OCR",
@@ -874,12 +891,18 @@ class SingleInstanceRunner:
         )
 
         if d2:
-            d2.add_tier(TierRecord(
+            _left_hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                    cx=h.cx, cy=h.cy) for h in left_hits[:15]]
+            tier_p2 = TierRecord(
                 tier=3, name="OCR·left_tabs", early_exit=is_team_battle,
                 note=f"找团竞 tab. 已在团竞={is_team_battle}. 列表 {len(list_hits)} 文字含目标关键词={any(kw in h.text for h in list_hits for kw in map_keywords)}",
-                ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
-                                  cx=h.cx, cy=h.cy) for h in left_hits[:15]],
-            ))
+                ocr_hits=_left_hits_d,
+            )
+            d2.add_tier(tier_p2)
+            d2.save_ocr_roi(tier_p2, shot,
+                            roi=_roi_pixels("map_panel_left_tabs", shot) if has_left_roi
+                                else [0, 0, int(w_img * 0.16), shot.shape[0] if shot is not None else 0],
+                            hits=_left_hits_d)
 
         if not is_team_battle:
             if team_battle_hit:
@@ -958,16 +981,21 @@ class SingleInstanceRunner:
         if d3 and shot is not None:
             d3.set_input(shot, q=70)
 
+        _list_roi_px = (_roi_pixels("map_panel_list_center", shot) if has_list_roi
+                         else [0, 0, w_img, (shot.shape[0] if shot is not None else 0)])
         if map_hit:
             if d3:
-                d3.add_tier(TierRecord(
+                _list_hits_d = [_OcrHit(text=map_hit.text,
+                                         bbox=[map_hit.cx-30, map_hit.cy-15,
+                                               map_hit.cx+30, map_hit.cy+15],
+                                         cx=map_hit.cx, cy=map_hit.cy)]
+                tier_p3 = TierRecord(
                     tier=3, name="OCR·list_center", early_exit=True,
                     note=f"找到 '{map_hit.text}' (匹配 {map_keywords})",
-                    ocr_hits=[_OcrHit(text=map_hit.text,
-                                       bbox=[map_hit.cx-30, map_hit.cy-15,
-                                             map_hit.cx+30, map_hit.cy+15],
-                                       cx=map_hit.cx, cy=map_hit.cy)],
-                ))
+                    ocr_hits=_list_hits_d,
+                )
+                d3.add_tier(tier_p3)
+                d3.save_ocr_roi(tier_p3, shot, roi=_list_roi_px, hits=_list_hits_d)
                 d3.set_tap(int(map_hit.cx), int(map_hit.cy), method="OCR",
                            target_class="地图", target_text=map_hit.text, screenshot=shot)
             await self.adb.tap(map_hit.cx, map_hit.cy)
@@ -976,12 +1004,15 @@ class SingleInstanceRunner:
             if d3: d3.finalize(outcome="map_selected", note=f"选 '{map_hit.text}'")
         else:
             if d3:
-                d3.add_tier(TierRecord(
+                _list_hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                         cx=h.cx, cy=h.cy) for h in list_hits[:30]]
+                tier_p3 = TierRecord(
                     tier=3, name="OCR·list_center",
                     note=f"未找到 '{self.target_map}' (关键词 {map_keywords})",
-                    ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
-                                       cx=h.cx, cy=h.cy) for h in list_hits[:30]],
-                ))
+                    ocr_hits=_list_hits_d,
+                )
+                d3.add_tier(tier_p3)
+                d3.save_ocr_roi(tier_p3, shot, roi=_list_roi_px, hits=_list_hits_d)
                 d3.finalize(outcome="map_not_found", note=f"找不到 '{self.target_map}'")
             _slog(f"[阶段6] 找不到地图 '{self.target_map}'")
 
@@ -1002,10 +1033,12 @@ class SingleInstanceRunner:
                 f"({ratio*100:.1f}%) 阈值=10%"
             )
             if d4:
-                d4.add_tier(TierRecord(
+                tier_p4 = TierRecord(
                     tier=4, name="ROI颜色·fill_checkbox",
                     early_exit=True, note=tier_note, ocr_roi=bbox,
-                ))
+                )
+                d4.add_tier(tier_p4)
+                d4.save_ocr_roi(tier_p4, shot, roi=bbox, hits=[])
             if ratio > 0.10:
                 if d4:
                     d4.set_tap(fill_state["tap_cx"], fill_state["tap_cy"],
@@ -1029,42 +1062,56 @@ class SingleInstanceRunner:
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 5: P4-5-confirm  点确定 (btn_1 模板)
+        # 注意: 重新截图 + 重新找模板. 之前的 confirm_tmpl 是在 map/fill tap 之前抓的,
+        # 面板可能已重排, 直接用旧坐标会点空. 代价 +30~50ms 截屏, 但保证正确.
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        shot_d5 = await self.adb.screenshot()
+        if shot_d5 is None:
+            shot_d5 = shot  # 截屏失败 fallback 用旧 shot
         d5 = _make_d("5-confirm")
-        if d5 and shot is not None:
-            d5.set_input(shot, q=70)
+        if d5 and shot_d5 is not None:
+            d5.set_input(shot_d5, q=70)
+        try:
+            confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "btn_1", threshold=0.7) if shot_d5 is not None else None
+        except Exception:
+            confirm_tmpl_fresh = None
 
-        if confirm_tmpl:
+        if confirm_tmpl_fresh:
             if d5:
                 d5.add_tier(TierRecord(
                     tier=0, name="模板·btn_1", early_exit=True,
-                    note=f"确定按钮模板命中 conf={confirm_tmpl.confidence:.2f}",
+                    note=f"确定按钮模板命中 conf={confirm_tmpl_fresh.confidence:.2f}",
                     templates=[TemplateMatch(
-                        name="btn_1", score=float(confirm_tmpl.confidence),
+                        name="btn_1", score=float(confirm_tmpl_fresh.confidence),
                         hit=True,
-                        bbox=[int(confirm_tmpl.cx - confirm_tmpl.w/2),
-                              int(confirm_tmpl.cy - confirm_tmpl.h/2),
-                              int(confirm_tmpl.cx + confirm_tmpl.w/2),
-                              int(confirm_tmpl.cy + confirm_tmpl.h/2)],
+                        bbox=[int(confirm_tmpl_fresh.cx - confirm_tmpl_fresh.w/2),
+                              int(confirm_tmpl_fresh.cy - confirm_tmpl_fresh.h/2),
+                              int(confirm_tmpl_fresh.cx + confirm_tmpl_fresh.w/2),
+                              int(confirm_tmpl_fresh.cy + confirm_tmpl_fresh.h/2)],
                     )],
                 ))
-                d5.set_tap(int(confirm_tmpl.cx), int(confirm_tmpl.cy),
+                d5.set_tap(int(confirm_tmpl_fresh.cx), int(confirm_tmpl_fresh.cy),
                            method="模板", target_class="确定",
-                           target_conf=float(confirm_tmpl.confidence), screenshot=shot)
-            await self.adb.tap(confirm_tmpl.cx, confirm_tmpl.cy)
-            _slog(f"[阶段6] 确定 btn_1 模板命中 → tap ({confirm_tmpl.cx},{confirm_tmpl.cy}) conf={confirm_tmpl.confidence:.2f}")
-            if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl.confidence:.2f}")
+                           target_conf=float(confirm_tmpl_fresh.confidence), screenshot=shot_d5)
+            await self.adb.tap(confirm_tmpl_fresh.cx, confirm_tmpl_fresh.cy)
+            _slog(f"[阶段6] 确定 btn_1 模板命中(fresh) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
+            if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl_fresh.confidence:.2f}")
         else:
             # OCR 兜底
+            shot = shot_d5  # 用 fresh shot 做后续 OCR
             full = ocr._ocr_all(shot) if shot is not None else []
             confirm_hit = next((h for h in full if "确定" in h.text and h.cx > w_img * 0.78), None)
             if d5:
-                d5.add_tier(TierRecord(
+                _full_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                    cx=h.cx, cy=h.cy) for h in full[:30]]
+                tier_p5o = TierRecord(
                     tier=3, name="OCR·全屏",
                     note=f"模板没命中 → OCR 兜底找'确定' (右侧 cx>{int(w_img*0.78)})",
-                    ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
-                                       cx=h.cx, cy=h.cy) for h in full[:30]],
-                ))
+                    ocr_hits=_full_d,
+                )
+                d5.add_tier(tier_p5o)
+                _h5, _w5 = (shot.shape[:2] if shot is not None else (0, 0))
+                d5.save_ocr_roi(tier_p5o, shot, roi=[0, 0, _w5, _h5], hits=_full_d)
             if confirm_hit:
                 if d5:
                     d5.set_tap(int(confirm_hit.cx), int(confirm_hit.cy),

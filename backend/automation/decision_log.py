@@ -508,8 +508,26 @@ class Decision:
         self.tap = TapRecord(int(x), int(y), method, target_class, target_text,
                               float(target_conf))
         if screenshot is not None:
-            # 1) 独立 tap 图 (兼容旧路径)
+            # 1) 独立 tap 图: 先叠所有 tier 的命中 bbox (模板/OCR), 再画 tap 圈
             annot = screenshot.copy()
+            for t in self.tiers:
+                # 模板命中: 绿色框
+                for tm in (t.templates or []):
+                    if tm.hit and tm.bbox and len(tm.bbox) == 4:
+                        x1, y1, x2, y2 = [int(v) for v in tm.bbox]
+                        cv2.rectangle(annot, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(annot, f"TMPL {tm.name} {tm.score:.2f}",
+                                    (x1, max(20, y1 - 6)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                # OCR 命中: 青色框 + 文字
+                for h in (t.ocr_hits or [])[:30]:
+                    if h.bbox and len(h.bbox) == 4:
+                        hx1, hy1, hx2, hy2 = [int(v) for v in h.bbox]
+                        cv2.rectangle(annot, (hx1, hy1), (hx2, hy2), (255, 200, 0), 1)
+                        if h.text:
+                            cv2.putText(annot, h.text[:14], (hx1, max(15, hy1 - 4)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 1)
+            # 红色 tap 圈在最上面
             cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
             cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
             label = f"TAP {method} ({int(x)},{int(y)})"

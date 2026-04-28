@@ -553,10 +553,16 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
             const ocr = data.tiers.find((t) => t.ocr_roi_image)?.ocr_roi_image
               ? decisionImgSrc(data.id, data.tiers.find((t) => t.ocr_roi_image)!.ocr_roi_image!, session)
               : ''
+            const m = data.tap?.method || ''
+            const annotTitle = m
+              ? `标注 (${m} + 点击点)`
+              : (data.tiers.some((t) => t.yolo_annot_image)
+                  ? '标注 (YOLO)'
+                  : '标注')
             return (
               <>
                 <ScreenshotPanel title="原图" src={original} onClick={() => original && setLightboxSrc(original)} />
-                <ScreenshotPanel title="标注 (YOLO + 点击点)" src={annot} onClick={() => annot && setLightboxSrc(annot)} />
+                <ScreenshotPanel title={annotTitle} src={annot} onClick={() => annot && setLightboxSrc(annot)} />
                 <ScreenshotPanel title="OCR ROI" src={ocr} onClick={() => ocr && setLightboxSrc(ocr)} />
               </>
             )
