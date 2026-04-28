@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair, Brain } from 'lucide-react'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair, Brain, Type } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export function Header() {
@@ -42,6 +42,7 @@ export function Header() {
             { key: 'archive', label: '档案', Icon: Archive, title: '决策档案' },
             { key: 'templates', label: '模版', Icon: Image, title: '模版库' },
             { key: 'yolo', label: 'YOLO', Icon: Crosshair, title: 'YOLO' },
+            { key: 'ocr', label: 'OCR', Icon: Type, title: 'OCR 调试 / ROI 校准' },
             { key: 'memory', label: '记忆', Icon: Brain, title: '记忆库' },
             { key: 'perf', label: '性能', Icon: BarChart3, title: '性能监控' },
             { key: 'settings', label: '设置', Icon: Settings, title: '设置' },

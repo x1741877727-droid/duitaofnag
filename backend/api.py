@@ -286,6 +286,14 @@ def create_app(config: ConfigManager) -> FastAPI:
     except Exception as _e:
         logger.warning(f"[api] api_memory 挂载失败: {_e}")
 
+    # ROI 调试 / 校准
+    try:
+        from .api_roi import router as _roi_router
+        app.include_router(_roi_router)
+        logger.info("[api] /api/roi/* 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_roi 挂载失败: {_e}")
+
     @app.on_event("startup")
     async def startup():
         ws_manager.start_drain()
