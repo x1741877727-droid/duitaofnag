@@ -769,25 +769,46 @@ class SingleInstanceRunner:
                 logger.error("[阶段6] 找不到'开始游戏'按钮")
                 return False
 
-        # ── 轮询等面板打开（等文字数量稳定）──
-        hits = []
+        # ── 轮询等面板打开 (优先用 list_center ROI 数文字, 没全屏 OCR 那么慢) ──
+        hits = []                          # 全屏 hits, 留给老路径回退用
+        center_hits_for_wait = []
         prev_count = 0
+        try:
+            from .roi_config import all_names as _all_roi
+            has_list_roi = "map_panel_list_center" in set(_all_roi())
+        except Exception:
+            has_list_roi = False
         for _ in range(15):
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)        # 0.4 → 0.3, 反正 ROI OCR 快
             shot = await self.adb.screenshot()
             if shot is None:
                 continue
-            hits = ocr._ocr_all(shot)
-            # 文字数量 > 30 且连续两次数量接近 = 面板已完全渲染
-            if len(hits) > 30 and abs(len(hits) - prev_count) < 5:
-                break
-            prev_count = len(hits)
+            if has_list_roi:
+                # ROI OCR 数地图列表文字数量 (面板加载完一般 >= 5 个地图)
+                center_hits_for_wait = ocr._ocr_roi_named(shot, "map_panel_list_center")
+                cnt = len(center_hits_for_wait)
+                if cnt >= 5 and abs(cnt - prev_count) < 3:
+                    # 用 list_center hits 当 hits 给后面老路径回退用 (虽然不全, 但 ROI 化路径不依赖)
+                    hits = center_hits_for_wait
+                    break
+                prev_count = cnt
+            else:
+                # 老路径: 全屏 OCR 数文字 (仅 yaml 没 ROI 时)
+                hits = ocr._ocr_all(shot)
+                if len(hits) > 30 and abs(len(hits) - prev_count) < 5:
+                    break
+                prev_count = len(hits)
 
-        if len(hits) < 20:
-            logger.warning("[阶段6] 地图面板未打开")
-            return False
-
-        logger.info(f"[阶段6] 面板已打开 ({len(hits)}个文字)")
+        if has_list_roi:
+            if len(center_hits_for_wait) < 3:
+                logger.warning("[阶段6] 地图面板未打开 (中心 ROI < 3 文字)")
+                return False
+            logger.info(f"[阶段6] 面板已打开 (中心 ROI {len(center_hits_for_wait)} 文字)")
+        else:
+            if len(hits) < 20:
+                logger.warning("[阶段6] 地图面板未打开")
+                return False
+            logger.info(f"[阶段6] 面板已打开 ({len(hits)}个文字)")
         self.dbg.log_screenshot(shot, tag="map_panel")
         self.dbg.log_ocr(hits, roi_desc="地图面板")
         h_img, w = shot.shape[:2]
