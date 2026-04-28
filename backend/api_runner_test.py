@@ -211,6 +211,29 @@ async def cancel_test():
     return {"ok": True, "msg": "已请求中止, 当前帧跑完即停"}
 
 
+@router.post("/api/runner/test_new_session")
+async def test_new_session():
+    """强制开新 test session — 前端每次"开始一轮测试"前调一次.
+    不调的话, 多次测试都会塞在同一 session (recorder 第一次 init 后 root 就有了,
+    后续 _build_test_runner 看 root 不空就不重建). 用户痛点: 跑两次测试合在一起,
+    决策档案分不开, 总耗时看起来比实际长."""
+    import sys as _sys
+    from datetime import datetime
+    from pathlib import Path
+    from .automation.decision_log import get_recorder
+
+    if getattr(_sys, "frozen", False):
+        proj_root = os.path.dirname(_sys.executable)
+    else:
+        proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    session_dir = Path(proj_root) / "logs" / f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    get_recorder().init(session_dir)   # init 会清 _index 内存索引
+    logger.info(f"[test_phase] 新 session: {session_dir}")
+    return {"ok": True, "session": session_dir.name}
+
+
 async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     """临时构造 SingleInstanceRunner. 跟主 runner 隔离, 不进 svc._runners."""
     from .automation.adb_lite import ADBController

@@ -120,6 +120,8 @@ export function PhaseTester() {
   async function runAllIndependent(targets: number[]) {
     setPhaseTester({ busy: true, progress: '' })
     clearPhaseResults()
+    // 强制开新 session, 避免本次跟上次合并 (用户痛点: 两次测试塞在一个 session)
+    try { await fetch('/api/runner/test_new_session', { method: 'POST' }) } catch {}
 
     const total = targets.length * selKeys.length
     addLog({
@@ -203,6 +205,8 @@ export function PhaseTester() {
   async function runAllSquads(squads: SquadAssignment[]) {
     setSquadDialogOpen(false)
     setPhaseTester({ busy: true, progress: '' })
+    // 强制开新 session, 避免本次跟上次合并
+    try { await fetch('/api/runner/test_new_session', { method: 'POST' }) } catch {}
     clearPhaseResults()
 
     const totalInstances = squads.reduce((n, sq) => n + 1 + sq.members.length, 0)

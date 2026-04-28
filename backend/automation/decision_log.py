@@ -135,6 +135,8 @@ class _Recorder:
             self._root = Path(session_dir) / "decisions"
             self._root.mkdir(parents=True, exist_ok=True)
             self._enabled = True
+            # 切 session 时清内存索引, 避免上次决策出现在新 session 的 list_recent 里
+            self._index = []
             logger.info(f"[decision] 记录目录: {self._root}")
 
     def register_live_listener(self, cb) -> None:
