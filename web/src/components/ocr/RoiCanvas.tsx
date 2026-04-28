@@ -71,86 +71,81 @@ export function RoiCanvas({ imageSrc, imageSize, rect, onRectChange, ocrHits, cl
   const displayRect = drag ? drag.cur : rect
   const [iw, ih] = imageSize
 
-  // 渲染主画布 (内嵌 + 大图 modal 共用)
+  // 渲染主画布. 内嵌模式 (isModal=false): 左键点击放大, 不能拖框.
+  // modal 模式 (isModal=true): 可以拖框画 ROI, ESC 或外部点击关闭.
   function renderCanvas(isModal: boolean) {
     return (
       <div
         className="relative w-full h-full flex items-center justify-center bg-foreground select-none"
-        onMouseDown={isModal ? undefined : onMouseDown}
-        onMouseMove={isModal ? undefined : onMouseMove}
-        onMouseUp={isModal ? undefined : onMouseUp}
-        onMouseLeave={isModal ? undefined : onMouseUp}
-        style={{ cursor: isModal ? 'default' : 'crosshair' }}
+        onMouseDown={isModal ? onMouseDown : undefined}
+        onMouseMove={isModal ? onMouseMove : undefined}
+        onMouseUp={isModal ? onMouseUp : undefined}
+        onMouseLeave={isModal ? onMouseUp : undefined}
+        onClick={(!isModal && enableZoom && imageSrc) ? () => setZoomed(true) : undefined}
+        style={{ cursor: isModal ? 'crosshair' : (enableZoom && imageSrc ? 'zoom-in' : 'default') }}
       >
         {imageSrc ? (
-          <>
-            {/* img 用 inline-block, ROI/OCR 框 absolute 跟着 img */}
-            <div className="relative max-w-full max-h-full" style={{ aspectRatio: `${iw} / ${ih}` }}>
-              <img
-                ref={isModal ? undefined : imgRef}
-                src={imageSrc}
-                alt="frame"
-                draggable={false}
-                className="block w-full h-full object-contain pointer-events-none"
-              />
+          <div className="relative max-w-full max-h-full" style={{ aspectRatio: `${iw} / ${ih}` }}>
+            <img
+              ref={isModal ? imgRef : undefined}
+              src={imageSrc}
+              alt="frame"
+              draggable={false}
+              className="block w-full h-full object-contain pointer-events-none"
+            />
 
-              {/* ROI 红框 */}
-              {(displayRect[2] > displayRect[0]) && (displayRect[3] > displayRect[1]) && (
+            {/* ROI 红框 */}
+            {(displayRect[2] > displayRect[0]) && (displayRect[3] > displayRect[1]) && (
+              <div
+                className="absolute pointer-events-none border-2 border-destructive bg-destructive/10"
+                style={{
+                  left: `${displayRect[0] * 100}%`,
+                  top: `${displayRect[1] * 100}%`,
+                  width: `${(displayRect[2] - displayRect[0]) * 100}%`,
+                  height: `${(displayRect[3] - displayRect[1]) * 100}%`,
+                }}
+              >
+                <div className="absolute -top-5 left-0 px-1 py-0.5 bg-destructive text-white text-[10px] font-mono rounded-sm whitespace-nowrap">
+                  ROI · {((displayRect[2] - displayRect[0]) * iw).toFixed(0)} × {((displayRect[3] - displayRect[1]) * ih).toFixed(0)} px
+                </div>
+              </div>
+            )}
+
+            {/* OCR 文字框 (绿色) */}
+            {ocrHits && iw > 0 && ih > 0 && ocrHits.map((h, i) => {
+              if (!h.box || h.box.length !== 4) return null
+              const xs = h.box.map(([x]) => x)
+              const ys = h.box.map(([, y]) => y)
+              const minX = Math.min(...xs) / iw
+              const minY = Math.min(...ys) / ih
+              const maxX = Math.max(...xs) / iw
+              const maxY = Math.max(...ys) / ih
+              return (
                 <div
-                  className="absolute pointer-events-none border-2 border-destructive bg-destructive/10"
+                  key={i}
+                  className="absolute pointer-events-none border-[1.5px] border-success bg-success/10"
                   style={{
-                    left: `${displayRect[0] * 100}%`,
-                    top: `${displayRect[1] * 100}%`,
-                    width: `${(displayRect[2] - displayRect[0]) * 100}%`,
-                    height: `${(displayRect[3] - displayRect[1]) * 100}%`,
+                    left: `${minX * 100}%`,
+                    top: `${minY * 100}%`,
+                    width: `${(maxX - minX) * 100}%`,
+                    height: `${(maxY - minY) * 100}%`,
                   }}
+                  title={`${h.text} (${(h.conf * 100).toFixed(0)}%)`}
                 >
-                  <div className="absolute -top-5 left-0 px-1 py-0.5 bg-destructive text-white text-[10px] font-mono rounded-sm whitespace-nowrap">
-                    ROI · {((displayRect[2] - displayRect[0]) * iw).toFixed(0)} × {((displayRect[3] - displayRect[1]) * ih).toFixed(0)} px
+                  <div className="absolute -top-4 left-0 px-1 bg-success/90 text-white text-[9px] font-mono rounded-sm whitespace-nowrap">
+                    {h.text}
                   </div>
                 </div>
-              )}
+              )
+            })}
 
-              {/* OCR 文字框 (绿色) */}
-              {ocrHits && iw > 0 && ih > 0 && ocrHits.map((h, i) => {
-                if (!h.box || h.box.length !== 4) return null
-                const xs = h.box.map(([x]) => x)
-                const ys = h.box.map(([, y]) => y)
-                const minX = Math.min(...xs) / iw
-                const minY = Math.min(...ys) / ih
-                const maxX = Math.max(...xs) / iw
-                const maxY = Math.max(...ys) / ih
-                return (
-                  <div
-                    key={i}
-                    className="absolute pointer-events-none border-[1.5px] border-success bg-success/10"
-                    style={{
-                      left: `${minX * 100}%`,
-                      top: `${minY * 100}%`,
-                      width: `${(maxX - minX) * 100}%`,
-                      height: `${(maxY - minY) * 100}%`,
-                    }}
-                    title={`${h.text} (${(h.conf * 100).toFixed(0)}%)`}
-                  >
-                    <div className="absolute -top-4 left-0 px-1 bg-success/90 text-white text-[9px] font-mono rounded-sm whitespace-nowrap">
-                      {h.text}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-
-            {/* 放大按钮 (右上角) */}
+            {/* 内嵌模式下角标提示 "点击放大" */}
             {!isModal && enableZoom && (
-              <button
-                onClick={(e) => { e.stopPropagation(); setZoomed(true) }}
-                className="absolute top-1.5 right-1.5 px-2 py-1 bg-black/60 hover:bg-black/80 text-white text-[10px] rounded font-mono"
-                title="点击放大查看"
-              >
-                放大 ⤢
-              </button>
+              <div className="absolute top-1.5 right-1.5 px-2 py-1 bg-black/60 text-white text-[10px] rounded font-mono pointer-events-none">
+                点击放大编辑
+              </div>
             )}
-          </>
+          </div>
         ) : (
           <div className="text-muted-foreground text-sm">点 "抓帧" 加载画面</div>
         )}
