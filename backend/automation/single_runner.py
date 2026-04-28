@@ -940,7 +940,7 @@ class SingleInstanceRunner:
         else:
             logger.warning(f"[阶段6] 未找到目标地图 '{self.target_map}'")
 
-        # ── 检查补位（像素检测勾选状态）──
+        # ── 检查补位 (像素检测勾选状态) — 详细 log 验证 60px 偏移和 RGB 阈值 ──
         if fill_hit:
             shot = await self.adb.screenshot()
             if shot is not None:
@@ -956,6 +956,26 @@ class SingleInstanceRunner:
                     g_ch = region[:, :, 1]
                     b_ch = region[:, :, 0]
                     orange_count = int(((r_ch > 150) & (g_ch > 80) & (b_ch < 80)).sum())
+                    total = int(region.shape[0] * region.shape[1])
+                    avg_r = int(r_ch.mean())
+                    avg_g = int(g_ch.mean())
+                    avg_b = int(b_ch.mean())
+                    logger.info(
+                        f"[阶段6] 补位颜色检测: 文字=({fill_hit.cx},{fill_hit.cy}) "
+                        f"检测点=({check_x},{check_y}) "
+                        f"区域={region.shape[1]}x{region.shape[0]} "
+                        f"平均RGB=({avg_r},{avg_g},{avg_b}) "
+                        f"橙色={orange_count}/{total} (阈值: R>150 G>80 B<80, 计数>5=已勾)"
+                    )
+                    # 同时保存检测区域到决策档案 (放大 10x 让用户能看清)
+                    try:
+                        import cv2 as _cv2
+                        big = _cv2.resize(region, (region.shape[1] * 10, region.shape[0] * 10),
+                                          interpolation=_cv2.INTER_NEAREST)
+                        self.dbg.log_screenshot(big, tag=f"fill_check_orange{orange_count}")
+                    except Exception:
+                        pass
+
                     if orange_count > 5:
                         logger.info("[阶段6] 补位已开启 → 点击取消")
                         await self.adb.tap(fill_hit.cx, fill_hit.cy)
