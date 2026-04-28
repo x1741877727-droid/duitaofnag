@@ -802,15 +802,19 @@ class SingleInstanceRunner:
         all_text = " ".join(h.text for h in hits)
 
         # ROI 化路径 (用 yaml 命名 ROI 精准切分)
+        # 拆开补位/确定 ROI: 补位右上, 确定右下, 位置差很大不能合一个 ROI.
         roi_used = False
         try:
             from .roi_config import all_names as _roi_all_names
             avail = set(_roi_all_names())
-            if {"map_panel_left_tabs", "map_panel_list_center", "map_panel_right_btns"} <= avail:
+            required = {"map_panel_left_tabs", "map_panel_list_center",
+                        "map_panel_btn_fill", "map_panel_btn_confirm"}
+            if required <= avail:
                 roi_used = True
                 left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs")
                 center_hits = ocr._ocr_roi_named(shot, "map_panel_list_center")
-                right_hits = ocr._ocr_roi_named(shot, "map_panel_right_btns")
+                fill_roi_hits = ocr._ocr_roi_named(shot, "map_panel_btn_fill")
+                confirm_roi_hits = ocr._ocr_roi_named(shot, "map_panel_btn_confirm")
                 # 团竞 tab 在左侧
                 for h in left_hits:
                     if "团队竞技" in h.text:
@@ -823,18 +827,24 @@ class SingleInstanceRunner:
                             if kw in h.text:
                                 map_hit = h
                                 break
-                # 确定 / 补位 在右侧
-                for h in right_hits:
-                    if "确定" in h.text:
-                        confirm_hit = h
+                # 补位在右上 ROI
+                for h in fill_roi_hits:
                     if "补位" in h.text:
                         fill_hit = h
+                        break
+                # 确定在右下 ROI
+                for h in confirm_roi_hits:
+                    if "确定" in h.text:
+                        confirm_hit = h
+                        break
                 logger.info(
-                    f"[阶段6] ROI 化路径: 左={len(left_hits)} 中={len(center_hits)} 右={len(right_hits)} "
+                    f"[阶段6] ROI 化路径: 左={len(left_hits)} 中={len(center_hits)} "
+                    f"补位 ROI={len(fill_roi_hits)} 确定 ROI={len(confirm_roi_hits)} "
                     f"team_battle={'Y' if team_battle_hit else 'N'} "
-                    f"map={'Y' if map_hit else 'N'} confirm={'Y' if confirm_hit else 'N'}"
+                    f"map={'Y' if map_hit else 'N'} "
+                    f"fill={'Y' if fill_hit else 'N'} "
+                    f"confirm={'Y' if confirm_hit else 'N'}"
                 )
-                # all_text 仍用全屏 hits 算 (用于 is_team_battle 模糊匹配)
         except Exception as _e:
             logger.debug(f"[阶段6] ROI 路径失败 ({_e}), 回退全屏 OCR")
             roi_used = False
