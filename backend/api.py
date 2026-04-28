@@ -298,6 +298,22 @@ def create_app(config: ConfigManager) -> FastAPI:
     async def startup():
         ws_manager.start_drain()
         service.set_broadcast(ws_manager.broadcast_sync)
+        # OCR pre-warm: 启动时跑一次 dummy 图, 让 RapidOCR 模型权重 + ONNX runtime
+        # 加载到内存. 避免第一次真实 OCR 调用时 cold start 慢 4-6 倍 (实测 2.7s vs 0.5s).
+        # 在后台线程跑, 不阻塞 startup.
+        import asyncio as _asyncio
+        async def _ocr_prewarm():
+            try:
+                import numpy as _np
+                from .automation.ocr_dismisser import OcrDismisser
+                ocr = OcrDismisser()
+                dummy = _np.zeros((100, 200, 3), dtype=_np.uint8)
+                # _ocr_all 是同步, 走 to_thread 不卡 loop
+                await _asyncio.to_thread(ocr._ocr_all, dummy)
+                logger.info("[api] OCR pre-warm 完成")
+            except Exception as e:
+                logger.warning(f"[api] OCR pre-warm 失败 (不影响功能): {e}")
+        _asyncio.create_task(_ocr_prewarm())
 
     @app.on_event("shutdown")
     async def shutdown():

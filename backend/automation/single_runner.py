@@ -856,9 +856,8 @@ class SingleInstanceRunner:
                 self._restore_guard()
                 return False
 
-        # 等面板动画完成 (打开按钮 → 面板淡入大约 0.8s)
-        # 不再先 OCR 一次"探测面板就绪", 因为 P4-2 / P4-3 自己就要 OCR list_center, 探测是浪费.
-        await asyncio.sleep(0.8)
+        # 等面板动画 (打开按钮 → 面板淡入). 用 0.3s 而不是 0.8s, 即使拍到过渡帧 P4-2 内部 OCR 也会 retry
+        await asyncio.sleep(0.3)
         shot = await self.adb.screenshot()
         if shot is None:
             self._restore_guard()
@@ -1314,7 +1313,7 @@ class SingleInstanceRunner:
         # 子 decision 2: P3a-2-tab  切"组队码" tab (中部弹窗处理在此 tier 里)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         _pt_sleep = _tm.perf_counter()
-        await asyncio.sleep(0.8)  # 等面板动画
+        await asyncio.sleep(0.3)  # 等面板动画 (从 0.8 改 0.3, 拍过渡帧也有 retry 兜底)
         logger.info(f"[P3a-2 PERF] 等面板动画 sleep: {(_tm.perf_counter()-_pt_sleep)*1000:.0f}ms")
         d2 = _make_d("2-tab")
         _pt_shot = _tm.perf_counter()
@@ -1379,7 +1378,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 3: P3a-3-qr  点"二维码组队"
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)  # 等 tab 切换 (从 0.5 改 0.3, retry 兜底)
         d3 = _make_d("3-qr")
         shot_d3 = await self.adb.screenshot()
         if d3 and shot_d3 is not None:
@@ -1437,7 +1436,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 4: P3a-4-decode  截屏 + QR 解码 + fetch scheme
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)  # 等 QR 显示 (从 0.5 改 0.3, decode loop 已有 retry)
         d4 = _make_d("4-decode")
         shot_d4 = await self.adb.screenshot()
         if d4 and shot_d4 is not None:
