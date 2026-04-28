@@ -801,20 +801,36 @@ class SingleInstanceRunner:
         confirm_hit = None
         all_text = " ".join(h.text for h in hits)
 
-        # ROI 化路径 (用 yaml 命名 ROI 精准切分)
-        # 拆开补位/确定 ROI: 补位右上, 确定右下, 位置差很大不能合一个 ROI.
+        # 优先级 1: 补位 / 确定 用模板匹配 (用户原话: "勾选用颜色判断+模版定位置, 确定用模版替代")
+        # 模板匹配比 OCR 准: 视觉特征强的按钮 (固定金色边框/图标), 像素级精准.
+        # 模板没命中再回退 OCR ROI.
+        from types import SimpleNamespace
+        if self.matcher is not None:
+            try:
+                ft = self.matcher.match_one(shot, "btn_fill_p4", threshold=0.7)
+                if ft:
+                    fill_hit = SimpleNamespace(cx=ft.cx, cy=ft.cy, text="补位[模板]")
+                    logger.info(f"[阶段6] 补位模板命中 ({ft.cx},{ft.cy}) conf={ft.confidence:.2f}")
+            except Exception:
+                pass
+            try:
+                ct = self.matcher.match_one(shot, "btn_confirm_map", threshold=0.7)
+                if ct:
+                    confirm_hit = SimpleNamespace(cx=ct.cx, cy=ct.cy, text="确定[模板]")
+                    logger.info(f"[阶段6] 确定模板命中 ({ct.cx},{ct.cy}) conf={ct.confidence:.2f}")
+            except Exception:
+                pass
+
+        # ROI 化路径 (左侧 tab + 中间地图列表用 OCR; 补位/确定模板没命中时也用 OCR 兜底)
         roi_used = False
         try:
             from .roi_config import all_names as _roi_all_names
             avail = set(_roi_all_names())
-            required = {"map_panel_left_tabs", "map_panel_list_center",
-                        "map_panel_btn_fill", "map_panel_btn_confirm"}
+            required = {"map_panel_left_tabs", "map_panel_list_center"}
             if required <= avail:
                 roi_used = True
                 left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs")
                 center_hits = ocr._ocr_roi_named(shot, "map_panel_list_center")
-                fill_roi_hits = ocr._ocr_roi_named(shot, "map_panel_btn_fill")
-                confirm_roi_hits = ocr._ocr_roi_named(shot, "map_panel_btn_confirm")
                 # 团竞 tab 在左侧
                 for h in left_hits:
                     if "团队竞技" in h.text:
@@ -827,19 +843,21 @@ class SingleInstanceRunner:
                             if kw in h.text:
                                 map_hit = h
                                 break
-                # 补位在右上 ROI
-                for h in fill_roi_hits:
-                    if "补位" in h.text:
-                        fill_hit = h
-                        break
-                # 确定在右下 ROI
-                for h in confirm_roi_hits:
-                    if "确定" in h.text:
-                        confirm_hit = h
-                        break
+                # 补位/确定模板没命中 → OCR ROI 兜底
+                if fill_hit is None and "map_panel_btn_fill" in avail:
+                    for h in ocr._ocr_roi_named(shot, "map_panel_btn_fill"):
+                        if "补位" in h.text:
+                            fill_hit = h
+                            logger.info(f"[阶段6] 补位 OCR 兜底命中 ({h.cx},{h.cy})")
+                            break
+                if confirm_hit is None and "map_panel_btn_confirm" in avail:
+                    for h in ocr._ocr_roi_named(shot, "map_panel_btn_confirm"):
+                        if "确定" in h.text:
+                            confirm_hit = h
+                            logger.info(f"[阶段6] 确定 OCR 兜底命中 ({h.cx},{h.cy})")
+                            break
                 logger.info(
                     f"[阶段6] ROI 化路径: 左={len(left_hits)} 中={len(center_hits)} "
-                    f"补位 ROI={len(fill_roi_hits)} 确定 ROI={len(confirm_roi_hits)} "
                     f"team_battle={'Y' if team_battle_hit else 'N'} "
                     f"map={'Y' if map_hit else 'N'} "
                     f"fill={'Y' if fill_hit else 'N'} "
