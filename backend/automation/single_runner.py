@@ -1248,19 +1248,25 @@ class SingleInstanceRunner:
             left_hits = ocr._ocr_roi_named(shot, "team_btn_left")
             last_left_hits = left_hits
             self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
+            # 主匹配: 文字含 "组" 或 "队" 都算 (用户要求放宽, OCR 经常把"组队" → "如WB"
+            # 之类乱识别, 但只要有一个字命中就 tap, 因为 ROI 已限定在左侧栏组队按钮区域).
+            # 排除"队友"避免错点找队友按钮 (两者位置不同).
             for h in left_hits:
-                if OcrDismisser.fuzzy_match(h.text, "组队"):
-                    self.dbg.log_match("组队", h, fuzzy=True)
+                if "队友" in h.text:
+                    continue
+                if ("组" in h.text) or ("队" in h.text):
+                    self.dbg.log_match("组队(单字命中)", h, fuzzy=True)
                     if d1:
                         d1.set_tap(int(h.cx), int(h.cy), method="OCR",
                                    target_class="组队按钮", target_text=h.text,
                                    screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
-                    logger.info(f"[阶段4] 点击组队 ({h.cx},{h.cy})")
+                    logger.info(f"[阶段4] 点击组队 (text='{h.text}', cx={h.cx}, cy={h.cy})")
                     clicked = True
                     break
             if clicked:
                 break
+            # 兜底: "队友"按钮在组队按钮下方约 100px, 反推上去
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "队友"):
                     tap_y = max(h.cy - 100, 50)
