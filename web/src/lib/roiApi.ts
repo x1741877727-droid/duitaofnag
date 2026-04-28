@@ -7,6 +7,7 @@ export interface RoiItem {
   scale: number
   desc: string
   used_in: string
+  preprocessing: string[]                  // 持久化的预处理列表 (从 yaml 读)
 }
 
 export interface RoiListResp {
@@ -21,6 +22,7 @@ export interface RoiSaveReq {
   scale: number
   desc?: string
   used_in?: string
+  preprocessing?: string[]   // 显式空数组 = 清掉; undefined = 不动
 }
 
 export interface OcrHit {

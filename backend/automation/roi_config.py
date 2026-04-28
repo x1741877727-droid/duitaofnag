@@ -108,3 +108,17 @@ def reload() -> Dict[str, dict]:
 def all_names() -> list:
     """列出所有 ROI 名（debug 用）"""
     return list(_load().keys())
+
+
+def get_preprocessing(name: str) -> list:
+    """取 ROI 的图像预处理列表 (用户在 OCR 调试页保存的).
+    返回 [] 表示无预处理. 不抛错 (拿不到就当无)."""
+    try:
+        cfg = _load()
+        item = cfg.get(name)
+        if not item:
+            return []
+        prep = item.get("preprocessing", []) or []
+        return [str(p) for p in prep if str(p)]
+    except Exception:
+        return []

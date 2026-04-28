@@ -81,7 +81,11 @@ export function OcrTuner() {
     setEditRect(it.rect)
     setEditScale(it.scale)
     setEditDesc(it.desc)
-    setEditPreproc([])         // 预处理目前不存 yaml, 切 ROI 重置
+    // 从 yaml 读已保存的预处理 (会被 RoiItem.preprocessing 带回来)
+    const savedPrep = (it.preprocessing || []).filter(
+      (p): p is Preprocessing => ['grayscale', 'clahe', 'binarize', 'sharpen', 'invert'].includes(p)
+    )
+    setEditPreproc(savedPrep)
     setOcrHits([])             // 切 ROI 清掉旧的 OCR 结果
     setCroppedImg('')
     setHint('')
@@ -156,6 +160,7 @@ export function OcrTuner() {
         rect: editRect,
         scale: editScale,
         desc: editDesc,
+        preprocessing: editPreproc,   // 空数组也写, 用户显式清空
       })
       setHint(`已保存, 备份 ${r.backup}`)
       await loadList()  // 刷新列表

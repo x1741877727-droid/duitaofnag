@@ -55,12 +55,14 @@ async def roi_list():
     items = []
     for name, item in cfg.items():
         rect = item.get("rect", [0, 0, 0, 0])
+        prep = item.get("preprocessing", []) or []
         items.append({
             "name": name,
             "rect": [float(x) for x in rect[:4]] if len(rect) >= 4 else [0, 0, 0, 0],
             "scale": int(item.get("scale", 1)),
             "desc": str(item.get("desc", "")),
             "used_in": str(item.get("used_in", "")),
+            "preprocessing": [str(p) for p in prep],
         })
     return {"items": items, "count": len(items), "yaml_path": str(_roi_yaml_path())}
 
@@ -73,6 +75,7 @@ class SaveRoiReq(BaseModel):
     scale: int = 1
     desc: Optional[str] = None
     used_in: Optional[str] = None
+    preprocessing: Optional[list[str]] = None   # 持久化预处理选择, 生产 OCR 读取应用
 
 
 @router.post("/api/roi/save")
@@ -122,6 +125,9 @@ async def roi_save(req: SaveRoiReq):
         data[req.name]["desc"] = req.desc
     if req.used_in is not None:
         data[req.name]["used_in"] = req.used_in
+    # preprocessing: 空 list 也写, 表示用户显式清空了 (区分 None 不动)
+    if req.preprocessing is not None:
+        data[req.name]["preprocessing"] = list(req.preprocessing)
 
     with yaml_p.open("w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=None)
@@ -148,36 +154,8 @@ class TestOcrReq(BaseModel):
     preprocessing: Optional[list[str]] = None
 
 
-# 预处理实现 — 用户在 OCR 调试页测好后集成进生产代码
-def _apply_preprocessing(img: np.ndarray, methods: Optional[list[str]]) -> np.ndarray:
-    """按 methods 顺序应用图像预处理. RapidOCR 输入需要 3 通道, 所以
-    单通道操作 (灰度/二值) 完成后转回 BGR 保持兼容."""
-    if not methods:
-        return img
-    out = img.copy()
-    for m in methods:
-        if m == "grayscale":
-            if len(out.shape) == 3:
-                gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
-                out = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        elif m == "clahe":
-            # 仅在 LAB 的 L 通道做 CLAHE, 保留色彩
-            if len(out.shape) == 3:
-                lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
-                l, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                l_eq = clahe.apply(l)
-                out = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
-        elif m == "binarize":
-            gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY) if len(out.shape) == 3 else out
-            _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            out = cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
-        elif m == "sharpen":
-            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-            out = cv2.filter2D(out, -1, kernel)
-        elif m == "invert":
-            out = cv2.bitwise_not(out)
-    return out
+# 预处理: 复用 automation.image_preproc, 跟生产 _ocr_roi_named 同一份实现
+from .automation.image_preproc import apply_preprocessing as _apply_preprocessing
 
 
 @router.post("/api/roi/test_ocr")

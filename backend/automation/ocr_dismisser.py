@@ -280,14 +280,51 @@ class OcrDismisser:
         return await loop.run_in_executor(None, self._ocr_all, screenshot)
 
     def _ocr_roi_named(self, screenshot: np.ndarray, name: str) -> list:
-        """按 config/roi.yaml 的命名 ROI 裁剪 + OCR。
-        用法：
+        """按 config/roi.yaml 的命名 ROI 裁剪 + (可选预处理) + OCR.
+        用法:
             ocr._ocr_roi_named(shot, "team_btn_left")
-        新增 ROI 改 yaml 即可，不必碰 .py。
+        预处理在 yaml.preprocessing 里 (用户在 OCR 调试页保存的). 没配就走原路径.
         """
-        from .roi_config import get as _get
+        from .roi_config import get as _get, get_preprocessing
         x1, y1, x2, y2, scale = _get(name)
-        return self._ocr_roi(screenshot, x1, y1, x2, y2, scale=scale)
+        prep = get_preprocessing(name)
+        if not prep:
+            # 无预处理 — 走原路径 (含 cache)
+            return self._ocr_roi(screenshot, x1, y1, x2, y2, scale=scale)
+        # 有预处理 — 走非 cache 路径 (cache key 不含 preprocessing, 直接重新跑)
+        return self._ocr_roi_with_preproc(screenshot, x1, y1, x2, y2, scale, prep)
+
+    def _ocr_roi_with_preproc(self, screenshot: np.ndarray, x1: float, y1: float,
+                              x2: float, y2: float, scale: int, methods: list) -> list:
+        """带预处理的 ROI OCR (不走 cache, 因为 cache key 不含预处理).
+        实现跟 _ocr_roi 一致, 多了 preprocessing 那一步."""
+        from .image_preproc import apply_preprocessing
+        with metrics.timed("ocr_roi_preproc",
+                           roi=f"{x1:.2f},{y1:.2f},{x2:.2f},{y2:.2f}",
+                           scale=scale, n_prep=len(methods)) as tags:
+            h, w = screenshot.shape[:2]
+            px1, py1 = int(w * x1), int(h * y1)
+            px2, py2 = int(w * x2), int(h * y2)
+            crop = screenshot[py1:py2, px1:px2]
+            if crop.size == 0:
+                tags["n_texts"] = 0
+                return []
+            if scale > 1:
+                crop = cv2.resize(crop, (0, 0), fx=scale, fy=scale,
+                                  interpolation=cv2.INTER_CUBIC)
+            crop = apply_preprocessing(crop, methods)
+            ocr = self._get_ocr()
+            result = ocr(crop)
+            hits = []
+            if result and result.boxes is not None:
+                for box, text, _conf in zip(result.boxes, result.txts, result.scores):
+                    xs = [p[0] for p in box]
+                    ys = [p[1] for p in box]
+                    cx = int(sum(xs) / 4 / scale) + px1
+                    cy = int(sum(ys) / 4 / scale) + py1
+                    hits.append(self.TextHit(text=text, cx=cx, cy=cy))
+            tags["n_texts"] = len(hits)
+            return hits
 
     @_ocr_cached
     def _ocr_roi(self, screenshot: np.ndarray, x1: float, y1: float,
