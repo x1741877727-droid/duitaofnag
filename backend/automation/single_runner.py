@@ -732,25 +732,38 @@ class SingleInstanceRunner:
 
     @_timed_phase("map_setup")
     async def phase_map_setup(self) -> bool:
-        """队长设置地图和模式（OCR驱动，单次扫描提取所有目标）"""
+        """队长设置地图和模式. 拆 5 条独立子 decision (每条有图+tier+tap), 像 P2 清弹窗一样档案能逐条点开看."""
         import time as _t
-        self._stage_log = []                # 清空, 收集本次 P4 的中间步骤
+        from .decision_log import get_recorder, TierRecord
+
+        self._stage_log = []
         _t0 = _t.perf_counter()
+        recorder = get_recorder()
+        inst_idx = getattr(self._v3_ctx, "instance_idx", 0) if self._v3_ctx else 0
+
         def _slog(msg: str):
-            """同时写 logger + 收集到 _stage_log (后续塞 decision.note)"""
             logger.info(msg)
             self._stage_log.append(msg)
+
+        def _make_d(sub_name: str):
+            """创建子 decision (phase 名带 'P4-XXX' 后缀, 档案前端能区分)"""
+            try:
+                return recorder.new_decision(
+                    instance=inst_idx, phase=f"P4-{sub_name}", round_idx=1)
+            except Exception as e:
+                logger.debug(f"new_decision err: {e}")
+                return None
 
         self.phase = Phase.MAP_SETUP
         _slog(f"[阶段6] 地图设置: {self.target_mode} - {self.target_map}")
 
-        # 禁用守卫（地图面板的关闭按钮会被守卫误判为弹窗）
+        # 禁用守卫
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = False
 
         ocr = OcrDismisser()
 
-        # 构建地图模糊关键词（OCR 常把"狙击"识别为"姐击"/"阻击"等）
+        # 地图关键词 (模糊匹配, OCR 常把"狙击"识别为"姐击"/"阻击")
         map_keywords = [self.target_map]
         if "狙击" in self.target_map:
             map_keywords.extend(["击团竞大桥", "击团竞"])
@@ -759,224 +772,300 @@ class SingleInstanceRunner:
         elif "军备" in self.target_map:
             map_keywords.extend(["军备团竞图书", "军备团竞"])
 
-        # ── 步骤1: 打开地图面板（模板优先，不用OCR）──
+        try:
+            from .roi_config import all_names as _all_roi, get as _roi_get
+            avail_rois = set(_all_roi())
+        except Exception:
+            avail_rois = set()
+        has_list_roi = "map_panel_list_center" in avail_rois
+        has_left_roi = "map_panel_left_tabs" in avail_rois
+        has_fill_roi = "map_panel_fill_checkbox" in avail_rois
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 1: P4-1-open  打开地图面板 (模板找开始游戏 → tap 模式名)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         shot = await self.adb.screenshot()
         if shot is None:
+            self._restore_guard()
             return False
+        d1 = _make_d("1-open")
+        if d1:
+            d1.set_input(shot, q=70)
 
         hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
         if hit:
+            if d1:
+                d1.add_tier(TierRecord(
+                    tier=0, name="模板·lobby_start_btn", early_exit=True,
+                    note=f"模板命中 conf={hit.confidence:.2f}, cx={hit.cx} cy={hit.cy}",
+                    templates=[{"name": "lobby_start_btn",
+                                "score": float(hit.confidence),
+                                "cx": int(hit.cx), "cy": int(hit.cy)}],
+                ))
+                d1.set_tap(int(hit.cx), int(hit.cy + 60), method="模板",
+                           target_class="开始游戏(下方模式名)",
+                           target_conf=float(hit.confidence), screenshot=shot)
             await self.adb.tap(hit.cx, hit.cy + 60)
-            _slog(f"[阶段6] 模板定位'开始游戏', tap 模式名 ({hit.cx},{hit.cy + 60}) conf={hit.confidence:.2f}")
+            _slog(f"[阶段6] 模板定位'开始游戏' conf={hit.confidence:.2f} → tap ({hit.cx},{hit.cy+60})")
+            if d1: d1.finalize(outcome="opened_panel", note="模板命中 → 已 tap")
         else:
-            # OCR 兜底找"开始游戏"
-            hits = ocr._ocr_all(shot)
-            for h in hits:
-                if "开始游戏" in h.text:
-                    await self.adb.tap(h.cx, h.cy + 60)
-                    _slog(f"[阶段6] OCR 兜底定位'开始游戏', tap ({h.cx},{h.cy + 60})")
-                    break
+            # OCR 兜底
+            ocr_hits = ocr._ocr_all(shot)
+            found = next((h for h in ocr_hits if "开始游戏" in h.text), None)
+            if d1:
+                d1.add_tier(TierRecord(
+                    tier=3, name="OCR·全屏",
+                    note=f"模板没命中 → OCR 找'开始游戏' (识别 {len(ocr_hits)} 文字)",
+                    ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in ocr_hits[:30]],
+                ))
+            if found:
+                if d1:
+                    d1.set_tap(int(found.cx), int(found.cy + 60), method="OCR",
+                               target_class="开始游戏", target_text=found.text, screenshot=shot)
+                await self.adb.tap(found.cx, found.cy + 60)
+                _slog(f"[阶段6] OCR 兜底找到'开始游戏' → tap ({found.cx},{found.cy+60})")
+                if d1: d1.finalize(outcome="opened_panel", note="OCR 兜底命中")
             else:
                 _slog("[阶段6] 找不到'开始游戏'按钮")
-                return False
-
-        # ── 等面板打开: 简单粗暴 sleep 1s 然后跑一次 OCR (面板渲染很快, 1s 够了) ──
-        # 老逻辑等"OCR 文字数量稳定" 太保守, 实测每次循环 1.5s 跑 10 次 = 15s, 不必要.
-        try:
-            from .roi_config import all_names as _all_roi
-            has_list_roi = "map_panel_list_center" in set(_all_roi())
-        except Exception:
-            has_list_roi = False
-
-        await asyncio.sleep(1.0)              # 等面板动画
-        shot = await self.adb.screenshot()
-        if shot is None:
-            logger.warning("[阶段6] 截图失败")
-            self._restore_guard()
-            return False
-        if has_list_roi:
-            hits = ocr._ocr_roi_named(shot, "map_panel_list_center")
-        else:
-            hits = ocr._ocr_all(shot)
-
-        # 没识别到足够文字 → 再等 1s 重试 (面板可能加载更慢)
-        if len(hits) < 3:
-            await asyncio.sleep(1.0)
-            shot = await self.adb.screenshot()
-            if shot is None:
-                logger.warning("[阶段6] 重试截图失败")
+                if d1: d1.finalize(outcome="failed", note="模板+OCR 都没找到开始游戏")
                 self._restore_guard()
                 return False
-            hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                    if has_list_roi else ocr._ocr_all(shot))
 
-        min_hits = 3 if has_list_roi else 20
-        if len(hits) < min_hits:
-            _slog(f"[阶段6] 地图面板未打开 ({len(hits)} < {min_hits} 文字)")
+        # 等面板渲染 (这步无 tap, 不单独建 decision, 数据塞进步骤 2 的 tier)
+        await asyncio.sleep(1.0)
+        shot = await self.adb.screenshot()
+        if shot is None:
             self._restore_guard()
             return False
-        _slog(
-            f"[阶段6] 面板已打开 ({len(hits)} 个文字, "
-            f"{'list_center ROI' if has_list_roi else '全屏'})"
-        )
-        self.dbg.log_screenshot(shot, tag="map_panel")
-        self.dbg.log_ocr(hits, roi_desc="地图面板")
-        h_img, w = shot.shape[:2]
+        list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                     if has_list_roi else ocr._ocr_all(shot))
+        if len(list_hits) < 3:
+            await asyncio.sleep(1.0)
+            shot = await self.adb.screenshot()
+            list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                         if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
+        h_img, w_img = (shot.shape[:2] if shot is not None else (0, 0))
+        _slog(f"[阶段6] 面板已打开 ({len(list_hits)} 文字, {'list_center' if has_list_roi else '全屏'})")
 
-        # ── 检测团竞 mode + 切换 (顺序, 必须先确定 mode 才进下一步) ──
-        # 用 left_tabs ROI 找 "团队竞技" tab; 已在团竞看 list_center 里有没有团竞关键词.
-        team_battle_hit = None
-        try:
-            from .roi_config import all_names as _roi_all_names
-            avail_rois = set(_roi_all_names())
-        except Exception:
-            avail_rois = set()
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 2: P4-2-mode  切团竞模式 (OCR left_tabs 找团竞 tab)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d2 = _make_d("2-mode")
+        if d2 and shot is not None:
+            d2.set_input(shot, q=70)
 
-        if "map_panel_left_tabs" in avail_rois:
-            left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs")
-            for h in left_hits:
-                if "团队竞技" in h.text:
-                    team_battle_hit = h
-                    break
+        # OCR 找 团竞 tab
+        if has_left_roi:
+            left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs") if shot is not None else []
         else:
-            # ROI 没配, 回退全屏
-            full = ocr._ocr_all(shot)
-            for h in full:
-                if "团队竞技" in h.text and h.cx < w * 0.16:
-                    team_battle_hit = h
-                    break
+            full = ocr._ocr_all(shot) if shot is not None else []
+            left_hits = [h for h in full if h.cx < w_img * 0.16]
+        team_battle_hit = next((h for h in left_hits if "团队竞技" in h.text), None)
 
         team_battle_keywords = ["团竞手册", "团竞详情", "军备团竞", "经典团竞",
                                 "击团竞", "迷你战争", "轮换团竞", "突变团竞"]
-        all_text = " ".join(h.text for h in hits)
+        all_text = " ".join(h.text for h in list_hits)
         is_team_battle = (
             any(OcrDismisser.fuzzy_match(all_text, kw) for kw in team_battle_keywords)
-            or any(kw in h.text for h in hits for kw in map_keywords)
+            or any(kw in h.text for h in list_hits for kw in map_keywords)
         )
 
-        # ── 判断是否需要切换模式 ──
-        # ── 切团竞模式 (顺序, 必须先确定 mode 才能进下一步) ──
+        if d2:
+            d2.add_tier(TierRecord(
+                tier=3, name="OCR·left_tabs", early_exit=is_team_battle,
+                note=f"找团竞 tab. 已在团竞={is_team_battle}. 列表 {len(list_hits)} 文字含目标关键词={any(kw in h.text for h in list_hits for kw in map_keywords)}",
+                ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in left_hits[:15]],
+            ))
+
         if not is_team_battle:
             if team_battle_hit:
-                _slog(f"[阶段6] 切换到团队竞技 tap ({team_battle_hit.cx},{team_battle_hit.cy})")
+                if d2:
+                    d2.set_tap(int(team_battle_hit.cx), int(team_battle_hit.cy),
+                               method="OCR", target_class="团队竞技tab",
+                               target_text=team_battle_hit.text, screenshot=shot)
                 await self.adb.tap(team_battle_hit.cx, team_battle_hit.cy)
                 await asyncio.sleep(0.5)
-                shot = await self.adb.screenshot()
-                if shot is not None:
-                    if "map_panel_list_center" in avail_rois:
-                        hits = ocr._ocr_roi_named(shot, "map_panel_list_center")
-                    else:
-                        hits = ocr._ocr_all(shot)
+                _slog(f"[阶段6] 切团竞 tap ({team_battle_hit.cx},{team_battle_hit.cy})")
+                if d2: d2.finalize(outcome="mode_switched", note="切到团竞")
+                # 重新拿 list_hits + shot
+                shot_after = await self.adb.screenshot()
+                if shot_after is not None:
+                    shot = shot_after
+                    list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                                 if has_list_roi else ocr._ocr_all(shot))
             else:
-                _slog("[阶段6] 未找到团队竞技入口")
+                _slog("[阶段6] 不在团竞 + 找不到团竞 tab → 失败")
+                if d2: d2.finalize(outcome="failed", note="找不到团竞 tab")
                 self._restore_guard()
                 return False
         else:
-            _slog(f"[阶段6] 已在团队竞技 (识别到 {len(hits)} 个文字, 含目标地图关键词), 跳过切换")
+            _slog("[阶段6] 已在团竞, 跳过切换")
+            if d2: d2.finalize(outcome="skipped", note=f"已在团竞 ({len(list_hits)} 文字含关键词)")
 
-        # ── 并发: 选地图 (在已有 hits 里找) + 补位 ROI 颜色检测 + 确定按钮 btn_1 模板 ──
-        # 三个目标互相独立, asyncio.gather 并发. matcher.match_one 跑在 to_thread 不阻塞 loop.
-        from .roi_config import get as _roi_get
-
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 并发: 选地图 (CPU) + 补位 ROI 颜色 (像素) + 确定模板 (CPU)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         def _find_map_in_hits():
-            for h in hits:
+            for h in list_hits:
                 for kw in map_keywords:
                     if kw in h.text:
                         return h
             return None
 
         async def _check_fill_checkbox():
-            """补位 ROI 颜色检测. 返回 (orange_ratio, tap_cx, tap_cy) 或 None."""
-            if "map_panel_fill_checkbox" not in avail_rois:
-                return None
-            shot_now = await self.adb.screenshot()
-            if shot_now is None:
+            if not has_fill_roi or shot is None:
                 return None
             rx1, ry1, rx2, ry2, _ = _roi_get("map_panel_fill_checkbox")
-            h_img, w_img = shot_now.shape[:2]
-            px1 = max(0, int(w_img * rx1))
-            py1 = max(0, int(h_img * ry1))
-            px2 = min(w_img, int(w_img * rx2))
-            py2 = min(h_img, int(h_img * ry2))
-            region = shot_now[py1:py2, px1:px2]
+            ph, pw = shot.shape[:2]
+            px1 = max(0, int(pw * rx1)); py1 = max(0, int(ph * ry1))
+            px2 = min(pw, int(pw * rx2)); py2 = min(ph, int(ph * ry2))
+            region = shot[py1:py2, px1:px2]
             if region.size == 0:
                 return None
-            r_ch = region[:, :, 2]
-            g_ch = region[:, :, 1]
-            b_ch = region[:, :, 0]
+            r_ch, g_ch, b_ch = region[:,:,2], region[:,:,1], region[:,:,0]
             orange = int(((r_ch > 150) & (g_ch > 80) & (b_ch < 80)).sum())
             total = int(region.shape[0] * region.shape[1])
             ratio = orange / total if total > 0 else 0.0
-            tap_cx = (px1 + px2) // 2
-            tap_cy = (py1 + py2) // 2
-            avg_rgb = (int(r_ch.mean()), int(g_ch.mean()), int(b_ch.mean()))
-            _slog(
-                f"[阶段6] 补位 ROI 颜色检测: ROI=({px1},{py1})-({px2},{py2}) "
-                f"平均RGB={avg_rgb} 橙色={orange}/{total} ({ratio*100:.1f}%) 阈值=10%"
-            )
-            try:
-                import cv2 as _cv2
-                big = _cv2.resize(region, (region.shape[1] * 5, region.shape[0] * 5),
-                                  interpolation=_cv2.INTER_NEAREST)
-                self.dbg.log_screenshot(big, tag=f"fill_roi_orange{orange}_ratio{int(ratio*100)}")
-            except Exception:
-                pass
-            return (ratio, tap_cx, tap_cy)
+            return {
+                "ratio": ratio, "orange": orange, "total": total,
+                "rgb": (int(r_ch.mean()), int(g_ch.mean()), int(b_ch.mean())),
+                "bbox": [px1, py1, px2, py2],
+                "tap_cx": (px1 + px2) // 2, "tap_cy": (py1 + py2) // 2,
+            }
 
         def _find_confirm_template():
-            if self.matcher is None:
+            if self.matcher is None or shot is None:
                 return None
             try:
                 return self.matcher.match_one(shot, "btn_1", threshold=0.7)
             except Exception:
                 return None
 
-        # 并发跑 3 个: 选地图 (CPU) + 补位 (含截图+像素) + 确定模板 (CPU)
         map_hit, fill_state, confirm_tmpl = await asyncio.gather(
             asyncio.to_thread(_find_map_in_hits),
             _check_fill_checkbox(),
             asyncio.to_thread(_find_confirm_template),
         )
 
-        # ── tap 顺序: 选地图 → 取消补位 (如已勾) → 点确定 ──
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 3: P4-3-map  选地图
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d3 = _make_d("3-map")
+        if d3 and shot is not None:
+            d3.set_input(shot, q=70)
+
         if map_hit:
-            _slog(f"[阶段6] 选地图 '{map_hit.text}' tap ({map_hit.cx},{map_hit.cy})")
+            if d3:
+                d3.add_tier(TierRecord(
+                    tier=3, name="OCR·list_center", early_exit=True,
+                    note=f"找到 '{map_hit.text}' (匹配 {map_keywords})",
+                    ocr_hits=[{"text": map_hit.text, "cx": map_hit.cx, "cy": map_hit.cy}],
+                ))
+                d3.set_tap(int(map_hit.cx), int(map_hit.cy), method="OCR",
+                           target_class="地图", target_text=map_hit.text, screenshot=shot)
             await self.adb.tap(map_hit.cx, map_hit.cy)
             await asyncio.sleep(0.3)
+            _slog(f"[阶段6] 选地图 '{map_hit.text}' tap ({map_hit.cx},{map_hit.cy})")
+            if d3: d3.finalize(outcome="map_selected", note=f"选 '{map_hit.text}'")
         else:
-            _slog(f"[阶段6] 未找到目标地图 '{self.target_map}' (list_center 内 OCR 未匹配关键词 {map_keywords})")
+            if d3:
+                d3.add_tier(TierRecord(
+                    tier=3, name="OCR·list_center",
+                    note=f"未找到 '{self.target_map}' (关键词 {map_keywords})",
+                    ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in list_hits[:30]],
+                ))
+                d3.finalize(outcome="map_not_found", note=f"找不到 '{self.target_map}'")
+            _slog(f"[阶段6] 找不到地图 '{self.target_map}'")
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 4: P4-4-fill  补位检测 (ROI 颜色)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d4 = _make_d("4-fill")
+        if d4 and shot is not None:
+            d4.set_input(shot, q=70)
 
         if fill_state is not None:
-            ratio, tap_cx, tap_cy = fill_state
+            ratio = fill_state["ratio"]
+            rgb = fill_state["rgb"]
+            bbox = fill_state["bbox"]
+            tier_note = (
+                f"ROI={tuple(bbox)} 平均RGB={rgb} "
+                f"橙色={fill_state['orange']}/{fill_state['total']} "
+                f"({ratio*100:.1f}%) 阈值=10%"
+            )
+            if d4:
+                d4.add_tier(TierRecord(
+                    tier=4, name="ROI颜色·fill_checkbox",
+                    early_exit=True, note=tier_note, ocr_roi=bbox,
+                ))
             if ratio > 0.10:
-                _slog(f"[阶段6] 补位已勾选 → tap ({tap_cx},{tap_cy}) 取消")
-                await self.adb.tap(tap_cx, tap_cy)
+                if d4:
+                    d4.set_tap(fill_state["tap_cx"], fill_state["tap_cy"],
+                               method="ROI颜色", target_class="补位勾选框", screenshot=shot)
+                await self.adb.tap(fill_state["tap_cx"], fill_state["tap_cy"])
                 await asyncio.sleep(0.3)
+                _slog(f"[阶段6] 补位已勾 ({ratio*100:.1f}%) → tap 取消")
+                if d4: d4.finalize(outcome="fill_unchecked",
+                                    note=f"补位已勾 → tap 取消 (橙色 {ratio*100:.1f}%)")
             else:
-                _slog(f"[阶段6] 补位未勾选 → 跳过 (橙色 {ratio*100:.1f}% < 10%)")
+                _slog(f"[阶段6] 补位未勾 ({ratio*100:.1f}% < 10%)")
+                if d4: d4.finalize(outcome="skipped",
+                                    note=f"补位未勾 (橙色 {ratio*100:.1f}% < 10%)")
         else:
-            _slog("[阶段6] map_panel_fill_checkbox ROI 未配置, 跳过补位检测")
+            if d4:
+                d4.add_tier(TierRecord(
+                    tier=4, name="ROI颜色·fill_checkbox",
+                    note="map_panel_fill_checkbox ROI 未配置",
+                ))
+                d4.finalize(outcome="skipped", note="ROI 未配置, 跳过")
 
-        # 确定按钮 (用 btn_1 模板)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 子 decision 5: P4-5-confirm  点确定 (btn_1 模板)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        d5 = _make_d("5-confirm")
+        if d5 and shot is not None:
+            d5.set_input(shot, q=70)
+
         if confirm_tmpl:
-            _slog(f"[阶段6] 确定 btn_1 模板命中 ({confirm_tmpl.cx},{confirm_tmpl.cy}) conf={confirm_tmpl.confidence:.2f} → tap")
+            if d5:
+                d5.add_tier(TierRecord(
+                    tier=0, name="模板·btn_1", early_exit=True,
+                    note=f"确定按钮模板命中 conf={confirm_tmpl.confidence:.2f}",
+                    templates=[{"name": "btn_1",
+                                "score": float(confirm_tmpl.confidence),
+                                "cx": int(confirm_tmpl.cx), "cy": int(confirm_tmpl.cy)}],
+                ))
+                d5.set_tap(int(confirm_tmpl.cx), int(confirm_tmpl.cy),
+                           method="模板", target_class="确定",
+                           target_conf=float(confirm_tmpl.confidence), screenshot=shot)
             await self.adb.tap(confirm_tmpl.cx, confirm_tmpl.cy)
+            _slog(f"[阶段6] 确定 btn_1 模板命中 → tap ({confirm_tmpl.cx},{confirm_tmpl.cy}) conf={confirm_tmpl.confidence:.2f}")
+            if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl.confidence:.2f}")
         else:
-            # 模板没命中, OCR 兜底找"确定"
-            _slog("[阶段6] btn_1 模板没命中, OCR 兜底找确定")
-            full = ocr._ocr_all(shot)
-            for h in full:
-                if "确定" in h.text and h.cx > w * 0.78:
-                    _slog(f"[阶段6] OCR 兜底命中确定 tap ({h.cx},{h.cy})")
-                    await self.adb.tap(h.cx, h.cy)
-                    break
+            # OCR 兜底
+            full = ocr._ocr_all(shot) if shot is not None else []
+            confirm_hit = next((h for h in full if "确定" in h.text and h.cx > w_img * 0.78), None)
+            if d5:
+                d5.add_tier(TierRecord(
+                    tier=3, name="OCR·全屏",
+                    note=f"模板没命中 → OCR 兜底找'确定' (右侧 cx>{int(w_img*0.78)})",
+                    ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in full[:30]],
+                ))
+            if confirm_hit:
+                if d5:
+                    d5.set_tap(int(confirm_hit.cx), int(confirm_hit.cy),
+                               method="OCR", target_class="确定",
+                               target_text=confirm_hit.text, screenshot=shot)
+                await self.adb.tap(confirm_hit.cx, confirm_hit.cy)
+                _slog(f"[阶段6] OCR 兜底命中确定 → tap ({confirm_hit.cx},{confirm_hit.cy})")
+                if d5: d5.finalize(outcome="confirmed", note="OCR 兜底命中")
             else:
                 _slog("[阶段6] 找不到确定按钮")
+                if d5: d5.finalize(outcome="failed", note="模板+OCR 都没找到确定")
 
-        # 恢复守卫
+        # 恢复守卫 + 总耗时
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = True
-
         _t1 = _t.perf_counter()
         _slog(f"[阶段6] 完成 ✓ 总耗时 {(_t1 - _t0)*1000:.0f}ms")
         return True
