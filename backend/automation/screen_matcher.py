@@ -17,7 +17,7 @@ from . import metrics
 logger = logging.getLogger(__name__)
 
 # 归一化分辨率（所有截图统一缩放到这个尺寸再匹配）
-NORM_W, NORM_H = 1280, 720
+NORM_W, NORM_H = 960, 540
 
 # 多尺度搜索（容忍轻微缩放差异）
 SCALES = [1.0, 0.95, 1.05, 0.9, 1.1]
@@ -193,8 +193,17 @@ class ScreenMatcher:
 
         _dur_ms = round((__import__('time').perf_counter() - _m_t0) * 1000, 2)
         if best_val >= th and best_loc is not None:
-            cx = best_loc[0] + best_tw // 2
-            cy = best_loc[1] + best_th_px // 2
+            # NORM 空间的命中坐标
+            cx_norm = best_loc[0] + best_tw // 2
+            cy_norm = best_loc[1] + best_th_px // 2
+            # 缩回原截图尺寸 (设备像素), adb.tap 用的是设备空间坐标
+            src_h, src_w = screenshot.shape[:2]
+            sx = src_w / NORM_W
+            sy = src_h / NORM_H
+            cx = int(round(cx_norm * sx))
+            cy = int(round(cy_norm * sy))
+            w_out = max(1, int(round(best_tw * sx)))
+            h_out = max(1, int(round(best_th_px * sy)))
             metrics.record("template_match", dur_ms=_dur_ms, tpl=template_name,
                            score=round(best_val, 3), hit=True,
                            scale=best_scale, edge=use_edge)
@@ -202,7 +211,7 @@ class ScreenMatcher:
                 name=template_name,
                 confidence=best_val,
                 cx=cx, cy=cy,
-                w=best_tw, h=best_th_px,
+                w=w_out, h=h_out,
             )
         metrics.record("template_match", dur_ms=_dur_ms, tpl=template_name,
                        score=round(best_val, 3), hit=False, edge=use_edge)

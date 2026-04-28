@@ -1076,15 +1076,15 @@ class SingleInstanceRunner:
         except Exception:
             confirm_tmpl_fresh = None
 
-        # 区域约束: btn_1 模板太通用, 只接受地图面板右下角(确定按钮真实位置)
-        # cx > 0.78*w (右侧), 0.40*h < cy < 0.70*h (中下部, 不是屏幕最底)
+        # 区域约束: btn_1 太通用, 只接受地图面板右下角. 确定按钮实测 rel≈(0.93, 0.94)
+        # 留余量: cx/w > 0.80, cy/h ∈ [0.80, 0.98]
         if confirm_tmpl_fresh and shot_d5 is not None:
             _h_d5, _w_d5 = shot_d5.shape[:2]
             rel_x = confirm_tmpl_fresh.cx / max(1, _w_d5)
             rel_y = confirm_tmpl_fresh.cy / max(1, _h_d5)
-            if not (rel_x > 0.78 and 0.40 < rel_y < 0.70):
+            if not (rel_x > 0.80 and 0.80 < rel_y < 0.98):
                 _slog(f"[阶段6] btn_1 命中位置 ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) "
-                      f"rel=({rel_x:.2f},{rel_y:.2f}) 不在确定按钮区域(0.78<rx, 0.40<ry<0.70) → 拒绝, 走 OCR")
+                      f"rel=({rel_x:.2f},{rel_y:.2f}) 不在确定按钮区域(0.80<rx, 0.80<ry<0.98) → 拒绝, 走 OCR")
                 confirm_tmpl_fresh = None
 
         if confirm_tmpl_fresh:
