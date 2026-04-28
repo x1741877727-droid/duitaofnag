@@ -1311,27 +1311,15 @@ class SingleInstanceRunner:
             d2.set_input(shot_d2, q=70)
         tab_clicked = False
         last_bottom_hits: list = []
-        popup_seen = False
         for attempt in range(5):
             shot = await self.adb.screenshot() if attempt > 0 else shot_d2
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
 
-            # 中部"使用组队码加入"弹窗
-            mid_hits = ocr._ocr_roi_named(shot, "team_code_popup_mid")
-            mid_text = " ".join(h.text for h in mid_hits)
-            if any(OcrDismisser.fuzzy_match(mid_text, kw) for kw in ["加入队伍", "使用组队码"]):
-                popup_seen = True
-                for h in mid_hits:
-                    if OcrDismisser.fuzzy_match(h.text, "取消"):
-                        logger.info(f"[阶段4] 弹窗出现, 点击取消 ({h.cx},{h.cy})")
-                        await self.adb.tap(h.cx, h.cy)
-                        await asyncio.sleep(0.5)
-                        break
-                continue
-
-            # 底部"组队码"tab
+            # 直接 OCR 底部"组队码" tab. 之前的中部"使用组队码加入"弹窗检测删了
+            # (实测从来不命中, 311K 像素的 OCR 每次浪费 ~2-3s).
+            # 如果某天真撞到那个弹窗, 这 5 次 retry 都会找不到 tab → P3a-2 fail.
             bottom_hits = ocr._ocr_roi_named(shot, "team_code_tab_bottom")
             last_bottom_hits = bottom_hits
             for h in bottom_hits:
@@ -1351,7 +1339,7 @@ class SingleInstanceRunner:
         if d2:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
                                 cx=h.cx, cy=h.cy) for h in last_bottom_hits[:15]]
-            note = f"切组队码 tab (popup_seen={popup_seen}), 命中={tab_clicked}"
+            note = f"切组队码 tab, 命中={tab_clicked}"
             tier2 = TierRecord(
                 tier=3, name="OCR·team_code_tab_bottom", early_exit=tab_clicked,
                 note=note, ocr_hits=_hits_d,
