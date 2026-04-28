@@ -142,17 +142,11 @@ def build_nuitka():
     print("=" * 60)
 
 
-def _link_logs_to_project_root(dist_dir: str):
-    """build 完后把 dist/GameBot/logs 建成 junction 指向项目根 logs/.
-    没这个的话: PyInstaller build 清 dist 会顺便清掉 exe 之前跑过的所有 sessions —
-    用户决策档案突然消失. junction 让 exe 写 logs 实际落到项目根, 跨 build 持久化,
-    且 dev/exe 共享同一份历史."""
-    if not os.path.isdir(dist_dir):
-        return
-    link_path = os.path.join(dist_dir, "logs")
-    target = os.path.join(ROOT, "logs")
+def _make_junction(link_path: str, target: str, label: str = "junction") -> bool:
+    """通用 junction/symlink 工具. Windows 用 mklink /J, 其他平台用 symlink.
+    link_path 已存在 (不论 junction 还是真目录) 都会先清掉再建.
+    target 不存在会自动 mkdir."""
     os.makedirs(target, exist_ok=True)
-    # build 刚清过 dist, link_path 一般不存在; 防御性处理 (旧 junction 残留 / 普通目录)
     if os.path.exists(link_path) or os.path.islink(link_path):
         try:
             if os.path.isdir(link_path) and not os.path.islink(link_path):
@@ -161,20 +155,54 @@ def _link_logs_to_project_root(dist_dir: str):
             else:
                 os.remove(link_path)
         except Exception as e:
-            print(f"  WARN: 清理旧 logs 失败 ({e}), 跳过 junction")
-            return
+            print(f"  WARN: 清理旧 {label} 失败 ({e}), 跳过")
+            return False
+    os.makedirs(os.path.dirname(link_path), exist_ok=True)
     if sys.platform == "win32":
         try:
             subprocess.run(
                 ["cmd", "/c", "mklink", "/J", link_path, target],
                 check=True, capture_output=True, text=True,
             )
-            print(f"  logs junction: {link_path} -> {target}")
+            print(f"  {label}: {link_path} -> {target}")
+            return True
         except subprocess.CalledProcessError as e:
-            print(f"  WARN: junction 失败: {e.stderr or e}")
+            print(f"  WARN: {label} junction 失败: {e.stderr or e}")
+            return False
     else:
         os.symlink(target, link_path)
-        print(f"  logs symlink: {link_path} -> {target}")
+        print(f"  {label} symlink: {link_path} -> {target}")
+        return True
+
+
+def _link_runtime_dirs(dist_dir: str):
+    """build 完后建一组 junction, 让运行时改动落到项目根而非 dist 内部:
+      logs/         运行决策日志, build 不清
+      web/dist/     前端代码, 用户改了 npm build 就生效, 不必重 build exe
+      config/       roi.yaml 等配置, OCR 调试页面保存的修改不丢
+    都跨 build 持久化 + 跨 dev/exe 共享."""
+    if not os.path.isdir(dist_dir):
+        return
+    _make_junction(
+        os.path.join(dist_dir, "logs"),
+        os.path.join(ROOT, "logs"),
+        "logs junction",
+    )
+    _make_junction(
+        os.path.join(dist_dir, "_internal", "web", "dist"),
+        os.path.join(ROOT, "web", "dist"),
+        "web/dist junction",
+    )
+    _make_junction(
+        os.path.join(dist_dir, "_internal", "config"),
+        os.path.join(ROOT, "config"),
+        "config junction",
+    )
+
+
+# 向后兼容
+def _link_logs_to_project_root(dist_dir: str):
+    _link_runtime_dirs(dist_dir)
 
 
 def build_pyinstaller():
