@@ -60,6 +60,72 @@ _CN_FONT_PATH = _resolve_cn_font()
 _CN_FONT_CACHE: dict = {}  # size → ImageFont 实例
 
 
+def _has_non_ascii(s: str) -> bool:
+    try:
+        s.encode("ascii")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
+def _put_texts_cn_batch(img: np.ndarray,
+                         items: list,
+                         max_pil_items: int = 30) -> np.ndarray:
+    """
+    批量画文本到 BGR 图. 比逐条 _put_text_cn 快 10-20x.
+    items: list of (text, org=(x,y), color=(B,G,R), font_size:int)
+    全 ASCII 走 cv2.putText (in-place); 含中文转一次 PIL 一起画完再转回.
+    多于 max_pil_items 的中文条目会被截掉, 避免画一坨遮原图.
+    """
+    if not items:
+        return img
+
+    ascii_items = []
+    cn_items = []
+    for it in items:
+        text, org, color, sz = it
+        if _has_non_ascii(text):
+            cn_items.append(it)
+        else:
+            ascii_items.append(it)
+
+    # ASCII 条目: cv2 直接画, 快, in-place
+    for text, org, color, sz in ascii_items:
+        scale = max(0.3, sz / 22.0)
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    color, max(1, int(scale * 1.5)))
+
+    # 中文条目: 一次性 BGR→PIL→画→BGR (而不是每条转一遍)
+    if cn_items and _CN_FONT_PATH:
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(rgb)
+            draw = ImageDraw.Draw(pil)
+            for text, org, color, sz in cn_items[:max_pil_items]:
+                font = _CN_FONT_CACHE.get(sz)
+                if font is None:
+                    font = ImageFont.truetype(_CN_FONT_PATH, sz)
+                    _CN_FONT_CACHE[sz] = font
+                x, y = int(org[0]), int(org[1]) - sz
+                draw.text((x, y), text,
+                          fill=(int(color[2]), int(color[1]), int(color[0])),
+                          font=font)
+            bgr = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+            np.copyto(img, bgr)
+        except Exception:
+            # PIL 出错 fallback: 替换非 ASCII 为 ?
+            for text, org, color, sz in cn_items:
+                safe = "".join(c if ord(c) < 128 else "?" for c in text)
+                cv2.putText(img, safe, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    elif cn_items:
+        # 没字体, 全部降级
+        for text, org, color, sz in cn_items:
+            safe = "".join(c if ord(c) < 128 else "?" for c in text)
+            cv2.putText(img, safe, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    return img
+
+
 def _put_text_cn(img: np.ndarray, text: str, org: tuple, color: tuple,
                  font_size: int = 16) -> np.ndarray:
     """
@@ -544,19 +610,23 @@ class Decision:
         if screenshot is None:
             return self
         annot = screenshot.copy()
+        # 先画所有 bbox, 再一次性批量画文本 (中文一次 BGR↔PIL 转换)
+        text_items: list = []
         if roi:
             x1, y1, x2, y2 = [int(v) for v in roi]
             cv2.rectangle(annot, (x1, y1), (x2, y2), (255, 200, 0), 3)
-            _put_text_cn(annot, "OCR ROI", (x1, max(20, y1 - 6)),
-                         (255, 200, 0), font_size=18)
+            text_items.append(("OCR ROI", (x1, max(20, y1 - 6)),
+                               (255, 200, 0), 18))
         if hits:
-            for h in hits:
+            # 限 Top 10, 避免画一坨遮原图; 完整列表在 JSON 里
+            for h in hits[:10]:
                 if not h.bbox or len(h.bbox) != 4:
                     continue
                 hx1, hy1, hx2, hy2 = [int(v) for v in h.bbox]
                 cv2.rectangle(annot, (hx1, hy1), (hx2, hy2), (0, 255, 0), 1)
-                _put_text_cn(annot, h.text[:14], (hx1, max(15, hy1 - 4)),
-                             (0, 255, 0), font_size=14)
+                text_items.append((h.text[:14], (hx1, max(15, hy1 - 4)),
+                                   (0, 255, 0), 14))
+        _put_texts_cn_batch(annot, text_items)
         try:
             cv2.imwrite(str(self.path / "ocr_annot.jpg"), annot,
                         [cv2.IMWRITE_JPEG_QUALITY, q])
@@ -577,31 +647,35 @@ class Decision:
         if screenshot is not None:
             # 1) 独立 tap 图: 先叠所有 tier 的命中 bbox (模板/OCR), 再画 tap 圈
             annot = screenshot.copy()
+            text_items: list = []
             for t in self.tiers:
                 # 模板命中: 绿色框
                 for tm in (t.templates or []):
                     if tm.hit and tm.bbox and len(tm.bbox) == 4:
                         x1, y1, x2, y2 = [int(v) for v in tm.bbox]
                         cv2.rectangle(annot, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        _put_text_cn(annot, f"TMPL {tm.name} {tm.score:.2f}",
-                                     (x1, max(20, y1 - 6)), (0, 255, 0), font_size=14)
-                # OCR 命中: 青色框 + 文字
-                for h in (t.ocr_hits or [])[:30]:
+                        text_items.append(
+                            (f"TMPL {tm.name} {tm.score:.2f}",
+                             (x1, max(20, y1 - 6)), (0, 255, 0), 14))
+                # OCR 命中: 青色框 + 文字 (Top 10 防止挤一坨)
+                for h in (t.ocr_hits or [])[:10]:
                     if h.bbox and len(h.bbox) == 4:
                         hx1, hy1, hx2, hy2 = [int(v) for v in h.bbox]
                         cv2.rectangle(annot, (hx1, hy1), (hx2, hy2), (255, 200, 0), 1)
                         if h.text:
-                            _put_text_cn(annot, h.text[:14],
-                                         (hx1, max(15, hy1 - 4)),
-                                         (255, 200, 0), font_size=12)
+                            text_items.append(
+                                (h.text[:14], (hx1, max(15, hy1 - 4)),
+                                 (255, 200, 0), 12))
             # 红色 tap 圈在最上面
             cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
             cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
             label = f"TAP {method} ({int(x)},{int(y)})"
             if target_text:
                 label += f" '{target_text[:10]}'"
-            _put_text_cn(annot, label, (int(x) + 40, int(y) - 12),
-                         (0, 0, 255), font_size=18)
+            text_items.append(
+                (label, (int(x) + 40, int(y) - 12), (0, 0, 255), 18))
+            # 一次性批量画所有文本
+            _put_texts_cn_batch(annot, text_items)
             try:
                 cv2.imwrite(str(self.path / "tap_annot.jpg"), annot,
                             [cv2.IMWRITE_JPEG_QUALITY, 70])

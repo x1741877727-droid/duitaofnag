@@ -51,8 +51,12 @@ class ScreenMatcher:
     def __init__(self, template_dir: str, default_threshold: float = 0.80):
         self.template_dir = Path(template_dir)
         self.default_threshold = default_threshold
-        # name -> (gray_image, threshold)
-        self._templates: dict[str, tuple[np.ndarray, float]] = {}
+        # name -> 字典 (gray=原 grayscale, bgr=原 BGR, threshold, preprocessing=[]/[edge]...)
+        # preprocessing 不为空时, 模板的预处理结果缓存到 gray_proc
+        self._templates: dict[str, dict] = {}
+        # 同一帧 + 同一组 preprocessing 的截图缓存 (id(screenshot) → processed_gray)
+        # 单帧多模板共享, 不跨帧持久化
+        self._screen_cache: dict = {}
 
     def _normalize_template(self, gray: np.ndarray, source_w: int = 0, source_h: int = 0) -> np.ndarray:
         """归一化模板到与 NORM_W x NORM_H 匹配的比例
@@ -71,12 +75,32 @@ class ScreenMatcher:
             gray = cv2.resize(gray, (new_w, new_h))
         return gray
 
-    def load_all(self) -> int:
-        """加载所有模板图片，返回加载数量
-
-        模板自动归一化：如果模板旁边有 _meta.txt 记录源分辨率，
-        会按比例缩放到 1280x720。没有 meta 文件则假设已是标准分辨率。
+    def _load_meta(self, name: str) -> dict:
+        """读 fixtures/templates_meta/<name>.yaml, 返回 dict (找不到 → {}).
+        字段:
+          source_w, source_h: 模板抓取时的分辨率 (用于跨分辨率缩放)
+          threshold: 模板专属阈值 (默认 self.default_threshold)
+          preprocessing: ["grayscale"|"clahe"|"binarize"|"sharpen"|"invert"|"edge"], 空=默认行为
         """
+        try:
+            import yaml
+            meta_dir = self.template_dir.parent / "templates_meta"
+            meta_path = meta_dir / f"{name}.yaml"
+            if not meta_path.exists():
+                # 兼容旧 _meta.txt 只记分辨率
+                txt = self.template_dir / f"{name}_meta.txt"
+                if txt.exists():
+                    parts = txt.read_text().strip().split("x")
+                    return {"source_w": int(parts[0]), "source_h": int(parts[1])}
+                return {}
+            data = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"加载模板 meta 失败 ({name}): {e}")
+            return {}
+
+    def load_all(self) -> int:
+        """加载所有模板图片，返回加载数量"""
         count = 0
         for f in self.template_dir.glob("*.png"):
             name = f.stem
@@ -84,18 +108,23 @@ class ScreenMatcher:
             if img is None:
                 logger.warning(f"无法读取模板: {f}")
                 continue
+            meta = self._load_meta(name)
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-            # 检查是否有 meta 文件记录源分辨率
-            meta_path = self.template_dir / f"{name}_meta.txt"
-            if meta_path.exists():
+            sw = meta.get("source_w")
+            sh = meta.get("source_h")
+            if sw and sh:
                 try:
-                    meta = meta_path.read_text().strip().split("x")
-                    gray = self._normalize_template(gray, int(meta[0]), int(meta[1]))
+                    gray = self._normalize_template(gray, int(sw), int(sh))
+                    img = self._normalize_template_bgr(img, int(sw), int(sh))
                 except Exception:
                     pass
-
-            self._templates[name] = (gray, self.default_threshold)
+            self._templates[name] = {
+                "gray": gray,
+                "bgr": img,
+                "threshold": float(meta.get("threshold", self.default_threshold)),
+                "preprocessing": list(meta.get("preprocessing") or []),
+                "gray_proc": None,  # lazy: 第一次匹配时算
+            }
             count += 1
         logger.info(f"已加载 {count} 个模板")
         return count
@@ -108,9 +137,26 @@ class ScreenMatcher:
         img = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if img is None:
             return False
+        meta = self._load_meta(name)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        self._templates[name] = (gray, threshold or self.default_threshold)
+        self._templates[name] = {
+            "gray": gray,
+            "bgr": img,
+            "threshold": float(threshold if threshold is not None
+                               else meta.get("threshold", self.default_threshold)),
+            "preprocessing": list(meta.get("preprocessing") or []),
+            "gray_proc": None,
+        }
         return True
+
+    def _normalize_template_bgr(self, bgr: np.ndarray, sw: int, sh: int) -> np.ndarray:
+        """模板 BGR 缩放, 同 _normalize_template 但保色彩 (供 preprocessing 用)"""
+        if sw <= 0 or sh <= 0 or (sw == NORM_W and sh == NORM_H):
+            return bgr
+        scale = ((NORM_W / sw) + (NORM_H / sh)) / 2
+        new_w = max(1, int(bgr.shape[1] * scale))
+        new_h = max(1, int(bgr.shape[0] * scale))
+        return cv2.resize(bgr, (new_w, new_h))
 
     @property
     def template_names(self) -> list[str]:
@@ -150,14 +196,49 @@ class ScreenMatcher:
             return None
 
         _m_t0 = __import__('time').perf_counter()
-        tmpl_gray, default_th = self._templates[template_name]
+        tdata = self._templates[template_name]
+        default_th = tdata["threshold"]
+        preproc = list(tdata.get("preprocessing") or [])
         th = threshold if threshold is not None else default_th
-        screen_gray = self._normalize(screenshot)
 
-        # 边缘检测模式：Canny 提取轮廓后匹配
-        if use_edge:
-            screen_gray = cv2.Canny(screen_gray, 50, 150)
-            tmpl_gray = cv2.Canny(tmpl_gray, 50, 150)
+        # use_edge=True 是历史 API, 等价于 preprocessing=["edge"]
+        if use_edge and "edge" not in preproc:
+            preproc = preproc + ["edge"]
+
+        if preproc:
+            # 模板预处理结果缓存到 gray_proc (按 preprocessing list 算 key)
+            cache_key = tuple(preproc)
+            cached = tdata.get("gray_proc_cache") or {}
+            tmpl_gray = cached.get(cache_key)
+            if tmpl_gray is None:
+                from .image_preproc import apply_preprocessing
+                processed = apply_preprocessing(tdata["bgr"], preproc)
+                tmpl_gray = (cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                             if len(processed.shape) == 3 else processed)
+                cached[cache_key] = tmpl_gray
+                tdata["gray_proc_cache"] = cached
+
+            # 截图预处理: 单帧多模板共享, key=(id(screenshot), preproc)
+            screen_cache_key = (id(screenshot), cache_key)
+            screen_gray = self._screen_cache.get(screen_cache_key)
+            if screen_gray is None:
+                from .image_preproc import apply_preprocessing
+                # 先把截图 normalize 到 NORM 尺寸的 BGR (apply_preprocessing 要 BGR)
+                if screenshot.shape[1] != NORM_W or screenshot.shape[0] != NORM_H:
+                    screen_bgr_norm = cv2.resize(screenshot, (NORM_W, NORM_H))
+                else:
+                    screen_bgr_norm = screenshot
+                processed = apply_preprocessing(screen_bgr_norm, preproc)
+                screen_gray = (cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                               if len(processed.shape) == 3 else processed)
+                # 缓存只在该帧周期有效, find_any 一次 batch 里清不清都行;
+                # 这里限大小防内存涨
+                if len(self._screen_cache) > 32:
+                    self._screen_cache.clear()
+                self._screen_cache[screen_cache_key] = screen_gray
+        else:
+            tmpl_gray = tdata["gray"]
+            screen_gray = self._normalize(screenshot)
 
         if scales is None:
             scales = SCALES if multi_scale else [1.0]

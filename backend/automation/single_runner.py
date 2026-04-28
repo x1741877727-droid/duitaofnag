@@ -851,21 +851,16 @@ class SingleInstanceRunner:
                 self._restore_guard()
                 return False
 
-        # 等面板渲染 (这步无 tap, 不单独建 decision, 数据塞进步骤 2 的 tier)
-        await asyncio.sleep(1.0)
+        # 等面板动画完成 (打开按钮 → 面板淡入大约 0.8s)
+        # 不再先 OCR 一次"探测面板就绪", 因为 P4-2 / P4-3 自己就要 OCR list_center, 探测是浪费.
+        await asyncio.sleep(0.8)
         shot = await self.adb.screenshot()
         if shot is None:
             self._restore_guard()
             return False
-        list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                     if has_list_roi else ocr._ocr_all(shot))
-        if len(list_hits) < 3:
-            await asyncio.sleep(1.0)
-            shot = await self.adb.screenshot()
-            list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                         if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
-        h_img, w_img = (shot.shape[:2] if shot is not None else (0, 0))
-        _slog(f"[阶段6] 面板已打开 ({len(list_hits)} 文字, {'list_center' if has_list_roi else '全屏'})")
+        h_img, w_img = shot.shape[:2]
+        # P4-2 才真正去 OCR list_center, 这里只占位
+        list_hits: list = []
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 2: P4-2-mode  切团竞模式 (OCR left_tabs 找团竞 tab)
@@ -873,6 +868,10 @@ class SingleInstanceRunner:
         d2 = _make_d("2-mode")
         if d2 and shot is not None:
             d2.set_input(shot, q=70)
+
+        # P4-2 自己 OCR list_center, 顺便把"是否团竞"判出来. 不在 P4-1 里提前探测了.
+        list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
+                     if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
 
         # OCR 找 团竞 tab
         if has_left_roi:

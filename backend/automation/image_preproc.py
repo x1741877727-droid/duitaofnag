@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 
-VALID_METHODS = ("grayscale", "clahe", "binarize", "sharpen", "invert")
+VALID_METHODS = ("grayscale", "clahe", "binarize", "sharpen", "invert", "edge")
 
 
 def apply_preprocessing(img: np.ndarray, methods: list) -> np.ndarray:
@@ -50,5 +50,10 @@ def apply_preprocessing(img: np.ndarray, methods: list) -> np.ndarray:
             out = cv2.filter2D(out, -1, kernel)
         elif m == "invert":
             out = cv2.bitwise_not(out)
+        elif m == "edge":
+            # Canny 边缘提取 (动画/光照变化下模板匹配更鲁棒)
+            gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY) if len(out.shape) == 3 else out
+            edges = cv2.Canny(gray, 50, 150)
+            out = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         # 未知 method 静默跳过
     return out
