@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/lib/store'
 import { SquadDialog, type SquadAssignment } from './SquadDialog'
+import type { TeamGroup } from '@/lib/store'
 
 interface PhaseDef {
   key: string
@@ -60,10 +61,33 @@ export function PhaseTester() {
   const [phases, setPhases] = useState<PhaseDef[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
   const [squadDialogOpen, setSquadDialogOpen] = useState(false)
+  // 默认每组 3 人 (1 队长 + 2 队员). 用户可改 (PUBG 类 4 人, 三排 3 人, 双排 2 人)
+  const [squadSize, setSquadSize] = useState(3)
 
   useEffect(() => {
     fetch('/api/runner/phases').then((r) => r.json()).then((d) => setPhases(d.phases || [])).catch(() => {})
   }, [])
+
+  // 自动按 squadSize 把选中实例切分大组. 每组第 1 个 (实例号最小) 当队长, 其余队员.
+  // 例: 选 #3#4#5 + size=3 → [{leader:3, members:[4,5]}]  (1 组)
+  // 例: 选 #1#2#3#4#5#6 + size=3 → [{leader:1, members:[2,3]}, {leader:4, members:[5,6]}]  (2 组)
+  // 组名按 A/B/C/... 顺序 (TeamGroup 字面量限制 6 组 = 18 实例, 实战够用)
+  const autoSquads = useMemo<SquadAssignment[]>(() => {
+    const groupNames: TeamGroup[] = ['A', 'B', 'C', 'D', 'E', 'F']
+    const sorted = [...targetsFromConsole].sort((a, b) => a - b)
+    const out: SquadAssignment[] = []
+    for (let i = 0; i < sorted.length; i += squadSize) {
+      const chunk = sorted.slice(i, i + squadSize)
+      if (chunk.length === 0) continue
+      if (out.length >= groupNames.length) break  // 超过 6 组就停 (异常多实例)
+      out.push({
+        group: groupNames[out.length],
+        leader: chunk[0],
+        members: chunk.slice(1),
+      })
+    }
+    return out
+  }, [targetsFromConsole, squadSize])
 
   function togglePhase(key: string) {
     const cur = selKeys
@@ -71,7 +95,7 @@ export function PhaseTester() {
     setPhaseTester({ selKeys: next })
   }
 
-  // 入口: 决定走独立模式还是弹窗 (P3+ 多实例)
+  // 入口: 决定走独立模式 / 自动大组 / 自定义大组对话框
   function onClickRun() {
     let targets: number[]
     if (useFromConsole) {
@@ -82,10 +106,11 @@ export function PhaseTester() {
     }
     if (targets.length === 0) return
 
-    // 多实例 + 选了 P3+/P4 → 弹窗大组联动
+    // 多实例 + 选了 P3+/P4 → 自动按 squadSize 切组直接跑
+    // 用户原话: "三个实例的话就三个为一组 六个的话就是两个组"
     const hasSquadPhase = selKeys.some((k) => ROLE_PHASES.has(k))
     if (targets.length > 1 && hasSquadPhase) {
-      setSquadDialogOpen(true)
+      runAllSquads(autoSquads)
       return
     }
     // 否则 (单实例 / 只跑 P0-P2) 直接独立模式
@@ -386,7 +411,47 @@ export function PhaseTester() {
         </div>
       )}
 
-      {selKeys.some((k) => ROLE_PHASES.has(k)) && (
+      {/* 多实例 + role phase: 显示自动分组预览 (按 squadSize 切, 第 1 个当队长) */}
+      {selKeys.some((k) => ROLE_PHASES.has(k)) && useFromConsole && targetsFromConsole.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-semibold">分组:</span>
+          <label className="flex items-center gap-1">
+            <span className="text-[11px]">每组人数</span>
+            <input
+              type="number"
+              min={2}
+              max={6}
+              value={squadSize}
+              onChange={(e) => setSquadSize(Math.max(2, Math.min(6, parseInt(e.target.value) || 3)))}
+              className="w-12 px-1 py-0.5 border border-border rounded text-center font-mono"
+            />
+          </label>
+          <span className="text-muted-foreground">→</span>
+          {autoSquads.map((sq) => (
+            <span
+              key={sq.group}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-info/30 bg-info/10 text-[11px]"
+            >
+              <span className="font-bold text-info">{sq.group}组</span>
+              <span className="font-mono">队长 #{sq.leader}</span>
+              {sq.members.length > 0 && (
+                <span className="font-mono text-muted-foreground">
+                  + 队员 #{sq.members.join(' #')}
+                </span>
+              )}
+            </span>
+          ))}
+          <button
+            onClick={() => setSquadDialogOpen(true)}
+            className="text-[11px] text-muted-foreground hover:text-foreground underline ml-1"
+            title="自定义分组 (从 dashboard 配置 group/role 读)"
+          >
+            自定义…
+          </button>
+        </div>
+      )}
+      {/* 单实例 + role phase: 还是要让用户选角色 */}
+      {selKeys.some((k) => ROLE_PHASES.has(k)) && (!useFromConsole || targetsFromConsole.length <= 1) && (
         <div className="flex items-center gap-2 text-xs">
           <span>角色:</span>
           {(['captain', 'member'] as const).map((r) => (
@@ -421,9 +486,18 @@ export function PhaseTester() {
             onClick={onClickRun}
             className="min-w-[180px]"
           >
-            {useFromConsole && targetsFromConsole.length > 1
-              ? `串跑 ${selKeys.length} 阶段 × ${targetsFromConsole.length} 实例`
-              : `串跑 ${selKeys.length} 个阶段`}
+            {(() => {
+              const hasSquadPhase = selKeys.some((k) => ROLE_PHASES.has(k))
+              const multi = useFromConsole && targetsFromConsole.length > 1
+              if (multi && hasSquadPhase && autoSquads.length > 0) {
+                // 大组联动模式
+                return `跑 ${autoSquads.length} 组 × ${selKeys.length} 阶段 (${targetsFromConsole.length} 实例)`
+              }
+              if (multi) {
+                return `串跑 ${selKeys.length} 阶段 × ${targetsFromConsole.length} 实例`
+              }
+              return `串跑 ${selKeys.length} 个阶段`
+            })()}
           </Button>
         )}
         <label className="flex items-center gap-1 text-xs">
