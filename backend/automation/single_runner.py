@@ -940,8 +940,61 @@ class SingleInstanceRunner:
         else:
             logger.warning(f"[阶段6] 未找到目标地图 '{self.target_map}'")
 
-        # ── 检查补位 (像素检测勾选状态) — 详细 log 验证 60px 偏移和 RGB 阈值 ──
-        if fill_hit:
+        # ── 检查补位 (新方法: 独立 ROI 颜色检测, 不依赖 OCR 找"补位"文字) ──
+        # 用户在 OCR 调试页可视化把 map_panel_fill_checkbox ROI 拖到 ✓ 勾选框上,
+        # 颜色检测直接用 ROI 内全部像素 (不再 cx-60 那种脆弱偏移).
+        # 点击位置 = ROI 中心. 整个流程零 OCR 依赖, 跨分辨率稳.
+        # ROI 没配时回退老路径 (OCR 找"补位" + cx-60 颜色).
+        try:
+            from .roi_config import all_names as _all, get as _roi_get
+            avail = set(_all())
+        except Exception:
+            avail = set()
+
+        if "map_panel_fill_checkbox" in avail:
+            shot = await self.adb.screenshot()
+            if shot is not None:
+                rx1, ry1, rx2, ry2, _ = _roi_get("map_panel_fill_checkbox")
+                h_img, w_img = shot.shape[:2]
+                px1 = max(0, int(w_img * rx1))
+                py1 = max(0, int(h_img * ry1))
+                px2 = min(w_img, int(w_img * rx2))
+                py2 = min(h_img, int(h_img * ry2))
+                region = shot[py1:py2, px1:px2]
+                if region.size > 0:
+                    r_ch = region[:, :, 2]
+                    g_ch = region[:, :, 1]
+                    b_ch = region[:, :, 0]
+                    orange = int(((r_ch > 150) & (g_ch > 80) & (b_ch < 80)).sum())
+                    total = int(region.shape[0] * region.shape[1])
+                    ratio = orange / total if total > 0 else 0.0
+                    avg_r = int(r_ch.mean())
+                    avg_g = int(g_ch.mean())
+                    avg_b = int(b_ch.mean())
+                    tap_cx = (px1 + px2) // 2
+                    tap_cy = (py1 + py2) // 2
+                    logger.info(
+                        f"[阶段6] 补位 ROI 颜色检测: ROI=({px1},{py1})-({px2},{py2}) "
+                        f"({region.shape[1]}x{region.shape[0]}) "
+                        f"平均RGB=({avg_r},{avg_g},{avg_b}) "
+                        f"橙色={orange}/{total} ({ratio*100:.1f}%) 阈值=10%"
+                    )
+                    # 保存 ROI 区域到决策档案 (放大 5x)
+                    try:
+                        import cv2 as _cv2
+                        big = _cv2.resize(region, (region.shape[1] * 5, region.shape[0] * 5),
+                                          interpolation=_cv2.INTER_NEAREST)
+                        self.dbg.log_screenshot(big, tag=f"fill_roi_orange{orange}_ratio{int(ratio*100)}")
+                    except Exception:
+                        pass
+                    if ratio > 0.10:   # 10% 像素橙色 = 已勾选
+                        logger.info(f"[阶段6] 补位已开启 → 点击 ({tap_cx},{tap_cy})")
+                        await self.adb.tap(tap_cx, tap_cy)
+                        await asyncio.sleep(0.3)
+                    else:
+                        logger.info(f"[阶段6] 补位已关闭 → 跳过 (橙色比例 {ratio*100:.1f}% < 10%)")
+        elif fill_hit:
+            # 老路径: ROI 没配时回退到 OCR + cx-60 颜色检测
             shot = await self.adb.screenshot()
             if shot is not None:
                 check_x = max(0, fill_hit.cx - 60)
@@ -956,26 +1009,11 @@ class SingleInstanceRunner:
                     g_ch = region[:, :, 1]
                     b_ch = region[:, :, 0]
                     orange_count = int(((r_ch > 150) & (g_ch > 80) & (b_ch < 80)).sum())
-                    total = int(region.shape[0] * region.shape[1])
-                    avg_r = int(r_ch.mean())
-                    avg_g = int(g_ch.mean())
-                    avg_b = int(b_ch.mean())
                     logger.info(
-                        f"[阶段6] 补位颜色检测: 文字=({fill_hit.cx},{fill_hit.cy}) "
-                        f"检测点=({check_x},{check_y}) "
-                        f"区域={region.shape[1]}x{region.shape[0]} "
-                        f"平均RGB=({avg_r},{avg_g},{avg_b}) "
-                        f"橙色={orange_count}/{total} (阈值: R>150 G>80 B<80, 计数>5=已勾)"
+                        f"[阶段6] 补位颜色检测 (老路径, OCR+cx-60): "
+                        f"文字=({fill_hit.cx},{fill_hit.cy}) 检测点=({check_x},{check_y}) "
+                        f"橙色={orange_count}/100"
                     )
-                    # 同时保存检测区域到决策档案 (放大 10x 让用户能看清)
-                    try:
-                        import cv2 as _cv2
-                        big = _cv2.resize(region, (region.shape[1] * 10, region.shape[0] * 10),
-                                          interpolation=_cv2.INTER_NEAREST)
-                        self.dbg.log_screenshot(big, tag=f"fill_check_orange{orange_count}")
-                    except Exception:
-                        pass
-
                     if orange_count > 5:
                         logger.info("[阶段6] 补位已开启 → 点击取消")
                         await self.adb.tap(fill_hit.cx, fill_hit.cy)
