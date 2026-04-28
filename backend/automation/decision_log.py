@@ -38,6 +38,73 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ── 中文文本渲染 (cv2.putText 不支持中文, 用 PIL 兜底) ──────────────────────
+
+_CN_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/msyh.ttc",          # 微软雅黑 (Windows 默认有)
+    "C:/Windows/Fonts/simhei.ttf",        # 黑体
+    "/System/Library/Fonts/PingFang.ttc",  # macOS
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # Linux
+]
+
+
+def _resolve_cn_font():
+    """返回第一个存在的中文字体路径, 找不到返回 None"""
+    for p in _CN_FONT_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return None
+
+
+_CN_FONT_PATH = _resolve_cn_font()
+_CN_FONT_CACHE: dict = {}  # size → ImageFont 实例
+
+
+def _put_text_cn(img: np.ndarray, text: str, org: tuple, color: tuple,
+                 font_size: int = 16) -> np.ndarray:
+    """
+    在 BGR 图上画文本, 支持中文.
+    text 全 ASCII 时走 cv2.putText (快); 含非 ASCII 走 PIL (慢但正确).
+    org: (x, y) 左下角 (cv2 风格); color: (B, G, R).
+    返回 img 本身 (in-place 修改, 跟 cv2.putText 一致).
+    """
+    try:
+        text.encode("ascii")
+        scale = font_size / 22.0
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, max(0.3, scale),
+                    color, max(1, int(scale * 1.5)))
+        return img
+    except UnicodeEncodeError:
+        pass
+
+    if _CN_FONT_PATH is None:
+        # 没字体, 把非 ASCII 字符替换成 ?
+        safe = "".join(c if ord(c) < 128 else "?" for c in text)
+        cv2.putText(img, safe, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        return img
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        font = _CN_FONT_CACHE.get(font_size)
+        if font is None:
+            font = ImageFont.truetype(_CN_FONT_PATH, font_size)
+            _CN_FONT_CACHE[font_size] = font
+        # BGR → RGB → PIL → 画 → 回 BGR
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(rgb)
+        draw = ImageDraw.Draw(pil)
+        # cv2 putText 的 org 是基线左下; PIL 的 xy 是左上. 把 y 上移 font_size
+        x, y = int(org[0]), int(org[1]) - font_size
+        draw.text((x, y), text, fill=(int(color[2]), int(color[1]), int(color[0])), font=font)
+        bgr = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+        np.copyto(img, bgr)
+        return img
+    except Exception:
+        safe = "".join(c if ord(c) < 128 else "?" for c in text)
+        cv2.putText(img, safe, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        return img
+
+
 # ─────────────── 数据结构 ───────────────
 
 
@@ -480,16 +547,16 @@ class Decision:
         if roi:
             x1, y1, x2, y2 = [int(v) for v in roi]
             cv2.rectangle(annot, (x1, y1), (x2, y2), (255, 200, 0), 3)
-            cv2.putText(annot, "OCR ROI", (x1, max(20, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
+            _put_text_cn(annot, "OCR ROI", (x1, max(20, y1 - 6)),
+                         (255, 200, 0), font_size=18)
         if hits:
             for h in hits:
                 if not h.bbox or len(h.bbox) != 4:
                     continue
                 hx1, hy1, hx2, hy2 = [int(v) for v in h.bbox]
                 cv2.rectangle(annot, (hx1, hy1), (hx2, hy2), (0, 255, 0), 1)
-                cv2.putText(annot, h.text[:14], (hx1, max(15, hy1 - 4)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                _put_text_cn(annot, h.text[:14], (hx1, max(15, hy1 - 4)),
+                             (0, 255, 0), font_size=14)
         try:
             cv2.imwrite(str(self.path / "ocr_annot.jpg"), annot,
                         [cv2.IMWRITE_JPEG_QUALITY, q])
@@ -516,25 +583,25 @@ class Decision:
                     if tm.hit and tm.bbox and len(tm.bbox) == 4:
                         x1, y1, x2, y2 = [int(v) for v in tm.bbox]
                         cv2.rectangle(annot, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(annot, f"TMPL {tm.name} {tm.score:.2f}",
-                                    (x1, max(20, y1 - 6)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                        _put_text_cn(annot, f"TMPL {tm.name} {tm.score:.2f}",
+                                     (x1, max(20, y1 - 6)), (0, 255, 0), font_size=14)
                 # OCR 命中: 青色框 + 文字
                 for h in (t.ocr_hits or [])[:30]:
                     if h.bbox and len(h.bbox) == 4:
                         hx1, hy1, hx2, hy2 = [int(v) for v in h.bbox]
                         cv2.rectangle(annot, (hx1, hy1), (hx2, hy2), (255, 200, 0), 1)
                         if h.text:
-                            cv2.putText(annot, h.text[:14], (hx1, max(15, hy1 - 4)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 1)
+                            _put_text_cn(annot, h.text[:14],
+                                         (hx1, max(15, hy1 - 4)),
+                                         (255, 200, 0), font_size=12)
             # 红色 tap 圈在最上面
             cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
             cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
             label = f"TAP {method} ({int(x)},{int(y)})"
             if target_text:
                 label += f" '{target_text[:10]}'"
-            cv2.putText(annot, label, (int(x) + 40, int(y) - 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            _put_text_cn(annot, label, (int(x) + 40, int(y) - 12),
+                         (0, 0, 255), font_size=18)
             try:
                 cv2.imwrite(str(self.path / "tap_annot.jpg"), annot,
                             [cv2.IMWRITE_JPEG_QUALITY, 70])

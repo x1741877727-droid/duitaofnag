@@ -1108,21 +1108,30 @@ class SingleInstanceRunner:
             _slog(f"[阶段6] 确定 btn_1 模板命中(fresh) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
             if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl_fresh.confidence:.2f}")
         else:
-            # OCR 兜底
+            # OCR 兜底: 优先用 map_panel_btn_confirm ROI, 没配再走全屏右侧过滤
             shot = shot_d5  # 用 fresh shot 做后续 OCR
-            full = ocr._ocr_all(shot) if shot is not None else []
-            confirm_hit = next((h for h in full if "确定" in h.text and h.cx > w_img * 0.78), None)
+            has_confirm_roi = "map_panel_btn_confirm" in avail_rois
+            if has_confirm_roi:
+                confirm_hits = ocr._ocr_roi_named(shot, "map_panel_btn_confirm") if shot is not None else []
+                _btn_roi_px = _roi_pixels("map_panel_btn_confirm", shot)
+                tier_name = "OCR·btn_confirm"
+                tier_note = f"模板没命中 → OCR ROI 找'确定' ({len(confirm_hits)} 文字)"
+            else:
+                confirm_hits = ocr._ocr_all(shot) if shot is not None else []
+                _btn_roi_px = None
+                tier_name = "OCR·全屏(右侧)"
+                tier_note = f"模板没命中 → OCR 全屏找'确定' (右侧 cx>{int(w_img*0.78)})"
+
+            confirm_hit = next((h for h in confirm_hits if "确定" in h.text
+                                and (has_confirm_roi or h.cx > w_img * 0.78)), None)
             if d5:
                 _full_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
-                                    cx=h.cx, cy=h.cy) for h in full[:30]]
-                tier_p5o = TierRecord(
-                    tier=3, name="OCR·全屏",
-                    note=f"模板没命中 → OCR 兜底找'确定' (右侧 cx>{int(w_img*0.78)})",
-                    ocr_hits=_full_d,
-                )
+                                    cx=h.cx, cy=h.cy) for h in confirm_hits[:30]]
+                tier_p5o = TierRecord(tier=3, name=tier_name, note=tier_note, ocr_hits=_full_d)
                 d5.add_tier(tier_p5o)
                 _h5, _w5 = (shot.shape[:2] if shot is not None else (0, 0))
-                d5.save_ocr_roi(tier_p5o, shot, roi=[0, 0, _w5, _h5], hits=_full_d)
+                _roi_use = _btn_roi_px if _btn_roi_px else [0, 0, _w5, _h5]
+                d5.save_ocr_roi(tier_p5o, shot, roi=_roi_use, hits=_full_d)
             if confirm_hit:
                 if d5:
                     d5.set_tap(int(confirm_hit.cx), int(confirm_hit.cy),
