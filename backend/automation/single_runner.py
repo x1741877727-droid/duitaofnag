@@ -804,14 +804,19 @@ class SingleInstanceRunner:
         if d1:
             d1.set_input(shot, q=70)
 
-        hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+        # 优先用 lobby_start_game (用户裁的"开始"按钮), 兜底 lobby_start_btn (旧模板)
+        hit = self.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
+        tmpl_used = "lobby_start_game"
+        if hit is None:
+            hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+            tmpl_used = "lobby_start_btn"
         if hit:
             if d1:
                 d1.add_tier(TierRecord(
-                    tier=0, name="模板·lobby_start_btn", early_exit=True,
+                    tier=0, name=f"模板·{tmpl_used}", early_exit=True,
                     note=f"模板命中 conf={hit.confidence:.2f}, cx={hit.cx} cy={hit.cy}",
                     templates=[TemplateMatch(
-                        name="lobby_start_btn", score=float(hit.confidence),
+                        name=tmpl_used, score=float(hit.confidence),
                         hit=True, bbox=[int(hit.cx - hit.w/2), int(hit.cy - hit.h/2),
                                         int(hit.cx + hit.w/2), int(hit.cy + hit.h/2)],
                     )],
@@ -963,7 +968,11 @@ class SingleInstanceRunner:
             if self.matcher is None or shot is None:
                 return None
             try:
-                return self.matcher.match_one(shot, "btn_1", threshold=0.7)
+                # 优先 queding (专门裁的"确定"模板), 兜底 btn_1 (通用按钮模板)
+                h = self.matcher.match_one(shot, "queding", threshold=0.7)
+                if h is None:
+                    h = self.matcher.match_one(shot, "btn_1", threshold=0.7)
+                return h
             except Exception:
                 return None
 
@@ -1070,29 +1079,37 @@ class SingleInstanceRunner:
         d5 = _make_d("5-confirm")
         if d5 and shot_d5 is not None:
             d5.set_input(shot_d5, q=70)
+        # 优先用专门裁的 queding 模板, 兜底 btn_1
+        confirm_tmpl_fresh = None
+        confirm_tmpl_used = "queding"
         try:
-            confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "btn_1", threshold=0.7) if shot_d5 is not None else None
+            if shot_d5 is not None:
+                confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "queding", threshold=0.7)
+                if confirm_tmpl_fresh is None:
+                    confirm_tmpl_fresh = self.matcher.match_one(shot_d5, "btn_1", threshold=0.7)
+                    confirm_tmpl_used = "btn_1"
         except Exception:
             confirm_tmpl_fresh = None
 
-        # 区域约束: btn_1 太通用, 只接受地图面板右下角. 确定按钮实测 rel≈(0.93, 0.94)
-        # 留余量: cx/w > 0.80, cy/h ∈ [0.80, 0.98]
-        if confirm_tmpl_fresh and shot_d5 is not None:
+        # 区域约束: 通用按钮模板可能误命中, 限制只接受地图面板右下角.
+        # 确定按钮实测 rel≈(0.93, 0.94). 留余量: cx/w > 0.80, cy/h ∈ [0.80, 0.98]
+        # queding 是专门裁的可放宽, btn_1 必须卡区域.
+        if confirm_tmpl_fresh and shot_d5 is not None and confirm_tmpl_used == "btn_1":
             _h_d5, _w_d5 = shot_d5.shape[:2]
             rel_x = confirm_tmpl_fresh.cx / max(1, _w_d5)
             rel_y = confirm_tmpl_fresh.cy / max(1, _h_d5)
             if not (rel_x > 0.80 and 0.80 < rel_y < 0.98):
                 _slog(f"[阶段6] btn_1 命中位置 ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) "
-                      f"rel=({rel_x:.2f},{rel_y:.2f}) 不在确定按钮区域(0.80<rx, 0.80<ry<0.98) → 拒绝, 走 OCR")
+                      f"rel=({rel_x:.2f},{rel_y:.2f}) 不在确定按钮区域 → 拒绝, 走 OCR")
                 confirm_tmpl_fresh = None
 
         if confirm_tmpl_fresh:
             if d5:
                 d5.add_tier(TierRecord(
-                    tier=0, name="模板·btn_1", early_exit=True,
+                    tier=0, name=f"模板·{confirm_tmpl_used}", early_exit=True,
                     note=f"确定按钮模板命中 conf={confirm_tmpl_fresh.confidence:.2f}",
                     templates=[TemplateMatch(
-                        name="btn_1", score=float(confirm_tmpl_fresh.confidence),
+                        name=confirm_tmpl_used, score=float(confirm_tmpl_fresh.confidence),
                         hit=True,
                         bbox=[int(confirm_tmpl_fresh.cx - confirm_tmpl_fresh.w/2),
                               int(confirm_tmpl_fresh.cy - confirm_tmpl_fresh.h/2),
@@ -1104,7 +1121,7 @@ class SingleInstanceRunner:
                            method="模板", target_class="确定",
                            target_conf=float(confirm_tmpl_fresh.confidence), screenshot=shot_d5)
             await self.adb.tap(confirm_tmpl_fresh.cx, confirm_tmpl_fresh.cy)
-            _slog(f"[阶段6] 确定 btn_1 模板命中(fresh) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
+            _slog(f"[阶段6] 确定 {confirm_tmpl_used} 模板命中(fresh) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
             if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl_fresh.confidence:.2f}")
         else:
             # OCR 兜底: 优先用 map_panel_btn_confirm ROI, 没配再走全屏右侧过滤
