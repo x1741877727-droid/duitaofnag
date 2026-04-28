@@ -144,6 +144,40 @@ class TestOcrReq(BaseModel):
     session: Optional[str] = None
     rect: list[float]              # 当前编辑中的 rect (不一定 == 已保存的)
     scale: int = 2
+    # 预处理: 按顺序应用 grayscale / clahe / binarize / sharpen / invert
+    preprocessing: Optional[list[str]] = None
+
+
+# 预处理实现 — 用户在 OCR 调试页测好后集成进生产代码
+def _apply_preprocessing(img: np.ndarray, methods: Optional[list[str]]) -> np.ndarray:
+    """按 methods 顺序应用图像预处理. RapidOCR 输入需要 3 通道, 所以
+    单通道操作 (灰度/二值) 完成后转回 BGR 保持兼容."""
+    if not methods:
+        return img
+    out = img.copy()
+    for m in methods:
+        if m == "grayscale":
+            if len(out.shape) == 3:
+                gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
+                out = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        elif m == "clahe":
+            # 仅在 LAB 的 L 通道做 CLAHE, 保留色彩
+            if len(out.shape) == 3:
+                lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                l_eq = clahe.apply(l)
+                out = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
+        elif m == "binarize":
+            gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY) if len(out.shape) == 3 else out
+            _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            out = cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
+        elif m == "sharpen":
+            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+            out = cv2.filter2D(out, -1, kernel)
+        elif m == "invert":
+            out = cv2.bitwise_not(out)
+    return out
 
 
 @router.post("/api/roi/test_ocr")
@@ -179,6 +213,9 @@ async def roi_test_ocr(req: TestOcrReq):
         crop_big = cv2.resize(crop, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     else:
         crop_big = crop
+
+    # 预处理 (放大后再做, 避免锐化/二值化失真; 灰度可放在前)
+    crop_big = _apply_preprocessing(crop_big, req.preprocessing)
 
     # OCR
     ocr_results = []

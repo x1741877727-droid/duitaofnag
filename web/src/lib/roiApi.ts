@@ -31,12 +31,15 @@ export interface OcrHit {
   cy: number
 }
 
+export type Preprocessing = 'grayscale' | 'clahe' | 'binarize' | 'sharpen' | 'invert'
+
 export interface RoiTestOcrReq {
   instance?: number
   decision_id?: string
   session?: string
   rect: [number, number, number, number]
   scale: number
+  preprocessing?: Preprocessing[]
 }
 
 export interface RoiTestOcrResp {

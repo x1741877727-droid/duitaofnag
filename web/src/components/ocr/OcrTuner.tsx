@@ -17,9 +17,17 @@ import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/lib/store'
 import {
   fetchRoiList, saveRoi, testRoiOcr,
-  type RoiItem, type OcrHit,
+  type RoiItem, type OcrHit, type Preprocessing,
 } from '@/lib/roiApi'
 import { RoiCanvas } from './RoiCanvas'
+
+const PREPROC_OPTIONS: { key: Preprocessing; label: string; hint: string }[] = [
+  { key: 'grayscale', label: '灰度化', hint: '消色彩噪声, 字纯色场景有用' },
+  { key: 'clahe',     label: '增强对比', hint: 'CLAHE 增强, 暗字 / 半透明字最有效' },
+  { key: 'sharpen',   label: '锐化',     hint: '边缘锐化, 抗锯齿模糊救字符边界' },
+  { key: 'binarize',  label: '二值化',   hint: 'Otsu 黑白, 极端但纯文字识别可飙升' },
+  { key: 'invert',    label: '反相',     hint: '白底黑字 ↔ 黑底白字, 看 OCR 偏好' },
+]
 
 type FrameSrc = { kind: 'instance'; idx: number } | { kind: 'decision'; session: string; id: string } | null
 
@@ -33,6 +41,7 @@ export function OcrTuner() {
   const [editRect, setEditRect] = useState<[number, number, number, number]>([0, 0, 0, 0])
   const [editScale, setEditScale] = useState(1)
   const [editDesc, setEditDesc] = useState('')
+  const [editPreproc, setEditPreproc] = useState<Preprocessing[]>([])
 
   // 抓帧来源 + 抓回的图
   const [src, setSrc] = useState<FrameSrc>(null)
@@ -72,9 +81,14 @@ export function OcrTuner() {
     setEditRect(it.rect)
     setEditScale(it.scale)
     setEditDesc(it.desc)
-    setOcrHits([])           // 切 ROI 清掉旧的 OCR 结果
+    setEditPreproc([])         // 预处理目前不存 yaml, 切 ROI 重置
+    setOcrHits([])             // 切 ROI 清掉旧的 OCR 结果
     setCroppedImg('')
     setHint('')
+  }
+
+  function togglePreproc(key: Preprocessing) {
+    setEditPreproc((cur) => cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key])
   }
 
   async function grabFrame() {
@@ -90,6 +104,7 @@ export function OcrTuner() {
         ...(src.kind === 'instance' ? { instance: src.idx } : { decision_id: src.id, session: src.session }),
         rect: editRect,
         scale: editScale,
+        preprocessing: editPreproc.length > 0 ? editPreproc : undefined,
       })
       setFullImg(r.full_image_b64)
       setCroppedImg(r.cropped_image_b64)
@@ -117,6 +132,7 @@ export function OcrTuner() {
         ...(src.kind === 'instance' ? { instance: src.idx } : { decision_id: src.id, session: src.session }),
         rect: editRect,
         scale: editScale,
+        preprocessing: editPreproc.length > 0 ? editPreproc : undefined,
       })
       setFullImg(r.full_image_b64)
       setCroppedImg(r.cropped_image_b64)
@@ -320,7 +336,41 @@ export function OcrTuner() {
                 className="w-full"
               />
               <div className="text-[10px] text-muted-foreground">
-                小文字必须放大. 默认 2-3, 极小字试 4-5.
+                小文字必须放大. 默认 2-3, 极小字试 4-5. 大字反而别放大.
+              </div>
+            </div>
+
+            {/* 图像预处理 */}
+            <div>
+              <div className="text-xs font-semibold mb-1">
+                图像预处理 ({editPreproc.length})
+              </div>
+              <div className="space-y-1">
+                {PREPROC_OPTIONS.map((opt) => {
+                  const checked = editPreproc.includes(opt.key)
+                  return (
+                    <label
+                      key={opt.key}
+                      className={`flex items-start gap-2 px-1.5 py-1 rounded cursor-pointer text-[11px] ${
+                        checked ? 'bg-info/10' : 'hover:bg-muted'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => togglePreproc(opt.key)}
+                        className="mt-0.5"
+                      />
+                      <div className="flex-1">
+                        <div className="font-semibold">{opt.label}</div>
+                        <div className="text-muted-foreground text-[10px] leading-snug">{opt.hint}</div>
+                      </div>
+                    </label>
+                  )
+                })}
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-1 leading-relaxed">
+                按勾选顺序应用. 调出最优组合后告我, 我加进生产 OCR 代码.
               </div>
             </div>
 
