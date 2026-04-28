@@ -793,25 +793,66 @@ class SingleInstanceRunner:
         h_img, w = shot.shape[:2]
 
         # ── 一次性提取所有目标 ──
+        # 优先用 ROI 化路径 (yaml 里配了 map_panel_left_tabs / list_center / right_btns 才走);
+        # ROI 没配 → 回退到全屏 OCR + 位置百分比筛选 (老路径).
         team_battle_hit = None
         map_hit = None
         fill_hit = None
         confirm_hit = None
-        is_team_battle = False
-
         all_text = " ".join(h.text for h in hits)
-        for h in hits:
-            if "团队竞技" in h.text and h.cx < w * 0.16:
-                team_battle_hit = h
-            if "确定" in h.text and h.cx > w * 0.78:
-                confirm_hit = h
-            if "补位" in h.text:
-                fill_hit = h
-            if not map_hit:
-                for kw in map_keywords:
-                    if kw in h.text:
-                        map_hit = h
+
+        # ROI 化路径 (用 yaml 命名 ROI 精准切分)
+        roi_used = False
+        try:
+            from .roi_config import all_names as _roi_all_names
+            avail = set(_roi_all_names())
+            if {"map_panel_left_tabs", "map_panel_list_center", "map_panel_right_btns"} <= avail:
+                roi_used = True
+                left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs")
+                center_hits = ocr._ocr_roi_named(shot, "map_panel_list_center")
+                right_hits = ocr._ocr_roi_named(shot, "map_panel_right_btns")
+                # 团竞 tab 在左侧
+                for h in left_hits:
+                    if "团队竞技" in h.text:
+                        team_battle_hit = h
                         break
+                # 地图在中间
+                for h in center_hits:
+                    if not map_hit:
+                        for kw in map_keywords:
+                            if kw in h.text:
+                                map_hit = h
+                                break
+                # 确定 / 补位 在右侧
+                for h in right_hits:
+                    if "确定" in h.text:
+                        confirm_hit = h
+                    if "补位" in h.text:
+                        fill_hit = h
+                logger.info(
+                    f"[阶段6] ROI 化路径: 左={len(left_hits)} 中={len(center_hits)} 右={len(right_hits)} "
+                    f"team_battle={'Y' if team_battle_hit else 'N'} "
+                    f"map={'Y' if map_hit else 'N'} confirm={'Y' if confirm_hit else 'N'}"
+                )
+                # all_text 仍用全屏 hits 算 (用于 is_team_battle 模糊匹配)
+        except Exception as _e:
+            logger.debug(f"[阶段6] ROI 路径失败 ({_e}), 回退全屏 OCR")
+            roi_used = False
+
+        # 全屏 OCR + 位置筛选 (回退路径, 跟之前完全一致)
+        if not roi_used:
+            for h in hits:
+                if "团队竞技" in h.text and h.cx < w * 0.16:
+                    team_battle_hit = h
+                if "确定" in h.text and h.cx > w * 0.78:
+                    confirm_hit = h
+                if "补位" in h.text:
+                    fill_hit = h
+                if not map_hit:
+                    for kw in map_keywords:
+                        if kw in h.text:
+                            map_hit = h
+                            break
 
         # 判断是否已在团竞模式：多种特征词任一命中（模糊匹配）
         team_battle_keywords = ["团竞手册", "团竞详情", "军备团竞", "经典团竞",
