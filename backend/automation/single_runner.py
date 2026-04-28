@@ -1506,15 +1506,58 @@ class SingleInstanceRunner:
             shot = await self.adb.screenshot()
             if shot is None:
                 break
+            # 已回大厅 → 完成
             if self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7) \
                or self.matcher.match_one(shot, "lobby_start_game", threshold=0.7):
                 closed = True
                 break
+
+            # ① 优先用专门裁的 zuduima_close 模板 (组队码面板的 X 按钮)
+            zd_hit = None
+            try:
+                zd_hit = self.matcher.match_one(shot, "zuduima_close", threshold=0.7)
+            except Exception:
+                zd_hit = None
+            if zd_hit:
+                last_close_hit = zd_hit
+                last_method = "模板·zuduima_close"
+                logger.info(f"[阶段4] 关闭(zuduima_close) ({zd_hit.cx},{zd_hit.cy}) conf={zd_hit.confidence:.2f}")
+                if d5:
+                    d5.set_tap(int(zd_hit.cx), int(zd_hit.cy), method="模板",
+                               target_class="组队码面板X", target_conf=float(zd_hit.confidence),
+                               screenshot=shot)
+                await self.adb.tap(zd_hit.cx, zd_hit.cy)
+                await asyncio.sleep(0.3)
+                continue
+
+            # ② YOLO 兜底找 close_x
+            yolo_hit = None
+            try:
+                from .yolo_detector import detect_buttons, is_available as _yolo_avail
+                if _yolo_avail():
+                    dets = detect_buttons(shot, names=["close_x"], conf_thr=0.4)
+                    if dets:
+                        yolo_hit = dets[0]
+            except Exception:
+                yolo_hit = None
+            if yolo_hit is not None:
+                ycx, ycy = yolo_hit.center_px
+                last_method = f"YOLO·close_x ({yolo_hit.score:.2f})"
+                logger.info(f"[阶段4] 关闭(YOLO close_x) ({ycx},{ycy}) score={yolo_hit.score:.2f}")
+                if d5:
+                    d5.set_tap(int(ycx), int(ycy), method="YOLO",
+                               target_class="close_x", target_conf=float(yolo_hit.score),
+                               screenshot=shot)
+                await self.adb.tap(ycx, ycy)
+                await asyncio.sleep(0.3)
+                continue
+
+            # ③ 通用 close_x 模板组 (find_dialog_close 内含多种 close_x_* 模板)
             close = self.matcher.find_dialog_close(shot)
             if close:
                 last_close_hit = close
-                last_method = "模板·close_x"
-                logger.info(f"[阶段4] 关闭按钮 ({close.cx},{close.cy})")
+                last_method = "模板·close_x(any)"
+                logger.info(f"[阶段4] 关闭(通用 close_x) ({close.cx},{close.cy})")
                 if d5:
                     d5.set_tap(int(close.cx), int(close.cy), method="模板",
                                target_class="关闭按钮", target_conf=float(close.confidence),
@@ -1522,11 +1565,12 @@ class SingleInstanceRunner:
                 await self.adb.tap(close.cx, close.cy)
                 await asyncio.sleep(0.3)
                 continue
+
+            # ④ 全部 miss → 兜底点面板外空白
             h_img, w_img = shot.shape[:2]
             tap_x, tap_y = w_img * 3 // 4, h_img // 2
-            last_method = "外部空白"
+            last_method = "外部空白(兜底)"
             if d5 and last_close_hit is None:
-                # 第一次 fallback 也记一次 set_tap, 让档案能看到点哪
                 d5.set_tap(int(tap_x), int(tap_y), method="空白",
                            target_class="面板外空白(兜底)", screenshot=shot)
             await self.adb.tap(tap_x, tap_y)
