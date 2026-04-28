@@ -1234,18 +1234,24 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 1: P3a-1-open  找"组队"入口并点击
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        import time as _tm
+        _p3a_t0 = _tm.perf_counter()
         d1 = _make_d("1-open")
         if d1 and shot is not None:
             d1.set_input(shot, q=70)
         clicked = False
         last_left_hits: list = []
         for attempt in range(3):
+            _pt_shot = _tm.perf_counter()
             shot = await self.adb.screenshot()
+            logger.info(f"[P3a-1 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
             self.dbg.log_screenshot(shot, f"attempt{attempt}")
+            _pt_ocr = _tm.perf_counter()
             left_hits = ocr._ocr_roi_named(shot, "team_btn_left")
+            logger.info(f"[P3a-1 PERF] attempt {attempt+1}: OCR team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_left_hits = left_hits
             self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
             # 主匹配: 文字含 "组" 或 "队" 都算 (用户要求放宽, OCR 经常把"组队" → "如WB"
@@ -1281,6 +1287,7 @@ class SingleInstanceRunner:
             if clicked:
                 break
             await asyncio.sleep(0.5)
+        logger.info(f"[P3a-1 PERF] 总 (找组队按钮): {(_tm.perf_counter()-_p3a_t0)*1000:.0f}ms, 尝试 {attempt+1} 次")
 
         if d1:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
@@ -1291,9 +1298,11 @@ class SingleInstanceRunner:
                      f"识别 {len(last_left_hits)} 文字",
                 ocr_hits=_hits_d,
             )
+            _pt_save = _tm.perf_counter()
             d1.add_tier(tier1)
             d1.save_ocr_roi(tier1, shot, roi=_roi_pixels("team_btn_left", shot),
                             hits=_hits_d)
+            logger.info(f"[P3a-1 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
             d1.finalize(outcome="opened" if clicked else "failed",
                         note="点开组队界面" if clicked else "找不到组队按钮")
         if not clicked:
@@ -1304,15 +1313,22 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 2: P3a-2-tab  切"组队码" tab (中部弹窗处理在此 tier 里)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        _pt_sleep = _tm.perf_counter()
         await asyncio.sleep(0.8)  # 等面板动画
+        logger.info(f"[P3a-2 PERF] 等面板动画 sleep: {(_tm.perf_counter()-_pt_sleep)*1000:.0f}ms")
         d2 = _make_d("2-tab")
+        _pt_shot = _tm.perf_counter()
         shot_d2 = await self.adb.screenshot()
+        logger.info(f"[P3a-2 PERF] 入口 screenshot: {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
         if d2 and shot_d2 is not None:
             d2.set_input(shot_d2, q=70)
+        _p3a2_t0 = _tm.perf_counter()
         tab_clicked = False
         last_bottom_hits: list = []
         for attempt in range(5):
+            _pt_shot = _tm.perf_counter()
             shot = await self.adb.screenshot() if attempt > 0 else shot_d2
+            logger.info(f"[P3a-2 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
@@ -1320,7 +1336,9 @@ class SingleInstanceRunner:
             # 直接 OCR 底部"组队码" tab. 之前的中部"使用组队码加入"弹窗检测删了
             # (实测从来不命中, 311K 像素的 OCR 每次浪费 ~2-3s).
             # 如果某天真撞到那个弹窗, 这 5 次 retry 都会找不到 tab → P3a-2 fail.
+            _pt_ocr = _tm.perf_counter()
             bottom_hits = ocr._ocr_roi_named(shot, "team_code_tab_bottom")
+            logger.info(f"[P3a-2 PERF] attempt {attempt+1}: OCR team_code_tab_bottom {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(bottom_hits)} 文字)")
             last_bottom_hits = bottom_hits
             for h in bottom_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队码"):
@@ -1335,6 +1353,7 @@ class SingleInstanceRunner:
             if tab_clicked:
                 break
             await asyncio.sleep(0.3)
+        logger.info(f"[P3a-2 PERF] 总 (loop): {(_tm.perf_counter()-_p3a2_t0)*1000:.0f}ms")
 
         if d2:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
@@ -1344,10 +1363,12 @@ class SingleInstanceRunner:
                 tier=3, name="OCR·team_code_tab_bottom", early_exit=tab_clicked,
                 note=note, ocr_hits=_hits_d,
             )
+            _pt_save = _tm.perf_counter()
             d2.add_tier(tier2)
             d2.save_ocr_roi(tier2, shot,
                             roi=_roi_pixels("team_code_tab_bottom", shot),
                             hits=_hits_d)
+            logger.info(f"[P3a-2 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
             d2.finalize(outcome="tab_switched" if tab_clicked else "failed",
                         note=note)
         if not tab_clicked:
@@ -1365,12 +1386,17 @@ class SingleInstanceRunner:
             d3.set_input(shot_d3, q=70)
         qr_clicked = False
         last_qr_hits: list = []
+        _p3a3_t0 = _tm.perf_counter()
         for attempt in range(4):
+            _pt_shot = _tm.perf_counter()
             shot = await self.adb.screenshot() if attempt > 0 else shot_d3
+            logger.info(f"[P3a-3 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
+            _pt_ocr = _tm.perf_counter()
             left_hits = ocr._ocr_roi_named(shot, "qr_team_btn_left")
+            logger.info(f"[P3a-3 PERF] attempt {attempt+1}: OCR qr_team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_qr_hits = left_hits
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "二维码"):
@@ -1385,6 +1411,7 @@ class SingleInstanceRunner:
             if qr_clicked:
                 break
             await asyncio.sleep(0.3)
+        logger.info(f"[P3a-3 PERF] 总 (找二维码组队): {(_tm.perf_counter()-_p3a3_t0)*1000:.0f}ms")
 
         if d3:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
@@ -1394,10 +1421,12 @@ class SingleInstanceRunner:
                 note=f"找'二维码组队', 命中={qr_clicked}",
                 ocr_hits=_hits_d,
             )
+            _pt_save = _tm.perf_counter()
             d3.add_tier(tier3)
             d3.save_ocr_roi(tier3, shot,
                             roi=_roi_pixels("qr_team_btn_left", shot),
                             hits=_hits_d)
+            logger.info(f"[P3a-3 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
             d3.finalize(outcome="qr_opened" if qr_clicked else "failed",
                         note=tier3.note)
         if not qr_clicked:
