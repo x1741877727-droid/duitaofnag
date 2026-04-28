@@ -734,7 +734,7 @@ class SingleInstanceRunner:
     async def phase_map_setup(self) -> bool:
         """队长设置地图和模式. 拆 5 条独立子 decision (每条有图+tier+tap), 像 P2 清弹窗一样档案能逐条点开看."""
         import time as _t
-        from .decision_log import get_recorder, TierRecord
+        from .decision_log import get_recorder, TierRecord, TemplateMatch, OcrHit as _OcrHit
 
         self._stage_log = []
         _t0 = _t.perf_counter()
@@ -798,9 +798,11 @@ class SingleInstanceRunner:
                 d1.add_tier(TierRecord(
                     tier=0, name="模板·lobby_start_btn", early_exit=True,
                     note=f"模板命中 conf={hit.confidence:.2f}, cx={hit.cx} cy={hit.cy}",
-                    templates=[{"name": "lobby_start_btn",
-                                "score": float(hit.confidence),
-                                "cx": int(hit.cx), "cy": int(hit.cy)}],
+                    templates=[TemplateMatch(
+                        name="lobby_start_btn", score=float(hit.confidence),
+                        hit=True, bbox=[int(hit.cx - hit.w/2), int(hit.cy - hit.h/2),
+                                        int(hit.cx + hit.w/2), int(hit.cy + hit.h/2)],
+                    )],
                 ))
                 d1.set_tap(int(hit.cx), int(hit.cy + 60), method="模板",
                            target_class="开始游戏(下方模式名)",
@@ -816,7 +818,8 @@ class SingleInstanceRunner:
                 d1.add_tier(TierRecord(
                     tier=3, name="OCR·全屏",
                     note=f"模板没命中 → OCR 找'开始游戏' (识别 {len(ocr_hits)} 文字)",
-                    ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in ocr_hits[:30]],
+                    ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                       cx=h.cx, cy=h.cy) for h in ocr_hits[:30]],
                 ))
             if found:
                 if d1:
@@ -874,7 +877,8 @@ class SingleInstanceRunner:
             d2.add_tier(TierRecord(
                 tier=3, name="OCR·left_tabs", early_exit=is_team_battle,
                 note=f"找团竞 tab. 已在团竞={is_team_battle}. 列表 {len(list_hits)} 文字含目标关键词={any(kw in h.text for h in list_hits for kw in map_keywords)}",
-                ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in left_hits[:15]],
+                ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                  cx=h.cx, cy=h.cy) for h in left_hits[:15]],
             ))
 
         if not is_team_battle:
@@ -959,7 +963,10 @@ class SingleInstanceRunner:
                 d3.add_tier(TierRecord(
                     tier=3, name="OCR·list_center", early_exit=True,
                     note=f"找到 '{map_hit.text}' (匹配 {map_keywords})",
-                    ocr_hits=[{"text": map_hit.text, "cx": map_hit.cx, "cy": map_hit.cy}],
+                    ocr_hits=[_OcrHit(text=map_hit.text,
+                                       bbox=[map_hit.cx-30, map_hit.cy-15,
+                                             map_hit.cx+30, map_hit.cy+15],
+                                       cx=map_hit.cx, cy=map_hit.cy)],
                 ))
                 d3.set_tap(int(map_hit.cx), int(map_hit.cy), method="OCR",
                            target_class="地图", target_text=map_hit.text, screenshot=shot)
@@ -972,7 +979,8 @@ class SingleInstanceRunner:
                 d3.add_tier(TierRecord(
                     tier=3, name="OCR·list_center",
                     note=f"未找到 '{self.target_map}' (关键词 {map_keywords})",
-                    ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in list_hits[:30]],
+                    ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                       cx=h.cx, cy=h.cy) for h in list_hits[:30]],
                 ))
                 d3.finalize(outcome="map_not_found", note=f"找不到 '{self.target_map}'")
             _slog(f"[阶段6] 找不到地图 '{self.target_map}'")
@@ -1031,9 +1039,14 @@ class SingleInstanceRunner:
                 d5.add_tier(TierRecord(
                     tier=0, name="模板·btn_1", early_exit=True,
                     note=f"确定按钮模板命中 conf={confirm_tmpl.confidence:.2f}",
-                    templates=[{"name": "btn_1",
-                                "score": float(confirm_tmpl.confidence),
-                                "cx": int(confirm_tmpl.cx), "cy": int(confirm_tmpl.cy)}],
+                    templates=[TemplateMatch(
+                        name="btn_1", score=float(confirm_tmpl.confidence),
+                        hit=True,
+                        bbox=[int(confirm_tmpl.cx - confirm_tmpl.w/2),
+                              int(confirm_tmpl.cy - confirm_tmpl.h/2),
+                              int(confirm_tmpl.cx + confirm_tmpl.w/2),
+                              int(confirm_tmpl.cy + confirm_tmpl.h/2)],
+                    )],
                 ))
                 d5.set_tap(int(confirm_tmpl.cx), int(confirm_tmpl.cy),
                            method="模板", target_class="确定",
@@ -1049,7 +1062,8 @@ class SingleInstanceRunner:
                 d5.add_tier(TierRecord(
                     tier=3, name="OCR·全屏",
                     note=f"模板没命中 → OCR 兜底找'确定' (右侧 cx>{int(w_img*0.78)})",
-                    ocr_hits=[{"text": h.text, "cx": h.cx, "cy": h.cy} for h in full[:30]],
+                    ocr_hits=[_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
+                                       cx=h.cx, cy=h.cy) for h in full[:30]],
                 ))
             if confirm_hit:
                 if d5:
