@@ -131,6 +131,9 @@ class SingleInstanceRunner:
         self._v3_lobby_detector = None
         self._v3_recognizer = None
 
+        # phase 中间步骤日志 (每个 phase 跑前清空, 跑完 P4Handler 等读出来塞 decision.note)
+        self._stage_log: list[str] = []
+
     def _build_v3_ctx(self):
         """构造 v3 RunContext (lazy, 缓存)."""
         if self._v3_ctx is not None:
@@ -730,8 +733,16 @@ class SingleInstanceRunner:
     @_timed_phase("map_setup")
     async def phase_map_setup(self) -> bool:
         """队长设置地图和模式（OCR驱动，单次扫描提取所有目标）"""
+        import time as _t
+        self._stage_log = []                # 清空, 收集本次 P4 的中间步骤
+        _t0 = _t.perf_counter()
+        def _slog(msg: str):
+            """同时写 logger + 收集到 _stage_log (后续塞 decision.note)"""
+            logger.info(msg)
+            self._stage_log.append(msg)
+
         self.phase = Phase.MAP_SETUP
-        logger.info(f"[阶段6] 地图设置: {self.target_mode} - {self.target_map}")
+        _slog(f"[阶段6] 地图设置: {self.target_mode} - {self.target_map}")
 
         # 禁用守卫（地图面板的关闭按钮会被守卫误判为弹窗）
         if hasattr(self.adb, 'guard_enabled'):
@@ -756,17 +767,17 @@ class SingleInstanceRunner:
         hit = self.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
         if hit:
             await self.adb.tap(hit.cx, hit.cy + 60)
-            logger.info(f"[阶段6] 模板定位，点击模式名 ({hit.cx},{hit.cy + 60})")
+            _slog(f"[阶段6] 模板定位'开始游戏', tap 模式名 ({hit.cx},{hit.cy + 60}) conf={hit.confidence:.2f}")
         else:
             # OCR 兜底找"开始游戏"
             hits = ocr._ocr_all(shot)
             for h in hits:
                 if "开始游戏" in h.text:
                     await self.adb.tap(h.cx, h.cy + 60)
-                    logger.info(f"[阶段6] OCR定位，点击模式名 ({h.cx},{h.cy + 60})")
+                    _slog(f"[阶段6] OCR 兜底定位'开始游戏', tap ({h.cx},{h.cy + 60})")
                     break
             else:
-                logger.error("[阶段6] 找不到'开始游戏'按钮")
+                _slog("[阶段6] 找不到'开始游戏'按钮")
                 return False
 
         # ── 等面板打开: 简单粗暴 sleep 1s 然后跑一次 OCR (面板渲染很快, 1s 够了) ──
@@ -801,10 +812,10 @@ class SingleInstanceRunner:
 
         min_hits = 3 if has_list_roi else 20
         if len(hits) < min_hits:
-            logger.warning(f"[阶段6] 地图面板未打开 ({len(hits)} < {min_hits} 文字)")
+            _slog(f"[阶段6] 地图面板未打开 ({len(hits)} < {min_hits} 文字)")
             self._restore_guard()
             return False
-        logger.info(
+        _slog(
             f"[阶段6] 面板已打开 ({len(hits)} 个文字, "
             f"{'list_center ROI' if has_list_roi else '全屏'})"
         )
@@ -847,10 +858,9 @@ class SingleInstanceRunner:
         # ── 切团竞模式 (顺序, 必须先确定 mode 才能进下一步) ──
         if not is_team_battle:
             if team_battle_hit:
-                logger.info(f"[阶段6] 切换到团队竞技 ({team_battle_hit.cx},{team_battle_hit.cy})")
+                _slog(f"[阶段6] 切换到团队竞技 tap ({team_battle_hit.cx},{team_battle_hit.cy})")
                 await self.adb.tap(team_battle_hit.cx, team_battle_hit.cy)
                 await asyncio.sleep(0.5)
-                # 切完后用 list_center ROI 重新拿 hits, 不再全屏 OCR
                 shot = await self.adb.screenshot()
                 if shot is not None:
                     if "map_panel_list_center" in avail_rois:
@@ -858,11 +868,11 @@ class SingleInstanceRunner:
                     else:
                         hits = ocr._ocr_all(shot)
             else:
-                logger.warning("[阶段6] 未找到团队竞技入口")
+                _slog("[阶段6] 未找到团队竞技入口")
                 self._restore_guard()
                 return False
         else:
-            logger.info("[阶段6] 已在团队竞技, 跳过切换")
+            _slog(f"[阶段6] 已在团队竞技 (识别到 {len(hits)} 个文字, 含目标地图关键词), 跳过切换")
 
         # ── 并发: 选地图 (在已有 hits 里找) + 补位 ROI 颜色检测 + 确定按钮 btn_1 模板 ──
         # 三个目标互相独立, asyncio.gather 并发. matcher.match_one 跑在 to_thread 不阻塞 loop.
@@ -900,7 +910,7 @@ class SingleInstanceRunner:
             tap_cx = (px1 + px2) // 2
             tap_cy = (py1 + py2) // 2
             avg_rgb = (int(r_ch.mean()), int(g_ch.mean()), int(b_ch.mean()))
-            logger.info(
+            _slog(
                 f"[阶段6] 补位 ROI 颜色检测: ROI=({px1},{py1})-({px2},{py2}) "
                 f"平均RGB={avg_rgb} 橙色={orange}/{total} ({ratio*100:.1f}%) 阈值=10%"
             )
@@ -930,42 +940,45 @@ class SingleInstanceRunner:
 
         # ── tap 顺序: 选地图 → 取消补位 (如已勾) → 点确定 ──
         if map_hit:
-            logger.info(f"[阶段6] 选择地图 '{map_hit.text}' ({map_hit.cx},{map_hit.cy})")
+            _slog(f"[阶段6] 选地图 '{map_hit.text}' tap ({map_hit.cx},{map_hit.cy})")
             await self.adb.tap(map_hit.cx, map_hit.cy)
             await asyncio.sleep(0.3)
         else:
-            logger.warning(f"[阶段6] 未找到目标地图 '{self.target_map}'")
+            _slog(f"[阶段6] 未找到目标地图 '{self.target_map}' (list_center 内 OCR 未匹配关键词 {map_keywords})")
 
         if fill_state is not None:
             ratio, tap_cx, tap_cy = fill_state
             if ratio > 0.10:
-                logger.info(f"[阶段6] 补位已开启 → 点击 ({tap_cx},{tap_cy})")
+                _slog(f"[阶段6] 补位已勾选 → tap ({tap_cx},{tap_cy}) 取消")
                 await self.adb.tap(tap_cx, tap_cy)
                 await asyncio.sleep(0.3)
             else:
-                logger.info(f"[阶段6] 补位已关闭 → 跳过 ({ratio*100:.1f}% < 10%)")
+                _slog(f"[阶段6] 补位未勾选 → 跳过 (橙色 {ratio*100:.1f}% < 10%)")
+        else:
+            _slog("[阶段6] map_panel_fill_checkbox ROI 未配置, 跳过补位检测")
 
         # 确定按钮 (用 btn_1 模板)
         if confirm_tmpl:
-            logger.info(f"[阶段6] 确定模板命中 ({confirm_tmpl.cx},{confirm_tmpl.cy}) conf={confirm_tmpl.confidence:.2f}")
+            _slog(f"[阶段6] 确定 btn_1 模板命中 ({confirm_tmpl.cx},{confirm_tmpl.cy}) conf={confirm_tmpl.confidence:.2f} → tap")
             await self.adb.tap(confirm_tmpl.cx, confirm_tmpl.cy)
         else:
             # 模板没命中, OCR 兜底找"确定"
-            logger.info("[阶段6] btn_1 模板没命中, OCR 兜底找确定")
+            _slog("[阶段6] btn_1 模板没命中, OCR 兜底找确定")
             full = ocr._ocr_all(shot)
             for h in full:
                 if "确定" in h.text and h.cx > w * 0.78:
-                    logger.info(f"[阶段6] OCR 兜底命中确定 ({h.cx},{h.cy})")
+                    _slog(f"[阶段6] OCR 兜底命中确定 tap ({h.cx},{h.cy})")
                     await self.adb.tap(h.cx, h.cy)
                     break
             else:
-                logger.warning("[阶段6] 找不到确定按钮")
+                _slog("[阶段6] 找不到确定按钮")
 
         # 恢复守卫
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = True
 
-        logger.info("[阶段6] 地图设置完成 ✓")
+        _t1 = _t.perf_counter()
+        _slog(f"[阶段6] 完成 ✓ 总耗时 {(_t1 - _t0)*1000:.0f}ms")
         return True
 
     # ================================================================

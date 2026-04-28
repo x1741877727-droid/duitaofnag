@@ -43,12 +43,18 @@ class P4MapSetupHandler(PhaseHandler):
             return PhaseStep(PhaseResult.FAIL, note=f"map_setup 异常: {e}",
                              outcome_hint="map_setup_exception")
 
+        # 把每步中间数据 (runner._stage_log) 塞 decision.note, 让档案能看 OCR/模板细节
+        steps = getattr(runner, "_stage_log", [])
+        steps_note = "\n".join(steps) if steps else ""
+
         if ok:
             record_signal_tier(decision, name="OCR地图", hit=True, tier_idx=3,
-                               note="map_setup 完成 (模式选好 + 地图选好 + 准备开打)")
-            return PhaseStep(PhaseResult.DONE, note="map_setup 完成",
+                               note=steps_note or "map_setup 完成")
+            return PhaseStep(PhaseResult.DONE,
+                             note=steps_note or "map_setup 完成",
                              outcome_hint="map_setup_ok")
         record_signal_tier(decision, name="OCR地图", hit=False, tier_idx=3,
-                           note="map_setup 返回 False")
-        return PhaseStep(PhaseResult.FAIL, note="map_setup 失败",
+                           note=steps_note or "map_setup 返回 False")
+        return PhaseStep(PhaseResult.FAIL,
+                         note=steps_note or "map_setup 失败",
                          outcome_hint="map_setup_fail")
