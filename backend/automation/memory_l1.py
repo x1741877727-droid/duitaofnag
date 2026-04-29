@@ -527,9 +527,12 @@ class FrameMemory:
 
     def _load_pending_from_db(self) -> int:
         """启动时从 SQLite 恢复 _pending 字典. 返回恢复条数.
-        过期 (>TTL) 的不恢复并清掉表 + 快照."""
+        过期 (>TTL) 的不恢复并清掉表 + 快照.
+        重复 (median 坐标已在 frame_action canonical 里) 也直接清掉, 避免重复入库."""
+        SAME_ENTRY_XY_TOL = 10
         n_loaded = 0
         n_expired = 0
+        n_stale_dup = 0
         now = time.time()
         try:
             with self._lock:
@@ -537,6 +540,12 @@ class FrameMemory:
                     "SELECT pkey, target_name, phash, samples_json, ts_first "
                     "FROM pending_entries"
                 ))
+                # 同时拉 canonical 的 (target, x, y) 用于重复检测
+                canonical_xys = {}   # target → list[(x, y)]
+                for ctgt, cx, cy in self._db.execute(
+                    "SELECT target_name, action_x, action_y FROM frame_action WHERE archived=0"
+                ):
+                    canonical_xys.setdefault(ctgt, []).append((int(cx), int(cy)))
         except sqlite3.OperationalError:
             # 表不存在 (老 db) → schema 会建; 第一次没数据
             return 0
@@ -551,6 +560,22 @@ class FrameMemory:
                     continue
                 samples_raw = json.loads(samples_json or "[]")
                 samples = [tuple(s) for s in samples_raw]
+                # 算 median 坐标, 跟 canonical 比 — 如果已存在就丢这个 pending
+                if samples:
+                    xs = sorted(s[0] for s in samples)
+                    ys = sorted(s[1] for s in samples)
+                    mx = xs[len(xs) // 2]
+                    my = ys[len(ys) // 2]
+                    is_dup = False
+                    for cx, cy in canonical_xys.get(tgt, []):
+                        if abs(cx - mx) <= SAME_ENTRY_XY_TOL and abs(cy - my) <= SAME_ENTRY_XY_TOL:
+                            is_dup = True
+                            break
+                    if is_dup:
+                        self._cleanup_pending_snaps(pkey)
+                        self._remove_pending_entry(pkey)
+                        n_stale_dup += 1
+                        continue
                 self._pending[tgt].append({
                     "key": pkey,
                     "phash": int(ph_str),
@@ -563,6 +588,8 @@ class FrameMemory:
                 logger.debug(f"[memory_l1] load pending row {pkey} 失败: {exc}")
         if n_expired:
             logger.info(f"[memory_l1] 启动清掉 {n_expired} 条过期 pending (>{PENDING_TTL_S}s)")
+        if n_stale_dup:
+            logger.info(f"[memory_l1] 启动清掉 {n_stale_dup} 条 stale pending (median 坐标已在 canonical 内)")
         return n_loaded
 
     def _pending_add(self, target: str, phs: int, x: int, y: int,
@@ -802,20 +829,24 @@ class FrameMemory:
         anchor_ph = _compute_anchor_phash(frame, x, y)
 
         with self._lock:
-            # 找已存在条目 — 双判据 (任一命中即视为同条目, 走 UPDATE 而非新增 pending):
-            #   1) phash 距离 ≤ PENDING_PHASH_TOL (12)  — 整图相似
-            #   2) anchor_phash 距离 ≤ ANCHOR_PHASH_DIST_THRESHOLD (6)  — 点击区域相似
-            #      解决: 弹窗整体变 (红点 / 公告内容 / 时间戳) 但点同一位置时, 老逻辑
-            #      phash<3 失败 → 走蓄水池 → 5 次后 commit 成新条目 → 同坐标多条 (#2/#4
-            #      在 (899,53) 即此原因).
+            # 找已存在条目 — 主判据 = 坐标 (±SAME_ENTRY_XY_TOL=10px), 兜底判据 = phash/anchor.
+            # 思路: 同 target + 同坐标 = 同弹窗按钮 (不同弹窗刚好落同 ±10px 概率极低,
+            #   接受). phash / anchor 是补强信号, 老条目没 anchor 也能照常合并.
+            #   解决: 弹窗整体变 (红点动画 / 公告内容 / 时间戳) phash 漂 > 12, 老 #1
+            #   anchor 字段空 → 之前用 phash<3 / phash<=12 都失败 → 走蓄水池 → 5 次
+            #   后 commit 成同坐标重复条目 (例: #2/#4 都在 (899,53)).
+            SAME_ENTRY_XY_TOL = 10
             existing = None
+            existing_needs_anchor_backfill = False
             for row in self._db.execute(
-                "SELECT id, phash, anchor_phash, snapshot_path, history_json, archived "
+                "SELECT id, phash, anchor_phash, action_x, action_y, "
+                "       snapshot_path, history_json, archived "
                 "FROM frame_action "
                 "WHERE target_name = ? AND ABS(action_x - ?) < ? AND ABS(action_y - ?) < ?",
                 (target_name, x, PENDING_XY_TOL, y, PENDING_XY_TOL),
             ):
-                rid, ph_s, anch_s, snap, hist_j, arch = row
+                rid, ph_s, anch_s, ox, oy, snap, hist_j, arch = row
+                xy_close = abs(int(ox) - x) <= SAME_ENTRY_XY_TOL and abs(int(oy) - y) <= SAME_ENTRY_XY_TOL
                 phash_close = _hamming(int(ph_s), ph) <= PENDING_PHASH_TOL
                 anchor_close = False
                 if anch_s and anch_s != "0" and anch_s != "":
@@ -823,8 +854,11 @@ class FrameMemory:
                         anchor_close = _hamming(int(anch_s), anchor_ph) <= ANCHOR_PHASH_DIST_THRESHOLD
                     except Exception:
                         pass
-                if phash_close or anchor_close:
+                if xy_close or phash_close or anchor_close:
                     existing = (rid, snap or "", hist_j or "[]", arch)
+                    # 老条目无 anchor → 顺手回填, 让 query() 后续能用 anchor 路径
+                    if (not anch_s or anch_s in ("0", "")) and anchor_ph:
+                        existing_needs_anchor_backfill = True
                     break
 
             if existing is not None:
@@ -846,6 +880,13 @@ class FrameMemory:
                         "last_seen_ts=?, history_json=? WHERE id=?",
                         (ts, new_history, rid),
                     )
+                # 顺手回填老条目 anchor_phash (让 query() 后续走 anchor 路径)
+                if existing_needs_anchor_backfill:
+                    self._db.execute(
+                        "UPDATE frame_action SET anchor_phash=? WHERE id=?",
+                        (str(anchor_ph), rid),
+                    )
+                    logger.info(f"[memory_l1] 回填 anchor_phash to id={rid} (老条目无 anchor)")
                 self._db.commit()
                 # 标的记忆改了, 让 LRU 失效
                 self._lru[target_name].invalidate_all()
