@@ -282,6 +282,25 @@ _MIGRATIONS = [
 
 
 # ────────────────────────────────────────────────────────────────────
+# 进程级 singleton — 同一 db_path 全局共享一个 FrameMemory 实例.
+# 关键: 蓄水池 / LRU / BKTree 都是 in-memory, 多实例化会让 5-confirm 累积归零.
+# api_memory / single_runner / 各 test_phase 都用 get_shared_memory() 拿同一个实例.
+# ────────────────────────────────────────────────────────────────────
+
+_SHARED_INSTANCES: dict = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def get_shared_memory(db_path) -> "FrameMemory":
+    """按 db_path 返回 singleton FrameMemory (同 path 共享一个实例)."""
+    key = str(Path(db_path).resolve())
+    with _SHARED_LOCK:
+        if key not in _SHARED_INSTANCES:
+            _SHARED_INSTANCES[key] = FrameMemory(db_path)
+        return _SHARED_INSTANCES[key]
+
+
+# ────────────────────────────────────────────────────────────────────
 # 主类
 # ────────────────────────────────────────────────────────────────────
 
@@ -811,7 +830,43 @@ class FrameMemory:
             "lru_size": sum(len(c.data) for c in self._lru.values()),
             "pending_size": sum(len(b) for b in self._pending.values()),
             "bktree_targets": len(self._bktree),
+            "pending_confirmation_count": PENDING_CONFIRMATION_COUNT,
         }
+
+    def pending_detail(self, target: str = "") -> list[dict]:
+        """蓄水池里"待 commit"的条目, 让用户在前端能看到学习进度.
+        每条:
+            target_name / phash / sample_count / xs / ys / ts_first / age_s
+        """
+        out: list[dict] = []
+        now = time.time()
+        for tgt, bucket in self._pending.items():
+            if target and tgt != target:
+                continue
+            for e in bucket:
+                xs = [s[0] for s in e["samples"]]
+                ys = [s[1] for s in e["samples"]]
+                # 中位预估
+                if xs:
+                    sx = sorted(xs); sy = sorted(ys)
+                    mx, my = sx[len(sx)//2], sy[len(sy)//2]
+                else:
+                    mx = my = 0
+                std_x = ((sum((v-sum(xs)/len(xs))**2 for v in xs)/len(xs))**0.5) if xs else 0
+                std_y = ((sum((v-sum(ys)/len(ys))**2 for v in ys)/len(ys))**0.5) if ys else 0
+                out.append({
+                    "target_name": tgt,
+                    "phash": f"0x{e['phash']:016x}",
+                    "samples": len(e["samples"]),
+                    "needed": PENDING_CONFIRMATION_COUNT,
+                    "median_xy": [int(mx), int(my)],
+                    "std_x": round(std_x, 1),
+                    "std_y": round(std_y, 1),
+                    "max_std_allowed": PENDING_STD_MAX_PX,
+                    "ttl_s": int(PENDING_TTL_S - (now - e["ts_first"])),
+                    "age_s": round(now - e["ts_first"], 1),
+                })
+        return out
 
     # ──────── 兼容老 API (前端记忆库浏览用) ────────
 

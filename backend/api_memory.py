@@ -22,15 +22,16 @@ _memory_inst = None
 
 
 def _get_memory():
-    """单例: 跟主 runner 共享同一 db (user_data_dir/memory/dismiss_popups.db)."""
+    """单例: 跟主 runner 共享同一 FrameMemory (memory_l1.get_shared_memory).
+    必须用 shared 而不是自己 new, 否则蓄水池 / LRU / BKTree 各自独立, 学习记不住."""
     global _memory_inst
     if _memory_inst is not None:
         return _memory_inst
     try:
-        from .automation.memory_l1 import FrameMemory
+        from .automation.memory_l1 import get_shared_memory
         from .automation.user_paths import user_data_dir
         db_path = user_data_dir() / "memory" / "dismiss_popups.db"
-        _memory_inst = FrameMemory(db_path)
+        _memory_inst = get_shared_memory(db_path)
     except Exception as e:
         logger.warning(f"[api_memory] init err: {e}")
         _memory_inst = None
@@ -42,7 +43,9 @@ async def memory_stats():
     mem = _get_memory()
     if mem is None:
         return {"available": False, "error": "memory db 不可用"}
-    return {"available": True, **mem.stats()}
+    s = mem.stats()
+    s["pending"] = mem.pending_detail()
+    return {"available": True, **s}
 
 
 @router.get("/api/memory/list")

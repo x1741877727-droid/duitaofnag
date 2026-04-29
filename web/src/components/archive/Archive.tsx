@@ -262,46 +262,62 @@ function SessionView({
         </Button>
       </div>
 
-      {/* 实例进度 — 紧凑版 (一行 = 一实例, 6 阶段 stepper) */}
+      {/* 实例进度 — 卡片网格 (每实例 1 卡, 6 阶段圆点 + 当前 + 总决策数) */}
       {Object.keys(byInst).length > 0 && (
-        <div className="space-y-1">
+        <div
+          className="grid gap-2"
+          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
+        >
           {Object.keys(byInst).map(Number).sort((a, b) => a - b).map((idx) => {
             const p = progressByInst[idx]
+            const curIdx = PHASE_ORDER.indexOf(p?.current || '')
+            const isSelected = filterInst === idx
             return (
-              <div key={idx} className="flex items-center gap-2 text-[11px] py-0.5">
-                <span className="font-mono font-bold w-7 text-foreground shrink-0">#{idx}</span>
-                <div className="flex items-center gap-px flex-1">
+              <button
+                key={idx}
+                onClick={() => setFilterInst(idx === filterInst ? null : idx)}
+                className={`text-left rounded-lg border bg-card hover:bg-muted/30 transition p-2.5 ${
+                  isSelected ? 'border-primary shadow-sm ring-1 ring-primary/20' : 'border-border'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="font-mono font-bold text-sm">#{idx}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {p?.total || 0} 决策{(p?.toLobby || 0) > 0 && ` · 大厅 ${p.toLobby}`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 mb-1.5">
                   {PHASE_ORDER.map((ph, i) => {
                     const cnt = p?.counts[ph] || 0
                     const isCur = p?.current === ph
-                    const visited = cnt > 0
+                    const isPast = i < curIdx
                     return (
-                      <div key={ph} className="flex items-center gap-px flex-1">
+                      <div key={ph} className="flex items-center" title={`${PHASE_NAME[ph]}: ${cnt} 决策`}>
                         <div
-                          className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] flex-1 justify-center transition ${
+                          className={`w-2.5 h-2.5 rounded-full transition flex items-center justify-center ${
                             isCur
-                              ? 'bg-primary text-primary-foreground font-bold'
-                              : visited
-                                ? 'bg-success/15 text-success'
-                                : 'bg-muted text-muted-foreground'
+                              ? 'bg-primary animate-pulse'
+                              : cnt > 0 || isPast
+                                ? 'bg-success'
+                                : 'bg-muted-foreground/20'
                           }`}
-                          title={`${PHASE_NAME[ph]}: ${cnt} 决策${isCur ? ' (当前 ●)' : ''}`}
-                        >
-                          {isCur && <span className="w-1 h-1 rounded-full bg-primary-foreground animate-pulse" />}
-                          <span className="font-mono">{PHASE_NAME[ph]}</span>
-                          {cnt > 0 && <span className="opacity-70 font-mono">{cnt}</span>}
-                        </div>
+                        />
                         {i < PHASE_ORDER.length - 1 && (
-                          <span className={`text-muted-foreground/50 text-[8px]`}>›</span>
+                          <div className={`h-px w-2 ${
+                            cnt > 0 && i < curIdx ? 'bg-success' : 'bg-muted-foreground/15'
+                          }`} />
                         )}
                       </div>
                     )
                   })}
                 </div>
-                <span className="font-mono text-muted-foreground shrink-0 w-20 text-right">
-                  到大厅 {p?.toLobby || 0}
-                </span>
-              </div>
+                <div className="text-[11px] text-foreground/80 font-medium truncate">
+                  {p?.current ? `${PHASE_NAME[p.current]} 阶段` : '未开始'}
+                  {p?.current && (p?.counts[p.current] || 0) > 0 && (
+                    <span className="text-muted-foreground"> · 第 {p.counts[p.current]} 帧</span>
+                  )}
+                </div>
+              </button>
             )
           })}
         </div>
@@ -428,24 +444,61 @@ interface PhaseDocData {
   max_rounds: number
 }
 
+// 决策详情进程级缓存 (跨组件 mount 保留, 列表刷新不丢已加载数据)
+const _decisionCache = new Map<string, DecisionData>()
+
 function DecisionDetail({ decisionId, session }: { decisionId: string; session: string }) {
-  const [data, setData] = useState<DecisionData | null>(null)
-  const [loading, setLoading] = useState(false)
+  // SWR-style: 切换 id 时先用缓存的旧数据展示, 后台 revalidate
+  const [data, setData] = useState<DecisionData | null>(() => _decisionCache.get(decisionId) || null)
+  const [revalidating, setRevalidating] = useState(false)
+  const [retryAttempt, setRetryAttempt] = useState(0)   // 0=没重试 1-3=正在第N次重试
+  const [lastError, setLastError] = useState('')
   const [lightboxSrc, setLightboxSrc] = useState<string>('')
   const [phaseDoc, setPhaseDoc] = useState<PhaseDocData | null>(null)
 
   useEffect(() => {
     if (!decisionId) {
-      setData(null)
+      setData(null); setLastError(''); setRetryAttempt(0)
       return
     }
     let cancelled = false
-    setLoading(true)
-    fetchDecisionData(decisionId, session)
-      .then((d) => { if (!cancelled) setData(d) })
-      .catch(() => { if (!cancelled) setData(null) })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+    let retryTimer: number | undefined
+
+    // 先用缓存替换 (id 变了 → 新缓存 / 命中即 stale-but-shown)
+    const cached = _decisionCache.get(decisionId)
+    if (cached) setData(cached)
+    else setData(null)
+    setLastError(''); setRetryAttempt(0)
+    setRevalidating(true)
+
+    const tryFetch = (attempt: number) => {
+      if (cancelled) return
+      fetchDecisionData(decisionId, session)
+        .then((d) => {
+          if (cancelled) return
+          _decisionCache.set(decisionId, d)
+          setData(d); setLastError(''); setRetryAttempt(0); setRevalidating(false)
+        })
+        .catch((e) => {
+          if (cancelled) return
+          const msg = String(e?.message || e)
+          setLastError(msg)
+          // 决策可能正在写入 (404 / 不完整 JSON), 1.5s 后重试, 最多 3 次
+          if (attempt < 3) {
+            setRetryAttempt(attempt)
+            retryTimer = window.setTimeout(() => tryFetch(attempt + 1), 1500)
+          } else {
+            setRevalidating(false)
+            setRetryAttempt(0)
+          }
+        })
+    }
+    tryFetch(1)
+
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    }
   }, [decisionId, session])
 
   // 拉对应 phase 的 doc (description + flow_steps)
@@ -473,17 +526,29 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
       </div>
     )
   }
-  if (loading) {
+  // 没缓存数据 + 在重试 → "决策正在写入" 友好提示
+  if (!data && retryAttempt > 0) {
     return (
-      <div className="rounded-lg border border-border bg-card flex items-center justify-center text-sm text-muted-foreground">
-        加载中…
+      <div className="rounded-lg border border-border bg-card flex flex-col items-center justify-center gap-2 text-sm text-muted-foreground p-6">
+        <div className="text-warning">决策正在写入磁盘…</div>
+        <div className="text-xs">第 {retryAttempt}/3 次重试 (实时会话决策可能滞后)</div>
+      </div>
+    )
+  }
+  // 没缓存 + 重试也失败 (3 次后)
+  if (!data && lastError) {
+    return (
+      <div className="rounded-lg border border-border bg-card flex flex-col items-center justify-center gap-2 text-sm text-muted-foreground p-6">
+        <div className="text-destructive">加载失败</div>
+        <div className="text-xs font-mono break-all max-w-md">{lastError.slice(0, 200)}</div>
+        <div className="text-xs">如果是实时会话, 决策可能尚未写完, 稍后再点</div>
       </div>
     )
   }
   if (!data) {
     return (
       <div className="rounded-lg border border-border bg-card flex items-center justify-center text-sm text-muted-foreground">
-        加载失败
+        加载中…
       </div>
     )
   }

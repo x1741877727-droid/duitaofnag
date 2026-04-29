@@ -147,7 +147,10 @@ class SingleInstanceRunner:
 
         if self._v3_memory is None:
             try:
-                self._v3_memory = FrameMemory(user_data_dir() / "memory" / "dismiss_popups.db")
+                # 必须走 get_shared_memory 而不是 new FrameMemory, 否则跨 runner 实例
+                # 蓄水池 / LRU / BKTree 各自独立, 5-confirm 累积归零, 学不到记忆.
+                from .memory_l1 import get_shared_memory
+                self._v3_memory = get_shared_memory(user_data_dir() / "memory" / "dismiss_popups.db")
             except Exception as _e:
                 logger.warning(f"[v3] memory 初始化失败 (非致命): {_e}")
                 self._v3_memory = None
