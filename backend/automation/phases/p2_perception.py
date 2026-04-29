@@ -38,7 +38,9 @@ CLOSE_X_TEMPLATE_NAMES = (
 # 关弹窗类按钮模板 (没右上 X 但有底部"确定/同意/不需要"按钮的弹窗)
 # 这些都是关闭意图明确, 不会跳出大厅. 不能放: btn_confirm_map (P4 用), btn_join* (P3 用)
 DISMISS_BTN_TEMPLATE_NAMES = (
-    "btn_confirm",         # 通用"确定"
+    "queding2",            # "系统内存过低提醒"等单按钮 dialog 的"确定" (用户裁)
+    "queding",             # P4 也用, 但 P2 同样适用 — "确定"形状通用
+    "btn_confirm",         # 通用"确定" (旧, 可能不存在)
     "btn_confirm_privacy", # 隐私同意确定
     "btn_agree",           # 同意
     "btn_no_need",         # 不需要
