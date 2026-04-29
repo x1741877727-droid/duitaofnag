@@ -199,7 +199,7 @@ async def test_phase(req: TestPhaseReq):
         "role": req.role,
         "duration_ms": dur_ms,
         "decision_session": sess_name,
-        "fresh_runner": fresh,
+        "fresh_runner": runner is not None and svc._runners.get(int(req.instance)) is None,
         "error": error,
         "game_scheme_url": scheme_out,   # 队长 P3a 跑完后吐出, 给队员 P3b 用
     }
