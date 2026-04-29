@@ -324,10 +324,8 @@ async def template_original(name: str):
 # ─── /api/templates/stats/{name} ───
 
 
-@router.get("/api/templates/stats/{name}")
-async def template_stats(name: str, recent_sessions: int = Query(3, ge=1, le=20)):
-    """从最近 N 个 session 的 metrics.jsonl 聚合该模版的命中率统计."""
-    name = _safe_name(name)
+def _template_stats_sync(name: str, recent_sessions: int):
+    """扫 metrics.jsonl 聚合 — 重 IO 必须 to_thread."""
     try:
         from .automation.decision_log import get_recorder
         rec = get_recorder()
@@ -337,7 +335,6 @@ async def template_stats(name: str, recent_sessions: int = Query(3, ge=1, le=20)
     if logs_root is None or not logs_root.is_dir():
         return {"name": name, "sessions_scanned": 0, "match_count": 0, "hit_count": 0,
                 "hit_rate": 0.0, "avg_score": 0.0}
-    # 取最近 N 个 session
     sessions = []
     try:
         sessions = sorted(
@@ -380,6 +377,15 @@ async def template_stats(name: str, recent_sessions: int = Query(3, ge=1, le=20)
         "hit_rate": round(hit_rate, 3),
         "avg_score": round(avg_score, 3),
     }
+
+
+@router.get("/api/templates/stats/{name}")
+async def template_stats(name: str, recent_sessions: int = Query(3, ge=1, le=20)):
+    """从最近 N 个 session 的 metrics.jsonl 聚合该模版的命中率统计.
+    重 IO 走 to_thread, 不阻塞 asyncio loop."""
+    import asyncio as _aio
+    name = _safe_name(name)
+    return await _aio.to_thread(_template_stats_sync, name, recent_sessions)
 
 
 # ─── DELETE /api/templates/{name} ───

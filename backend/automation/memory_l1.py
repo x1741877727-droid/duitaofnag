@@ -327,7 +327,10 @@ class FrameMemory:
     def __init__(self, db_path: str | Path):
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # RLock 可重入: remember() 持锁 → _pending_add() → _persist_pending_entry()
+        # 第二次 acquire 不会死锁. 之前用 Lock() 在 P2 commit pending memory 时
+        # 一进 commit 就死锁, backend 整个挂死.
+        self._lock = threading.RLock()
         self._db = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._db.executescript(_SCHEMA)
         for m in _MIGRATIONS:

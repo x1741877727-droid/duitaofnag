@@ -155,13 +155,19 @@ class RunnerFSM:
 
         for rnd in range(handler.max_rounds):
             self._ctx.phase_round = rnd + 1
+            # 每轮开始计时, 末尾打印各步耗时
+            _t0 = time.perf_counter()
+            _perf = {"shot": 0.0, "phash": 0.0, "new_dec": 0.0,
+                     "handle": 0.0, "apply": 0.0, "finalize": 0.0, "sleep": 0.0}
 
             # 截图 → ctx.current_shot
+            _t = time.perf_counter()
             try:
                 shot = await self._ctx.device.screenshot()
             except Exception as e:
                 logger.debug(f"[{handler.name}] 截图失败: {e}")
                 shot = None
+            _perf["shot"] = (time.perf_counter() - _t) * 1000
             self._ctx.current_shot = shot
             if shot is None:
                 await asyncio.sleep(0.3)
@@ -169,6 +175,7 @@ class RunnerFSM:
 
             # 开决策记录 (本轮)
             phash_str = ""
+            _t = time.perf_counter()
             try:
                 from .adb_lite import phash as _phash
                 phash_int = _phash(shot)
@@ -176,7 +183,9 @@ class RunnerFSM:
                 self._ctx.current_phash = phash_str
             except Exception:
                 pass
+            _perf["phash"] = (time.perf_counter() - _t) * 1000
             decision = None
+            _t = time.perf_counter()
             try:
                 decision = recorder.new_decision(
                     instance=self._ctx.instance_idx,
@@ -188,24 +197,30 @@ class RunnerFSM:
             except Exception as e:
                 logger.debug(f"[{handler.name}] new_decision err: {e}")
                 self._ctx.current_decision = decision
+            _perf["new_dec"] = (time.perf_counter() - _t) * 1000
 
-            # 调 handler 决策
+            # 调 handler 决策 (perceive + decide)
             step: Optional[PhaseStep] = None
             handle_exc: Optional[Exception] = None
+            _t = time.perf_counter()
             try:
                 step = await handler.handle_frame(self._ctx)
             except Exception as e:
                 handle_exc = e
                 logger.warning(f"[{handler.name}] handle_frame 异常: {e}", exc_info=True)
+            _perf["handle"] = (time.perf_counter() - _t) * 1000
 
-            # 实施 action (在 handle_frame 之后, finalize 之前 — set_tap/set_verify 在 ActionExecutor 里写 ctx.current_decision)
+            # 实施 action (tap + verify)
+            _t = time.perf_counter()
             if step is not None and step.action is not None:
                 try:
                     await ActionExecutor.apply(self._ctx, step.action)
                 except Exception as e:
                     logger.warning(f"[{handler.name}] ActionExecutor 异常: {e}")
+            _perf["apply"] = (time.perf_counter() - _t) * 1000
 
             # finalize 决策记录
+            _t = time.perf_counter()
             try:
                 outcome = ""
                 note = ""
@@ -224,6 +239,7 @@ class RunnerFSM:
                 logger.debug(f"[{handler.name}] finalize err: {e}")
             finally:
                 self._ctx.current_decision = None
+            _perf["finalize"] = (time.perf_counter() - _t) * 1000
 
             # handle_frame 抛异常 → on_failure
             if handle_exc is not None:
@@ -231,6 +247,17 @@ class RunnerFSM:
 
             if step.note:
                 logger.info(f"[{handler.name}/R{rnd + 1}] {step.note}")
+
+            # 一轮 perf 汇总 (终态前先打印)
+            _round_total = (time.perf_counter() - _t0) * 1000
+            inst_idx = getattr(self._ctx, 'instance_idx', '?')
+            logger.info(
+                f"[PERF/{handler.name}/R{rnd + 1}/inst{inst_idx}] "
+                f"total={_round_total:.0f}ms "
+                f"shot={_perf['shot']:.0f} phash={_perf['phash']:.0f} "
+                f"new_dec={_perf['new_dec']:.0f} handle={_perf['handle']:.0f} "
+                f"apply={_perf['apply']:.0f} finalize={_perf['finalize']:.0f}"
+            )
 
             # 终态 → 立即返回
             if step.result in (
@@ -240,11 +267,13 @@ class RunnerFSM:
                 return step.result
 
             # WAIT 模式: sleep 指定秒数
+            _t_sleep = time.perf_counter()
             if step.result == PhaseResult.WAIT:
                 await asyncio.sleep(max(0.0, step.wait_seconds))
             else:
                 # RETRY 默认间隔
                 await asyncio.sleep(handler.round_interval_s)
+            _perf["sleep"] = (time.perf_counter() - _t_sleep) * 1000
 
         # max_rounds 用完 → FAIL
         logger.warning(

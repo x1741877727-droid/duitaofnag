@@ -55,9 +55,15 @@ class ActionExecutor:
 
     @staticmethod
     async def _do_tap(ctx: RunContext, act: PhaseAction) -> bool:
-        """tap + 防线 1+2 验证. 失败的坐标加进 ctx.blacklist_coords."""
+        """tap + 防线 1+2 验证. 失败的坐标加进 ctx.blacklist_coords.
+        每个内部步骤打 PERF log, 让上游能定位耗时."""
+        import time as _time
+        _t0 = _time.perf_counter()
+        _perf = {"tap": 0.0, "set_tap": 0.0, "sleep": 0.0,
+                 "shot_after": 0.0, "phash_set_verify": 0.0, "exp_verify": 0.0}
         shot_before = ctx.current_shot
         cx, cy = act.x, act.y
+        inst_idx = getattr(ctx, 'instance_idx', '?')
 
         # 黑名单防御 (Handler 应已过滤, 这里再兜一次)
         if ctx.is_blacklisted(cx, cy):
@@ -65,15 +71,18 @@ class ActionExecutor:
             return True
 
         # 实际 tap
+        _t = _time.perf_counter()
         try:
             await ctx.device.tap(cx, cy)
         except Exception as e:
             logger.warning(f"[executor] device.tap({cx},{cy}) 失败: {e}")
             return True
+        _perf["tap"] = (_time.perf_counter() - _t) * 1000
         ctx.last_tap_xy = (cx, cy)
 
         # 写 decision.tap (含红圈标注图)
         decision = getattr(ctx, "current_decision", None)
+        _t = _time.perf_counter()
         if decision is not None:
             try:
                 decision.set_tap(
@@ -87,28 +96,37 @@ class ActionExecutor:
                 )
             except Exception as e:
                 logger.debug(f"[executor] set_tap err: {e}")
+        _perf["set_tap"] = (_time.perf_counter() - _t) * 1000
 
         # tap 后等待 (默认 0.2s, 让画面有时间响应)
-        # 之前 0.4s 偏保守, 弹窗动画一般 100-200ms 就稳, 长 sleep 浪费 round 时间.
-        # 调用方 act.seconds > 0 时仍尊重 (P3a/P4 OCR 路径需要 0.3-0.5s 等面板).
+        _t = _time.perf_counter()
         await asyncio.sleep(act.seconds if act.seconds > 0 else 0.2)
+        _perf["sleep"] = (_time.perf_counter() - _t) * 1000
 
         # 没要求 verify → 跳过验证 (但仍记录到 pending_memory)
         if not act.expectation:
             if ctx.memory is not None and act.label and act.label != "memory_hit":
                 ctx.pending_memory_writes.append((shot_before, (cx, cy), act.label))
+            _total = (_time.perf_counter() - _t0) * 1000
+            logger.info(
+                f"[PERF/exec/inst{inst_idx}] tap_no_verify total={_total:.0f}ms "
+                f"tap={_perf['tap']:.0f} set_tap={_perf['set_tap']:.0f} sleep={_perf['sleep']:.0f}"
+            )
             return True
 
         # 取 after 帧
+        _t = _time.perf_counter()
         try:
             shot_after = await ctx.device.screenshot()
         except Exception as e:
             logger.debug(f"[executor] verify 截图失败: {e}")
             return True
+        _perf["shot_after"] = (_time.perf_counter() - _t) * 1000
         if shot_after is None:
             return True
 
         # 写 decision.verify (phash before/after + distance)
+        _t = _time.perf_counter()
         if decision is not None:
             try:
                 from .adb_lite import phash as _phash
@@ -122,8 +140,10 @@ class ActionExecutor:
                 )
             except Exception as e:
                 logger.debug(f"[executor] set_verify err: {e}")
+        _perf["phash_set_verify"] = (_time.perf_counter() - _t) * 1000
 
         # 防线 1+2: state_expectation 综合判定 (内部含 phash + 自定义 verifier)
+        _t = _time.perf_counter()
         try:
             from .state_expectation import verify as _verify
             verify_ctx = dict(act.payload or {})
@@ -132,6 +152,16 @@ class ActionExecutor:
         except Exception as e:
             logger.debug(f"[executor] state_expectation.verify err: {e}")
             return True
+        _perf["exp_verify"] = (_time.perf_counter() - _t) * 1000
+
+        # PERF 总结
+        _total = (_time.perf_counter() - _t0) * 1000
+        logger.info(
+            f"[PERF/exec/inst{inst_idx}] tap_full total={_total:.0f}ms "
+            f"tap={_perf['tap']:.0f} set_tap={_perf['set_tap']:.0f} "
+            f"sleep={_perf['sleep']:.0f} shot_after={_perf['shot_after']:.0f} "
+            f"phash_verify={_perf['phash_set_verify']:.0f} exp={_perf['exp_verify']:.0f}"
+        )
 
         if exp_r.matched:
             # 成功 → 缓冲到 pending memory (P2 success 时 commit, 避免错坐标污染)

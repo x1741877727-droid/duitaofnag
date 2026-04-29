@@ -575,17 +575,21 @@ class Decision:
     def add_template_attempt(self, tier: TierRecord, template_name: str,
                              template_dir: Path, score: float, threshold: float,
                              hit: bool, bbox: Optional[list] = None, scale: float = 1.0):
-        """记录一次模板尝试。把模板图复制到决策目录"""
-        tmpl_rel = ""
+        """记录一次模板尝试。模板图异步拷贝到决策目录 (避免同步 IO 卡 round)."""
+        tmpl_rel = f"tmpl_{template_name}.png"
         try:
-            src = template_dir / f"{template_name}.png"
-            if src.exists():
-                dst = self.path / f"tmpl_{template_name}.png"
-                if not dst.exists():
-                    shutil.copyfile(src, dst)
-                tmpl_rel = dst.name
+            src = str(template_dir / f"{template_name}.png")
+            dst = str(self.path / f"tmpl_{template_name}.png")
+            def _copy():
+                try:
+                    import os
+                    if os.path.exists(src) and not os.path.exists(dst):
+                        shutil.copyfile(src, dst)
+                except Exception:
+                    pass
+            _io_executor.submit(_copy)
         except Exception:
-            pass
+            tmpl_rel = ""
         tier.templates.append(TemplateMatch(
             name=template_name,
             template_image=tmpl_rel,
@@ -601,7 +605,9 @@ class Decision:
 
     def save_yolo_annot(self, tier: TierRecord, screenshot: np.ndarray,
                         detections: list[YoloDetection], q: int = 70):
-        """画 YOLO bbox 到截图副本"""
+        """画 YOLO bbox 到截图副本.
+        缓存 annot ndarray 到 self._yolo_annot_cache, 让 set_tap 可以叠 tap
+        圆点到同一图上 (避免之前 read jpg → overlay → write back 的 race)."""
         if screenshot is None:
             return self
         annot = screenshot.copy()
@@ -612,6 +618,11 @@ class Decision:
             label = f"{det.cls} {det.conf:.2f}"
             cv2.putText(annot, label, (x1, max(20, y1 - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # 暂存到决策对象, set_tap 来时叠 tap 圆点后一次性 async 写
+        # 用属性方式赋值给 dataclass 的 self (不影响 to_dict)
+        self._yolo_annot_cache = annot
+        self._yolo_annot_q = q
+        # 没有 set_tap 也要落盘 yolo_annot.jpg (用户没点的帧)
         _async_imwrite(str(self.path / "yolo_annot.jpg"), annot, q)
         tier.yolo_annot_image = "yolo_annot.jpg"
         tier.yolo_detections = detections
@@ -694,26 +705,19 @@ class Decision:
             _async_imwrite(str(self.path / "tap_annot.jpg"), annot, 70)
             self.tap.annot_image = "tap_annot.jpg"
 
-            # 2) 把 tap 圆点叠加到 yolo_annot 图上 (用户要求: 一图同时看 bbox + tap)
-            # 这里走异步: 读 yolo_annot.jpg → 加圆 → 写回, 整段丢进 IO 池, 主路径不等
-            yolo_annot_path = str(self.path / "yolo_annot.jpg")
-            tx, ty = int(x), int(y)
-            def _overlay_tap_on_yolo():
-                try:
-                    img = cv2.imread(yolo_annot_path)
-                    if img is None:
-                        return
-                    cv2.circle(img, (tx, ty), 36, (0, 255, 255), 3)
-                    cv2.circle(img, (tx, ty), 6, (0, 255, 255), -1)
-                    cv2.putText(img, f"TAP ({tx},{ty})", (tx + 40, ty + 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    cv2.imwrite(yolo_annot_path, img, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                except Exception:
-                    pass
-            try:
-                _io_executor.submit(_overlay_tap_on_yolo)
-            except Exception:
-                pass
+            # 2) 把 tap 圆点叠加到 yolo_annot 图上 (一图同时看 bbox + tap)
+            # 用 in-memory cache (save_yolo_annot 留下的 ndarray) 避免 read-after-write race.
+            yolo_cache = getattr(self, "_yolo_annot_cache", None)
+            if yolo_cache is not None:
+                # 复制一份再画, 不破坏 cache (cache 可能还没写完盘)
+                annot_with_tap = yolo_cache.copy()
+                tx, ty = int(x), int(y)
+                cv2.circle(annot_with_tap, (tx, ty), 36, (0, 255, 255), 3)
+                cv2.circle(annot_with_tap, (tx, ty), 6, (0, 255, 255), -1)
+                cv2.putText(annot_with_tap, f"TAP ({tx},{ty})", (tx + 40, ty + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                _async_imwrite(str(self.path / "yolo_annot.jpg"),
+                               annot_with_tap, getattr(self, "_yolo_annot_q", 70))
         return self
 
     # ────── 验证 ──────
@@ -746,11 +750,19 @@ class Decision:
             "outcome": self.outcome,
             "note": self.note,
         }
+        # decision.json 异步写盘 — finalize 在 runner 主循环里被调,
+        # 同步 json.dump 序列化大对象 + 落盘约 30-100ms, 累 6 实例 = 显著延迟.
+        json_path = str(self.path / "decision.json")
+        def _write_json():
+            try:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.warning(f"[decision] save json fail: {e}")
         try:
-            with open(self.path / "decision.json", "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.warning(f"[decision] save json fail: {e}")
+            _io_executor.submit(_write_json)
+        except Exception:
+            _write_json()  # pool 满 → 退同步保底
         # 加索引
         summary = {
             "id": self.id,

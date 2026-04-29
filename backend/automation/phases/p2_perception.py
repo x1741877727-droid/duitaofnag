@@ -83,16 +83,13 @@ class Perception:
 
 
 async def perceive(ctx: RunContext) -> Perception:
-    """跑一帧的所有识别源, 返回汇总 Perception.
+    """跑一帧的所有识别源, 返回汇总 Perception. 各步骤打 PERF log."""
+    import time as _time
+    _t0 = _time.perf_counter()
+    _perf = {"lobby_tpl": 0.0, "login_tpl": 0.0, "yolo": 0.0, "quad": 0.0,
+             "close_x_tpl": 0.0, "dismiss_btn_tpl": 0.0, "memory": 0.0, "phash": 0.0}
+    inst_idx = getattr(ctx, 'instance_idx', '?')
 
-    顺序:
-      1. 模板 lobby_start_btn (5ms)
-      2. 模板 lobby_login_btn / qq (登录页, 5ms)
-      3. YOLO 推理 (30ms, 复用 ctx.yolo per-instance session)
-      4. 四元融合大厅判定 (LobbyQuadDetector, 综合上面)
-      5. 模板 close_x_* 兜底 (15ms, YOLO 漏检时)
-      6. Memory L1 phash 查询 (1ms)
-    """
     p = Perception()
     shot = ctx.current_shot
     if shot is None:
@@ -101,6 +98,7 @@ async def perceive(ctx: RunContext) -> Perception:
     matcher = ctx.matcher
 
     # 1. 大厅模板 (lobby_start_btn / lobby_start_game)
+    _t = _time.perf_counter()
     if matcher is not None:
         for tn in ("lobby_start_btn", "lobby_start_game"):
             try:
@@ -110,8 +108,10 @@ async def perceive(ctx: RunContext) -> Perception:
             if h is not None:
                 p.lobby_template_hit = h
                 break
+    _perf["lobby_tpl"] = (_time.perf_counter() - _t) * 1000
 
     # 2. 登录页模板
+    _t = _time.perf_counter()
     if matcher is not None:
         for tn in LOGIN_TEMPLATE_NAMES:
             try:
@@ -121,8 +121,10 @@ async def perceive(ctx: RunContext) -> Perception:
             if h is not None:
                 p.login_template_hit = h
                 break
+    _perf["login_tpl"] = (_time.perf_counter() - _t) * 1000
 
     # 3. YOLO 推理
+    _t = _time.perf_counter()
     dets = []
     if ctx.yolo is not None:
         try:
@@ -130,6 +132,7 @@ async def perceive(ctx: RunContext) -> Perception:
         except Exception as e:
             logger.debug(f"[perceive] yolo err: {e}")
             dets = []
+    _perf["yolo"] = (_time.perf_counter() - _t) * 1000
     p.yolo_dets_raw = dets
     p.yolo_close_xs = [
         d for d in dets if getattr(d, "name", "") == "close_x" and d.conf > TAP_CONF_CLOSE
@@ -138,7 +141,8 @@ async def perceive(ctx: RunContext) -> Perception:
         d for d in dets if getattr(d, "name", "") == "action_btn" and d.conf > TAP_CONF_ACTION
     ]
 
-    # 4. 四元融合大厅判定 (用 lobby_check.LobbyQuadDetector)
+    # 4. 四元融合大厅判定
+    _t = _time.perf_counter()
     if ctx.lobby_detector is not None:
         try:
             quad_r = ctx.lobby_detector.check(shot, matcher, dets)
@@ -146,8 +150,10 @@ async def perceive(ctx: RunContext) -> Perception:
             p.quad_note = quad_r.note
         except Exception as e:
             logger.debug(f"[perceive] lobby_quad err: {e}")
+    _perf["quad"] = (_time.perf_counter() - _t) * 1000
 
-    # 5. 模板 close_x_* 兜底 (YOLO 漏检, 高准确率)
+    # 5. 模板 close_x_* 兜底
+    _t = _time.perf_counter()
     if matcher is not None and not p.yolo_close_xs:
         for tn in CLOSE_X_TEMPLATE_NAMES:
             try:
@@ -157,8 +163,10 @@ async def perceive(ctx: RunContext) -> Perception:
             if h is not None:
                 p.template_close_x = (tn, h)
                 break
+    _perf["close_x_tpl"] = (_time.perf_counter() - _t) * 1000
 
-    # 5.5 模板 btn_confirm_* / btn_agree / btn_no_need 兜底 (没 X 但有底部"确定"按钮的弹窗)
+    # 5.5 模板 btn_confirm_* / btn_agree 兜底
+    _t = _time.perf_counter()
     if matcher is not None and p.template_close_x is None and not p.yolo_close_xs:
         for tn in DISMISS_BTN_TEMPLATE_NAMES:
             try:
@@ -168,8 +176,10 @@ async def perceive(ctx: RunContext) -> Perception:
             if h is not None:
                 p.template_dismiss_btn = (tn, h)
                 break
+    _perf["dismiss_btn_tpl"] = (_time.perf_counter() - _t) * 1000
 
     # 6. Memory L1 查询
+    _t = _time.perf_counter()
     if ctx.memory is not None:
         try:
             mem_hit = ctx.memory.query(
@@ -178,12 +188,24 @@ async def perceive(ctx: RunContext) -> Perception:
             p.memory_hit = mem_hit
         except Exception as e:
             logger.debug(f"[perceive] memory err: {e}")
+    _perf["memory"] = (_time.perf_counter() - _t) * 1000
 
-    # phash (供 P2SubFSM 用作 phash 卡死检测)
+    # phash
+    _t = _time.perf_counter()
     try:
         from ..adb_lite import phash as _phash
         p.phash_now = _phash(shot)
     except Exception:
         p.phash_now = 0
+    _perf["phash"] = (_time.perf_counter() - _t) * 1000
+
+    _total = (_time.perf_counter() - _t0) * 1000
+    logger.info(
+        f"[PERF/perceive/inst{inst_idx}] total={_total:.0f}ms "
+        f"lobby_tpl={_perf['lobby_tpl']:.0f} login_tpl={_perf['login_tpl']:.0f} "
+        f"yolo={_perf['yolo']:.0f} quad={_perf['quad']:.0f} "
+        f"close_x_tpl={_perf['close_x_tpl']:.0f} dismiss_tpl={_perf['dismiss_btn_tpl']:.0f} "
+        f"memory={_perf['memory']:.0f} phash={_perf['phash']:.0f}"
+    )
 
     return p
