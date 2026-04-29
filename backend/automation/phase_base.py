@@ -122,6 +122,9 @@ class RunContext:
     lobby_confirm_count: int = 0
     lobby_posterior: float = 0.5      # 贝叶斯早退: P(在大厅 | 历史观测), 阈 0.92 退出
     popups_closed: int = 0
+    # 死屏判定: 区分 "真死屏" (画面卡住) vs "loading 中" (画面在变但没弹窗)
+    last_phash_int: int = 0           # 上一轮 phash, 用于对比是否变化
+    phash_stuck_streak: int = 0       # 连续 N 轮 phash 距离 < 5 即视为画面卡住
 
     # phase 计时
     phase_started_at: float = 0.0
@@ -144,6 +147,8 @@ class RunContext:
         self.lobby_confirm_count = 0
         self.lobby_posterior = 0.5
         self.popups_closed = 0
+        self.last_phash_int = 0
+        self.phash_stuck_streak = 0
         self.phase_started_at = time.perf_counter()
         self.phase_round = 0
         self.current_shot = None
