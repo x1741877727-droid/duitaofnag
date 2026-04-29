@@ -174,7 +174,8 @@ function SessionView({
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
+    // 只在首次加载或换会话时显 loading; 自动刷新 (tick) 不闪屏
+    setLoading((prev) => items.length === 0 ? true : prev)
     // 当前会话 → 用 list_recent (内存索引); 历史 → 扫磁盘
     // 不在 fetch 层 filter instance, 卡片网格永远显全部实例; 列表段渲染时再 filter
     fetchDecisions({
@@ -185,6 +186,7 @@ function SessionView({
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, isCurrent, tick])
 
   // 自动刷新 (仅当前会话)
