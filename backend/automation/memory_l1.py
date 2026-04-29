@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # 配置常量 (实测调优后再改)
 # ────────────────────────────────────────────────────────────────────
 PENDING_CONFIRMATION_COUNT = 5       # 蓄水池: 同 phash 累计 N 次 success 才落库
-PENDING_PHASH_TOL = 3                # 蓄水池中聚合时 phash 距离容差
+PENDING_PHASH_TOL = 12               # 蓄水池中聚合时 phash 距离容差 (跨次运行能聚合)
 PENDING_XY_TOL = 30                  # 蓄水池中聚合时坐标容差
 PENDING_TTL_S = 600                  # 蓄水池条目最大留存时间 (10min 累计 5 次)
 PENDING_STD_MAX_PX = 15              # 5 次坐标 std > 此值视为不一致, 拒绝 (说明可能命中不同位置)
@@ -333,6 +333,9 @@ class FrameMemory:
 
         self._snap_dir = self._db_path.parent / "snapshots"
         self._snap_dir.mkdir(parents=True, exist_ok=True)
+        # 蓄水池每条 sample 也存快照, 让前端可视化"为什么这一条还没入库"
+        self._pending_snap_dir = self._db_path.parent / "snapshots_pending"
+        self._pending_snap_dir.mkdir(parents=True, exist_ok=True)
 
         # Tier 2.4: BK-tree per target_name
         self._bktree: dict[str, BKTree] = defaultdict(BKTree)
@@ -436,14 +439,48 @@ class FrameMemory:
 
     # ──────── 蓄水池 (Tier 1.2) ────────
 
+    def _pending_key(self, target: str, phs: int) -> str:
+        """前端引用 pending entry 的稳定 key (target + phash 16-hex)."""
+        return f"{target}__{phs:016x}"
+
+    def _save_pending_snapshot(self, frame, target: str, x: int, y: int,
+                               key: str, idx: int) -> str:
+        """每个 sample 存一张带红圈的快照, 文件名包含 key + sample idx."""
+        try:
+            annot = frame.copy()
+            cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
+            cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
+            fname = f"{key}__{idx}.jpg"
+            fpath = self._pending_snap_dir / fname
+            if cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 60]):
+                return fname
+        except Exception as e:
+            logger.debug(f"[memory_l1] pending snap 落盘失败: {e}")
+        return ""
+
+    def _cleanup_pending_snaps(self, key: str) -> None:
+        """删 pending 这条 key 的全部 sample 快照."""
+        try:
+            for p in self._pending_snap_dir.glob(f"{key}__*.jpg"):
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _pending_add(self, target: str, phs: int, x: int, y: int,
-                     anchor_phash: int = 0) -> Optional[dict]:
+                     anchor_phash: int = 0,
+                     frame=None) -> Optional[dict]:
         """累计同 phash + 同坐标的 success. 5 次确认 + std 检查 + 中位数 + anchor.
-        sample 4 元组: (x, y, ts, anchor_phash)
+        sample 5 元组: (x, y, ts, anchor_phash, snap_relpath)
         返回 commit dict 或 None (待累计/被拒绝)."""
         now = time.time()
         bucket = self._pending[target]
-        # 清掉过期 entry
+        # 清掉过期 entry (顺手清快照)
+        expired = [e for e in bucket if now - e["ts_first"] >= PENDING_TTL_S]
+        for e in expired:
+            self._cleanup_pending_snaps(e.get("key", ""))
         bucket[:] = [e for e in bucket if now - e["ts_first"] < PENDING_TTL_S]
         # 找接近 entry (按 phash + 中心点 mean 距离)
         for e in bucket:
@@ -452,12 +489,15 @@ class FrameMemory:
             if (_hamming(e["phash"], phs) <= PENDING_PHASH_TOL
                     and abs(cx_mean - x) < PENDING_XY_TOL
                     and abs(cy_mean - y) < PENDING_XY_TOL):
-                e["samples"].append((x, y, now, anchor_phash))
+                idx = len(e["samples"])
+                snap = self._save_pending_snapshot(frame, target, x, y, e["key"], idx) if frame is not None else ""
+                e["samples"].append((x, y, now, anchor_phash, snap))
                 if len(e["samples"]) >= PENDING_CONFIRMATION_COUNT:
                     # 时间跨度检查
                     time_span = e["samples"][-1][2] - e["samples"][0][2]
                     if PENDING_MIN_TIME_SPAN_S > 0 and time_span < PENDING_MIN_TIME_SPAN_S:
                         logger.info(f"[memory_l1] 蓄水池拒绝: target={target} 时间跨度 {time_span:.1f}s < {PENDING_MIN_TIME_SPAN_S}s")
+                        self._cleanup_pending_snaps(e["key"])
                         bucket.remove(e)
                         return None
                     # 算 std
@@ -473,6 +513,7 @@ class FrameMemory:
                             f"std_x={std_x:.1f} std_y={std_y:.1f} > {PENDING_STD_MAX_PX}px "
                             f"(samples={[(int(s[0]), int(s[1])) for s in e['samples']]})"
                         )
+                        self._cleanup_pending_snaps(e["key"])
                         bucket.remove(e)
                         return None
                     # 通过 — 用中位数作为最终坐标
@@ -484,6 +525,7 @@ class FrameMemory:
                     best = min(e["samples"],
                                key=lambda s: abs(s[0] - final_x) + abs(s[1] - final_y))
                     final_anchor = int(best[3]) if len(best) > 3 else 0
+                    self._cleanup_pending_snaps(e["key"])
                     bucket.remove(e)
                     return {
                         "phash": phs, "x": int(final_x), "y": int(final_y),
@@ -494,8 +536,13 @@ class FrameMemory:
                     }
                 return None
         # 新建
+        new_key = self._pending_key(target, phs)
+        new_snap = self._save_pending_snapshot(frame, target, x, y, new_key, 0) if frame is not None else ""
         bucket.append({
-            "phash": phs, "samples": [(x, y, now, anchor_phash)], "ts_first": now,
+            "key": new_key,
+            "phash": phs,
+            "samples": [(x, y, now, anchor_phash, new_snap)],
+            "ts_first": now,
         })
         return None
 
@@ -689,7 +736,7 @@ class FrameMemory:
             # 没有 existing → success=False 不落库 (老逻辑); success=True 走蓄水池
             if not success:
                 return
-            commit = self._pending_add(target_name, ph, x, y, anchor_phash=anchor_ph)
+            commit = self._pending_add(target_name, ph, x, y, anchor_phash=anchor_ph, frame=frame)
             if commit is None:
                 logger.debug(
                     f"[memory_l1] pending {target_name}@({x},{y}) phash={ph:#x} "
@@ -835,9 +882,7 @@ class FrameMemory:
 
     def pending_detail(self, target: str = "") -> list[dict]:
         """蓄水池里"待 commit"的条目, 让用户在前端能看到学习进度.
-        每条:
-            target_name / phash / sample_count / xs / ys / ts_first / age_s
-        """
+        每条带 samples 列表 (每 sample 一张快照可看)."""
         out: list[dict] = []
         now = time.time()
         for tgt, bucket in self._pending.items():
@@ -846,7 +891,6 @@ class FrameMemory:
             for e in bucket:
                 xs = [s[0] for s in e["samples"]]
                 ys = [s[1] for s in e["samples"]]
-                # 中位预估
                 if xs:
                     sx = sorted(xs); sy = sorted(ys)
                     mx, my = sx[len(sx)//2], sy[len(sy)//2]
@@ -854,10 +898,23 @@ class FrameMemory:
                     mx = my = 0
                 std_x = ((sum((v-sum(xs)/len(xs))**2 for v in xs)/len(xs))**0.5) if xs else 0
                 std_y = ((sum((v-sum(ys)/len(ys))**2 for v in ys)/len(ys))**0.5) if ys else 0
+                samples_out = []
+                for idx, s in enumerate(e["samples"]):
+                    sx_, sy_, sts = s[0], s[1], s[2]
+                    snap = s[4] if len(s) > 4 else ""
+                    samples_out.append({
+                        "idx": idx,
+                        "x": int(sx_), "y": int(sy_),
+                        "ts": float(sts),
+                        "age_s": round(now - sts, 1),
+                        "has_snapshot": bool(snap),
+                    })
                 out.append({
+                    "key": e.get("key", self._pending_key(tgt, e["phash"])),
                     "target_name": tgt,
                     "phash": f"0x{e['phash']:016x}",
                     "samples": len(e["samples"]),
+                    "samples_detail": samples_out,
                     "needed": PENDING_CONFIRMATION_COUNT,
                     "median_xy": [int(mx), int(my)],
                     "std_x": round(std_x, 1),
@@ -867,6 +924,35 @@ class FrameMemory:
                     "age_s": round(now - e["ts_first"], 1),
                 })
         return out
+
+    def pending_snapshot_path(self, key: str, idx: int) -> Optional[Path]:
+        """前端查看 pending 第 idx 张样本快照. 返回绝对路径或 None."""
+        if not key or "/" in key or "\\" in key or ".." in key:
+            return None
+        for tgt, bucket in self._pending.items():
+            for e in bucket:
+                if e.get("key") == key:
+                    if 0 <= idx < len(e["samples"]):
+                        s = e["samples"][idx]
+                        snap = s[4] if len(s) > 4 else ""
+                        if snap:
+                            p = self._pending_snap_dir / snap
+                            if p.exists():
+                                return p
+                    return None
+        return None
+
+    def discard_pending(self, key: str) -> bool:
+        """手动丢弃一条 pending (前端"丢弃"按钮). 清掉该 key 的所有快照."""
+        if not key:
+            return False
+        for tgt, bucket in list(self._pending.items()):
+            for e in list(bucket):
+                if e.get("key") == key:
+                    self._cleanup_pending_snaps(key)
+                    bucket.remove(e)
+                    return True
+        return False
 
     # ──────── 兼容老 API (前端记忆库浏览用) ────────
 

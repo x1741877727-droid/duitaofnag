@@ -113,3 +113,39 @@ async def memory_mark_fail(rid: int):
     if rec is None:
         raise HTTPException(404)
     return {"ok": True, "record": rec}
+
+
+# ──────── 蓄水池 (pending) 浏览 ────────
+
+@router.get("/api/memory/pending/list")
+async def memory_pending_list(target: str = ""):
+    """蓄水池里"待 commit"的全部条目, 含每 sample 详情 (坐标 / has_snapshot)."""
+    mem = _get_memory()
+    if mem is None:
+        return {"items": [], "available": False}
+    items = mem.pending_detail(target=target)
+    return {"items": items, "count": len(items), "available": True}
+
+
+@router.get("/api/memory/pending/{key}/sample/{idx}")
+async def memory_pending_sample(key: str, idx: int):
+    """单张 pending 样本快照 (带红圈点击点)."""
+    mem = _get_memory()
+    if mem is None:
+        raise HTTPException(503)
+    p = mem.pending_snapshot_path(key, int(idx))
+    if p is None:
+        raise HTTPException(404, "样本不存在或快照已清")
+    return FileResponse(p, media_type="image/jpeg")
+
+
+@router.post("/api/memory/pending/{key}/discard")
+async def memory_pending_discard(key: str):
+    """手动丢弃一条 pending (清快照 + 移出蓄水池)."""
+    mem = _get_memory()
+    if mem is None:
+        raise HTTPException(503)
+    ok = mem.discard_pending(key)
+    if not ok:
+        raise HTTPException(404, "key 不存在")
+    return {"ok": True, "key": key}

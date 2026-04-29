@@ -902,8 +902,8 @@ class SingleInstanceRunner:
                 tmpl_used = "lobby_start_btn"
             if hit is not None:
                 break
-            # 模板都 miss → OCR 兜底
-            ocr_hits = ocr._ocr_all(shot)
+            # 模板都 miss → OCR 兜底 (包 to_thread 防卡事件循环)
+            ocr_hits = await asyncio.to_thread(ocr._ocr_all, shot)
             found = next((h for h in ocr_hits if "开始游戏" in h.text), None)
             if found is not None:
                 tmpl_used = "OCR·开始游戏"
@@ -1004,16 +1004,23 @@ class SingleInstanceRunner:
         for _retry in range(len(_RETRY_SLEEPS) + 1):  # 4 次
             p4_2_attempts = _retry + 1
             _pt = _tm.perf_counter()
-            list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                         if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
+            # 关键: ocr._ocr_roi_named 是同步 + 4-6s, 不 to_thread 会卡死整个事件循环,
+            # 导致跨 instance 的并发任务无法推进 (两个 leader P4 看着像串行).
+            if shot is not None:
+                if has_list_roi:
+                    list_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "map_panel_list_center")
+                else:
+                    list_hits = await asyncio.to_thread(ocr._ocr_all, shot)
+            else:
+                list_hits = []
             _slog(f"[P4-2 PERF] attempt {p4_2_attempts}: OCR list_center "
                   f"{(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(list_hits)} 文字)")
 
             _pt = _tm.perf_counter()
             if has_left_roi:
-                left_hits = ocr._ocr_roi_named(shot, "map_panel_left_tabs") if shot is not None else []
+                left_hits = (await asyncio.to_thread(ocr._ocr_roi_named, shot, "map_panel_left_tabs")) if shot is not None else []
             else:
-                full = ocr._ocr_all(shot) if shot is not None else []
+                full = (await asyncio.to_thread(ocr._ocr_all, shot)) if shot is not None else []
                 left_hits = [h for h in full if h.cx < w_img * 0.16]
             _slog(f"[P4-2 PERF] attempt {p4_2_attempts}: OCR left_tabs "
                   f"{(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(left_hits)} 文字)")
@@ -1068,8 +1075,8 @@ class SingleInstanceRunner:
                 shot_after = await self.adb.screenshot()
                 if shot_after is not None:
                     shot = shot_after
-                    list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                                 if has_list_roi else ocr._ocr_all(shot))
+                    list_hits = (await asyncio.to_thread(ocr._ocr_roi_named, shot, "map_panel_list_center")
+                                 if has_list_roi else await asyncio.to_thread(ocr._ocr_all, shot))
             else:
                 _slog("[阶段6] 不在团竞 + 找不到团竞 tab → 失败")
                 if d2: d2.finalize(outcome="failed", note="找不到团竞 tab")
@@ -1102,7 +1109,8 @@ class SingleInstanceRunner:
             if region.size == 0:
                 return None
             r_ch, g_ch, b_ch = region[:,:,2], region[:,:,1], region[:,:,0]
-            orange = int(((r_ch > 150) & (g_ch > 80) & (b_ch < 80)).sum())
+            # 含黄色对勾 (r>150 & g>120 & b<100) — 之前 g>80 & b<80 太苛刻, 黄色 tick 漏了
+            orange = int(((r_ch > 150) & (g_ch > 120) & (b_ch < 100)).sum())
             total = int(region.shape[0] * region.shape[1])
             ratio = orange / total if total > 0 else 0.0
             return {
@@ -1147,8 +1155,13 @@ class SingleInstanceRunner:
                 if shot_r is not None:
                     shot = shot_r
                 _pt = _tm.perf_counter()
-                list_hits = (ocr._ocr_roi_named(shot, "map_panel_list_center")
-                             if has_list_roi else ocr._ocr_all(shot)) if shot is not None else []
+                if shot is not None:
+                    if has_list_roi:
+                        list_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "map_panel_list_center")
+                    else:
+                        list_hits = await asyncio.to_thread(ocr._ocr_all, shot)
+                else:
+                    list_hits = []
                 p4_3_attempts += 1
                 _slog(f"[P4-3 PERF] retry {_retry+1}: OCR list_center "
                       f"{(_tm.perf_counter()-_pt)*1000:.0f}ms ({len(list_hits)} 文字)")
@@ -1220,7 +1233,7 @@ class SingleInstanceRunner:
             tier_note = (
                 f"ROI={tuple(bbox)} 平均RGB={rgb} "
                 f"橙色={fill_state['orange']}/{fill_state['total']} "
-                f"({ratio*100:.1f}%) 阈值=10% (尝试 {p4_4_attempts} 次)"
+                f"({ratio*100:.1f}%) 阈值=5% (尝试 {p4_4_attempts} 次)"
             )
             if d4:
                 tier_p4 = TierRecord(
@@ -1229,7 +1242,7 @@ class SingleInstanceRunner:
                 )
                 d4.add_tier(tier_p4)
                 d4.save_ocr_roi(tier_p4, shot, roi=bbox, hits=[])
-            if ratio > 0.10:
+            if ratio > 0.05:
                 if d4:
                     d4.set_tap(fill_state["tap_cx"], fill_state["tap_cy"],
                                method="ROI颜色", target_class="补位勾选框", screenshot=shot)
@@ -1239,9 +1252,9 @@ class SingleInstanceRunner:
                 if d4: d4.finalize(outcome="fill_unchecked",
                                     note=f"补位已勾 → tap 取消 (橙色 {ratio*100:.1f}%)")
             else:
-                _slog(f"[阶段6] 补位未勾 ({ratio*100:.1f}% < 10%)")
+                _slog(f"[阶段6] 补位未勾 ({ratio*100:.1f}% < 5%)")
                 if d4: d4.finalize(outcome="skipped",
-                                    note=f"补位未勾 (橙色 {ratio*100:.1f}% < 10%)")
+                                    note=f"补位未勾 (橙色 {ratio*100:.1f}% < 5%)")
         else:
             if d4:
                 d4.add_tier(TierRecord(
@@ -1307,12 +1320,12 @@ class SingleInstanceRunner:
             shot = shot_d5
             has_confirm_roi = "map_panel_btn_confirm" in avail_rois
             if has_confirm_roi:
-                confirm_hits_last = ocr._ocr_roi_named(shot, "map_panel_btn_confirm") if shot is not None else []
+                confirm_hits_last = (await asyncio.to_thread(ocr._ocr_roi_named, shot, "map_panel_btn_confirm")) if shot is not None else []
                 _btn_roi_px_last = _roi_pixels("map_panel_btn_confirm", shot)
                 ocr_tier_name = "OCR·btn_confirm"
                 ocr_tier_note = f"模板没命中 → OCR ROI 找'确定' ({len(confirm_hits_last)} 文字)"
             else:
-                confirm_hits_last = ocr._ocr_all(shot) if shot is not None else []
+                confirm_hits_last = (await asyncio.to_thread(ocr._ocr_all, shot)) if shot is not None else []
                 _btn_roi_px_last = None
                 ocr_tier_name = "OCR·全屏(右侧)"
                 ocr_tier_note = f"模板没命中 → OCR 全屏找'确定' (右侧 cx>{int(w_img*0.78)})"
@@ -1480,7 +1493,7 @@ class SingleInstanceRunner:
                 break
             self.dbg.log_screenshot(shot, f"attempt{attempt}")
             _pt_ocr = _tm.perf_counter()
-            left_hits = ocr._ocr_roi_named(shot, "team_btn_left")
+            left_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "team_btn_left")
             logger.info(f"[P3a-1 PERF] attempt {attempt+1}: OCR team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_left_hits = left_hits
             self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
@@ -1569,7 +1582,7 @@ class SingleInstanceRunner:
 
             # ② OCR 底部"组队码" tab
             _pt_ocr = _tm.perf_counter()
-            bottom_hits = ocr._ocr_roi_named(shot, "team_code_tab_bottom")
+            bottom_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "team_code_tab_bottom")
             logger.info(f"[P3a-2 PERF] attempt {attempt+1}: OCR team_code_tab_bottom {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(bottom_hits)} 文字)")
             last_bottom_hits = bottom_hits
             for h in bottom_hits:
@@ -1632,7 +1645,7 @@ class SingleInstanceRunner:
                 break
             # ② OCR
             _pt_ocr = _tm.perf_counter()
-            left_hits = ocr._ocr_roi_named(shot, "qr_team_btn_left")
+            left_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "qr_team_btn_left")
             logger.info(f"[P3a-3 PERF] attempt {attempt+1}: OCR qr_team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_qr_hits = left_hits
             for h in left_hits:
@@ -1945,7 +1958,7 @@ class SingleInstanceRunner:
                     return True
 
             # ── 慢速路径: OCR (~200ms) ──
-            hits = ocr._ocr_all(shot)
+            hits = await asyncio.to_thread(ocr._ocr_all, shot)
             for kw in keywords:
                 for hit in hits:
                     if kw in hit.text:
@@ -2060,9 +2073,9 @@ class SingleInstanceRunner:
                 continue
             last_shot = shot
             if has_ready_roi:
-                hits = ocr._ocr_roi_named(shot, "team_ready_btn")
+                hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "team_ready_btn")
             else:
-                hits = ocr._ocr_all(shot)
+                hits = await asyncio.to_thread(ocr._ocr_all, shot)
             last_hits = hits
             for h in hits:
                 if "取消" in h.text and "准备" in h.text:

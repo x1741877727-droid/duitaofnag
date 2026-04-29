@@ -176,16 +176,16 @@ function SessionView({
     let cancelled = false
     setLoading(true)
     // 当前会话 → 用 list_recent (内存索引); 历史 → 扫磁盘
+    // 不在 fetch 层 filter instance, 卡片网格永远显全部实例; 列表段渲染时再 filter
     fetchDecisions({
       session: isCurrent ? '' : session,
-      instance: filterInst ?? undefined,
       limit: 500,
     })
       .then((r) => { if (!cancelled) setItems(r.items) })
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [session, filterInst, isCurrent, tick])
+  }, [session, isCurrent, tick])
 
   // 自动刷新 (仅当前会话)
   useEffect(() => {
@@ -203,6 +203,12 @@ function SessionView({
     }
     return m
   }, [items])
+
+  // 列表段用的 filtered: filterInst != null 则只保该实例的 key
+  const byInstFiltered = useMemo(() => {
+    if (filterInst === null) return byInst
+    return filterInst in byInst ? { [filterInst]: byInst[filterInst] } : {}
+  }, [byInst, filterInst])
 
   // 每实例当前进度: 最近一条决策的 phase + 各 phase 决策计数
   const progressByInst = useMemo(() => {
@@ -332,15 +338,19 @@ function SessionView({
             <div className="p-6 text-xs text-muted-foreground text-center">
               没有决策 — 跑一下 runner 才有数据
             </div>
+          ) : Object.keys(byInstFiltered).length === 0 ? (
+            <div className="p-6 text-xs text-muted-foreground text-center">
+              实例 #{filterInst} 暂无决策 (点 "全部" 看所有)
+            </div>
           ) : (
-            Object.keys(byInst).map(Number).sort((a, b) => a - b).map((idx) => (
+            Object.keys(byInstFiltered).map(Number).sort((a, b) => a - b).map((idx) => (
               <div key={idx}>
                 <div className="sticky top-0 bg-secondary border-b border-border px-3 py-1.5 text-[11px] font-semibold flex items-center gap-2">
                   <span className="font-mono">实例 #{idx}</span>
-                  <span className="text-muted-foreground">{byInst[idx].length} 决策</span>
+                  <span className="text-muted-foreground">{byInstFiltered[idx].length} 决策</span>
                 </div>
                 <ul className="divide-y divide-border">
-                  {byInst[idx].map((it) => (
+                  {byInstFiltered[idx].map((it) => (
                     <li key={it.id}>
                       <button
                         onClick={() => setSelectedId(it.id)}

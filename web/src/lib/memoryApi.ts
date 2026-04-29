@@ -57,3 +57,51 @@ export async function markMemoryFail(id: number): Promise<{ ok: boolean; record:
   if (!r.ok) throw new Error(`mark_fail ${r.status}`)
   return await r.json()
 }
+
+// ──────── 蓄水池 pending ────────
+
+export interface PendingSample {
+  idx: number
+  x: number
+  y: number
+  ts: number
+  age_s: number
+  has_snapshot: boolean
+}
+
+export interface PendingEntry {
+  key: string
+  target_name: string
+  phash: string
+  samples: number
+  samples_detail: PendingSample[]
+  needed: number
+  median_xy: [number, number]
+  std_x: number
+  std_y: number
+  max_std_allowed: number
+  ttl_s: number
+  age_s: number
+}
+
+export interface PendingListResp {
+  items: PendingEntry[]
+  count: number
+  available: boolean
+}
+
+export async function fetchPendingList(target = ''): Promise<PendingListResp> {
+  const p = target ? `?target=${encodeURIComponent(target)}` : ''
+  const r = await fetch(`/api/memory/pending/list${p}`)
+  if (!r.ok) throw new Error(`pending list ${r.status}`)
+  return await r.json()
+}
+
+export function pendingSampleSrc(key: string, idx: number): string {
+  return `/api/memory/pending/${encodeURIComponent(key)}/sample/${idx}`
+}
+
+export async function discardPending(key: string): Promise<void> {
+  const r = await fetch(`/api/memory/pending/${encodeURIComponent(key)}/discard`, { method: 'POST' })
+  if (!r.ok) throw new Error(`discard ${r.status}`)
+}
