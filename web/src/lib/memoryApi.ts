@@ -105,3 +105,9 @@ export async function discardPending(key: string): Promise<void> {
   const r = await fetch(`/api/memory/pending/${encodeURIComponent(key)}/discard`, { method: 'POST' })
   if (!r.ok) throw new Error(`discard ${r.status}`)
 }
+
+export async function dedupMemory(): Promise<{ merged: number }> {
+  const r = await fetch('/api/memory/dedup', { method: 'POST' })
+  if (!r.ok) throw new Error(`dedup ${r.status}`)
+  return await r.json()
+}

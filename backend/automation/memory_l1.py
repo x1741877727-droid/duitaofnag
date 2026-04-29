@@ -802,16 +802,28 @@ class FrameMemory:
         anchor_ph = _compute_anchor_phash(frame, x, y)
 
         with self._lock:
-            # 找 phash 距离 < 3 + 坐标接近的现有记录 (老逻辑保持)
+            # 找已存在条目 — 双判据 (任一命中即视为同条目, 走 UPDATE 而非新增 pending):
+            #   1) phash 距离 ≤ PENDING_PHASH_TOL (12)  — 整图相似
+            #   2) anchor_phash 距离 ≤ ANCHOR_PHASH_DIST_THRESHOLD (6)  — 点击区域相似
+            #      解决: 弹窗整体变 (红点 / 公告内容 / 时间戳) 但点同一位置时, 老逻辑
+            #      phash<3 失败 → 走蓄水池 → 5 次后 commit 成新条目 → 同坐标多条 (#2/#4
+            #      在 (899,53) 即此原因).
             existing = None
             for row in self._db.execute(
-                "SELECT id, phash, snapshot_path, history_json, archived "
+                "SELECT id, phash, anchor_phash, snapshot_path, history_json, archived "
                 "FROM frame_action "
                 "WHERE target_name = ? AND ABS(action_x - ?) < ? AND ABS(action_y - ?) < ?",
                 (target_name, x, PENDING_XY_TOL, y, PENDING_XY_TOL),
             ):
-                rid, ph_s, snap, hist_j, arch = row
-                if _hamming(int(ph_s), ph) < 3:
+                rid, ph_s, anch_s, snap, hist_j, arch = row
+                phash_close = _hamming(int(ph_s), ph) <= PENDING_PHASH_TOL
+                anchor_close = False
+                if anch_s and anch_s != "0" and anch_s != "":
+                    try:
+                        anchor_close = _hamming(int(anch_s), anchor_ph) <= ANCHOR_PHASH_DIST_THRESHOLD
+                    except Exception:
+                        pass
+                if phash_close or anchor_close:
                     existing = (rid, snap or "", hist_j or "[]", arch)
                     break
 
@@ -911,29 +923,47 @@ class FrameMemory:
             logger.info(f"[memory_l1] archive_old: {n} 条 > {ttl_days} 天未用 → archived")
         return n
 
-    def dedup(self, phash_tol: int = 2, xy_tol: int = 10) -> int:
-        """phash 距离 ≤ 2 + 坐标差 < 10px 的合并: 累加 hit/success/fail. 返回合并条数."""
+    def dedup(self, phash_tol: int = PENDING_PHASH_TOL,
+              xy_tol: int = PENDING_XY_TOL) -> int:
+        """合并重复条目, 跟 remember() 的 existing 判据保持一致.
+
+        判据 (任一命中即合并):
+          - phash 距离 ≤ phash_tol (默认 12)
+          - anchor_phash 距离 ≤ ANCHOR_PHASH_DIST_THRESHOLD (默认 6)
+        且坐标差 < xy_tol (默认 30).
+
+        返回合并的重复条数. hit_count/success_count/fail_count 累加到留下的那条.
+        """
         with self._lock:
             rows = list(self._db.execute(
-                "SELECT id, target_name, phash, action_x, action_y, "
+                "SELECT id, target_name, phash, anchor_phash, action_x, action_y, "
                 "       hit_count, success_count, fail_count, history_json "
                 "FROM frame_action WHERE archived=0 ORDER BY id"
             ))
             merged = 0
-            seen: dict = {}   # (target, phash 桶) -> (id, x, y)
+            seen: list = []   # [(id, x, y, target, phash_int, anchor_int)]
             to_delete: set = set()
             for row in rows:
-                rid, tgt, ph_s, x, y, hits, succ, fail, hist_j = row
+                rid, tgt, ph_s, anch_s, x, y, hits, succ, fail, hist_j = row
                 ph = int(ph_s)
-                # 找已 seen 的兼容条目
+                try:
+                    anch = int(anch_s) if anch_s and anch_s != "0" and anch_s != "" else 0
+                except Exception:
+                    anch = 0
                 hit_existing = None
-                for (other_id, ox, oy, ot, oph) in seen.values():
-                    if (ot == tgt and _hamming(ph, oph) <= phash_tol
-                            and abs(ox - x) < xy_tol and abs(oy - y) < xy_tol):
+                for (other_id, ox, oy, ot, oph, oanch) in seen:
+                    if ot != tgt:
+                        continue
+                    if abs(ox - x) >= xy_tol or abs(oy - y) >= xy_tol:
+                        continue
+                    phash_close = _hamming(ph, oph) <= phash_tol
+                    anchor_close = (anch != 0 and oanch != 0 and
+                                    _hamming(anch, oanch) <= ANCHOR_PHASH_DIST_THRESHOLD)
+                    if phash_close or anchor_close:
                         hit_existing = other_id
                         break
                 if hit_existing is None:
-                    seen[rid] = (rid, x, y, tgt, ph)
+                    seen.append((rid, x, y, tgt, ph, anch))
                     continue
                 # 合并到 hit_existing
                 self._db.execute(
@@ -955,7 +985,7 @@ class FrameMemory:
         if merged:
             self._rebuild_bktrees()
             self._lru.clear()
-            logger.info(f"[memory_l1] dedup: 合并 {merged} 条")
+            logger.info(f"[memory_l1] dedup: 合并 {merged} 条 (phash≤{phash_tol} 或 anchor≤{ANCHOR_PHASH_DIST_THRESHOLD}, xy<{xy_tol})")
         return merged
 
     def stats(self, target: str = "") -> dict:

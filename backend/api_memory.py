@@ -149,3 +149,18 @@ async def memory_pending_discard(key: str):
     if not ok:
         raise HTTPException(404, "key 不存在")
     return {"ok": True, "key": key}
+
+
+@router.post("/api/memory/dedup")
+async def memory_dedup():
+    """一键合并已入库的重复条目.
+    判据: 同 target + 坐标差 <30px + (phash≤12 或 anchor 距≤6).
+    场景: remember() 老逻辑 phash<3 太严格, 同位置同弹窗只要稍变就被当新条目入库,
+    导致同 (target, xy) 出现多条记录 (例: dismiss_popups (899,53) 出现 2 条).
+    本接口扫一遍现有 frame_action, 把同条按新判据合并 hit/success/fail 计数."""
+    import asyncio as _aio
+    mem = _get_memory()
+    if mem is None:
+        raise HTTPException(503)
+    n = await _aio.to_thread(mem.dedup)
+    return {"ok": True, "merged": int(n)}

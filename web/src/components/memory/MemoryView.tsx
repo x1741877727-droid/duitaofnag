@@ -17,6 +17,7 @@ import {
   fetchPendingList,
   pendingSampleSrc,
   discardPending,
+  dedupMemory,
   type MemoryRecord,
   type MemoryDetail,
   type MemoryListResp,
@@ -92,6 +93,14 @@ export function MemoryView() {
     setViewer(null)
     setTick((x) => x + 1)
   }
+  async function onDedup() {
+    if (!confirm('合并已入库的重复条目?\n判据: 同 target + 坐标差 <30px + (phash≤12 或 anchor 距≤6).\n会累加 hit/success/fail 计数.')) return
+    try {
+      const r = await dedupMemory()
+      alert(`合并完成: 删除 ${r.merged} 条重复 (原计数已累加到留下的)`)
+    } catch (e) { alert(String(e)); return }
+    setTick((x) => x + 1)
+  }
 
   return (
     <div className="flex flex-col gap-3 h-full min-h-0">
@@ -109,7 +118,9 @@ export function MemoryView() {
             <Stat label="率" value={`${(overall.rate * 100).toFixed(1)}%`} />
           </div>
         ) : null}
-        <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setTick((x) => x + 1)}>刷新</Button>
+        <Button variant="outline" size="sm" className="ml-auto" onClick={onDedup}
+                title="合并坐标接近且 phash 或 anchor 相似的重复条目">合并重复</Button>
+        <Button variant="ghost" size="sm" onClick={() => setTick((x) => x + 1)}>刷新</Button>
       </div>
 
       {/* target 筛选 (放第二行, 跟数据条分离) */}
