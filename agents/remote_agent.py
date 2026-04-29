@@ -46,6 +46,7 @@ except ImportError:
 # =====================
 
 PORT = 9100
+GAMEBOT_PORT = 8900             # 主 GameBot 后端 + UI, 也透出公网, 远程能看 Web UI
 WORK_DIR = Path.home()
 TOKEN_FILE = Path(__file__).parent / ".remote_agent_token.txt"
 COMMAND_TIMEOUT = 600  # 10 分钟
@@ -67,6 +68,7 @@ TOKEN = _load_or_create_token()
 START_TIME = time.time()
 CURRENT_DIR = WORK_DIR
 CLOUDFLARE_URL = ""
+GAMEBOT_URL = ""                # 8900 公网 URL (GameBot Web UI 入口)
 HOSTNAME = socket.gethostname()
 COMMAND_HISTORY: list[dict] = []
 
@@ -92,14 +94,16 @@ logger = logging.getLogger(__name__)
 BEACON_URL = "http://171.80.4.221:9901/api/beacon"
 
 def _post_beacon():
-    """把 cloudflared URL 上报到 gameproxy beacon，Claude 查一次就能找到"""
-    if not CLOUDFLARE_URL:
+    """把 cloudflared URL 上报到 gameproxy beacon，Claude 查一次就能找到.
+    现在同时上报 agent (9100) 和 gamebot (8900) 两个 URL."""
+    if not CLOUDFLARE_URL and not GAMEBOT_URL:
         return
     import urllib.request
     data = json.dumps({
         "hostname": HOSTNAME,
         "url": CLOUDFLARE_URL,
-        "ui": f"{CLOUDFLARE_URL}/ui?token={TOKEN}",
+        "ui": f"{CLOUDFLARE_URL}/ui?token={TOKEN}" if CLOUDFLARE_URL else "",
+        "gamebot_url": GAMEBOT_URL,
         "token": TOKEN,
         "platform": sys.platform,
     }).encode()
@@ -107,37 +111,52 @@ def _post_beacon():
                                   headers={"Content-Type": "application/json"}, method="POST")
     try:
         urllib.request.urlopen(req, timeout=5)
-        logger.info(f"beacon 上报成功: {CLOUDFLARE_URL}")
+        logger.info(f"beacon 上报成功: agent={CLOUDFLARE_URL} gamebot={GAMEBOT_URL}")
     except Exception as e:
         logger.debug(f"beacon 上报失败(可忽略): {e}")
 
-def _start_cloudflared():
-    global CLOUDFLARE_URL
+def _start_cloudflared_for(port: int, label: str, on_url):
+    """通用 cloudflared 拉起 + URL 解析. on_url(url) 命中后回调 (写全局变量 + 上报 beacon)."""
     try:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://localhost:{PORT}"],
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}", "--no-autoupdate"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             creationflags=flags,
         )
-        logger.info("cloudflared 启动中，等待公网 URL...")
+        logger.info(f"cloudflared({label}:{port}) 启动中，等待公网 URL...")
         for raw in proc.stdout:
             line = raw.decode("utf-8", errors="replace")
             m = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', line)
             if m:
-                CLOUDFLARE_URL = m.group()
-                logger.info(f"Cloudflare URL: {CLOUDFLARE_URL}")
-                print(f"\n  公网 URL: {CLOUDFLARE_URL}")
-                print(f"  Web UI:  {CLOUDFLARE_URL}/ui?token={TOKEN}\n")
-                _post_beacon()
+                url = m.group()
+                logger.info(f"Cloudflare URL ({label}): {url}")
+                on_url(url)
                 break
         proc.wait()
     except FileNotFoundError:
-        logger.warning("cloudflared 未安装，跳过（仅局域网可用）")
+        logger.warning(f"cloudflared 未安装，{label} 隧道跳过（仅局域网可用）")
     except Exception as e:
-        logger.warning(f"cloudflared 启动失败: {e}")
+        logger.warning(f"cloudflared({label}) 启动失败: {e}")
 
-threading.Thread(target=_start_cloudflared, daemon=True).start()
+def _on_agent_url(url: str):
+    global CLOUDFLARE_URL
+    CLOUDFLARE_URL = url
+    print(f"\n  公网 URL: {url}")
+    print(f"  Web UI:  {url}/ui?token={TOKEN}\n")
+    _post_beacon()
+
+def _on_gamebot_url(url: str):
+    global GAMEBOT_URL
+    GAMEBOT_URL = url
+    print(f"\n  GameBot UI 公网: {url}\n")
+    _post_beacon()  # 重报一次, 让 beacon 同时拿到 gamebot_url
+
+# 两个独立 cloudflared: 9100 (agent) + 8900 (GameBot UI)
+threading.Thread(target=_start_cloudflared_for,
+                 args=(PORT, "agent", _on_agent_url), daemon=True).start()
+threading.Thread(target=_start_cloudflared_for,
+                 args=(GAMEBOT_PORT, "gamebot", _on_gamebot_url), daemon=True).start()
 
 # =====================
 # 命令执行 (无白名单)
@@ -335,6 +354,7 @@ async def root():
         "python": sys.version,
         "current_dir": str(CURRENT_DIR),
         "cf_url": CLOUDFLARE_URL,
+        "gamebot_url": GAMEBOT_URL,
         "ui": f"http://localhost:{PORT}/ui?token={TOKEN}",
         "hint": "需要 X-Auth header 执行命令",
     }
@@ -497,7 +517,9 @@ def main():
     print(tok_line.ljust(64) + "│")
     print(f"  └──────────────────────────────────────────────────────────┘")
     print()
-    print("  cloudflared 启动中... (公网 URL 稍后显示)")
+    print(f"  GameBot UI:  http://{local_ip}:{GAMEBOT_PORT}  (公网随后)")
+    print()
+    print("  cloudflared 启动中... (agent + gamebot 各 1 条隧道)")
     print("  按 Ctrl+C 停止")
     print("=" * 68)
     print()
