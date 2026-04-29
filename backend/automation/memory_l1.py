@@ -527,9 +527,11 @@ class FrameMemory:
 
     def _load_pending_from_db(self) -> int:
         """启动时从 SQLite 恢复 _pending 字典. 返回恢复条数.
-        过期 (>TTL) 的不恢复并清掉表 + 快照.
-        重复 (median 坐标已在 frame_action canonical 里) 也直接清掉, 避免重复入库."""
+        过期 (>TTL) 的不恢复.
+        重复 (跟 canonical 已存条目命中: xy±10 AND phash≤25, 或 phash≤12, 或 anchor≤6)
+        也直接清掉, 避免修复前累的旧 pending 重新满 5 重复入库."""
         SAME_ENTRY_XY_TOL = 10
+        XY_PHASH_TOL = 25
         n_loaded = 0
         n_expired = 0
         n_stale_dup = 0
@@ -540,12 +542,23 @@ class FrameMemory:
                     "SELECT pkey, target_name, phash, samples_json, ts_first "
                     "FROM pending_entries"
                 ))
-                # 同时拉 canonical 的 (target, x, y) 用于重复检测
-                canonical_xys = {}   # target → list[(x, y)]
-                for ctgt, cx, cy in self._db.execute(
-                    "SELECT target_name, action_x, action_y FROM frame_action WHERE archived=0"
+                # 拉 canonical 元数据用于重复检测
+                canonical_by_tgt: dict[str, list] = {}   # target → [(x, y, phash, anchor)]
+                for ctgt, cx, cy, cph, canch in self._db.execute(
+                    "SELECT target_name, action_x, action_y, phash, anchor_phash "
+                    "FROM frame_action WHERE archived=0"
                 ):
-                    canonical_xys.setdefault(ctgt, []).append((int(cx), int(cy)))
+                    try:
+                        cph_int = int(cph)
+                    except Exception:
+                        cph_int = 0
+                    try:
+                        canch_int = int(canch) if canch and canch not in ("", "0") else 0
+                    except Exception:
+                        canch_int = 0
+                    canonical_by_tgt.setdefault(ctgt, []).append(
+                        (int(cx), int(cy), cph_int, canch_int)
+                    )
         except sqlite3.OperationalError:
             # 表不存在 (老 db) → schema 会建; 第一次没数据
             return 0
@@ -553,35 +566,47 @@ class FrameMemory:
             try:
                 age = now - float(ts_first)
                 if age >= PENDING_TTL_S:
-                    # 过期, 清掉
                     self._cleanup_pending_snaps(pkey)
                     self._remove_pending_entry(pkey)
                     n_expired += 1
                     continue
                 samples_raw = json.loads(samples_json or "[]")
                 samples = [tuple(s) for s in samples_raw]
-                # 算 median 坐标, 跟 canonical 比 — 如果已存在就丢这个 pending
+                # median + anchor 用于重复判定
+                is_dup = False
                 if samples:
                     xs = sorted(s[0] for s in samples)
                     ys = sorted(s[1] for s in samples)
                     mx = xs[len(xs) // 2]
                     my = ys[len(ys) // 2]
-                    is_dup = False
-                    for cx, cy in canonical_xys.get(tgt, []):
-                        if abs(cx - mx) <= SAME_ENTRY_XY_TOL and abs(cy - my) <= SAME_ENTRY_XY_TOL:
+                    try:
+                        ph_int = int(ph_str)
+                    except Exception:
+                        ph_int = 0
+                    # 取离 median 最近的 sample 的 anchor (跟 _pending_add commit 路径一致)
+                    best_sample = min(samples, key=lambda s: abs(s[0]-mx) + abs(s[1]-my))
+                    p_anchor = int(best_sample[3]) if len(best_sample) > 3 else 0
+                    for cx, cy, cph, canch in canonical_by_tgt.get(tgt, []):
+                        xy_close = abs(cx - mx) <= SAME_ENTRY_XY_TOL and abs(cy - my) <= SAME_ENTRY_XY_TOL
+                        ph_dist = _hamming(cph, ph_int)
+                        phash_strict = ph_dist <= PENDING_PHASH_TOL
+                        phash_loose = ph_dist <= XY_PHASH_TOL
+                        anchor_close = (canch != 0 and p_anchor != 0 and
+                                        _hamming(canch, p_anchor) <= ANCHOR_PHASH_DIST_THRESHOLD)
+                        if (xy_close and phash_loose) or phash_strict or anchor_close:
                             is_dup = True
                             break
-                    if is_dup:
-                        self._cleanup_pending_snaps(pkey)
-                        self._remove_pending_entry(pkey)
-                        n_stale_dup += 1
-                        continue
+                if is_dup:
+                    self._cleanup_pending_snaps(pkey)
+                    self._remove_pending_entry(pkey)
+                    n_stale_dup += 1
+                    continue
                 self._pending[tgt].append({
                     "key": pkey,
                     "phash": int(ph_str),
                     "samples": samples,
                     "ts_first": float(ts_first),
-                    "_target": tgt,   # 内部辅助, persist 用
+                    "_target": tgt,
                 })
                 n_loaded += 1
             except Exception as exc:
@@ -589,7 +614,7 @@ class FrameMemory:
         if n_expired:
             logger.info(f"[memory_l1] 启动清掉 {n_expired} 条过期 pending (>{PENDING_TTL_S}s)")
         if n_stale_dup:
-            logger.info(f"[memory_l1] 启动清掉 {n_stale_dup} 条 stale pending (median 坐标已在 canonical 内)")
+            logger.info(f"[memory_l1] 启动清掉 {n_stale_dup} 条 stale pending (跟 canonical 重复)")
         return n_loaded
 
     def _pending_add(self, target: str, phs: int, x: int, y: int,
@@ -829,13 +854,14 @@ class FrameMemory:
         anchor_ph = _compute_anchor_phash(frame, x, y)
 
         with self._lock:
-            # 找已存在条目 — 主判据 = 坐标 (±SAME_ENTRY_XY_TOL=10px), 兜底判据 = phash/anchor.
-            # 思路: 同 target + 同坐标 = 同弹窗按钮 (不同弹窗刚好落同 ±10px 概率极低,
-            #   接受). phash / anchor 是补强信号, 老条目没 anchor 也能照常合并.
-            #   解决: 弹窗整体变 (红点动画 / 公告内容 / 时间戳) phash 漂 > 12, 老 #1
-            #   anchor 字段空 → 之前用 phash<3 / phash<=12 都失败 → 走蓄水池 → 5 次
-            #   后 commit 成同坐标重复条目 (例: #2/#4 都在 (899,53)).
+            # 找已存在条目 — 三条 OR 任一命中即视为同条目 (走 UPDATE, 不进 pending):
+            #   A. xy ±10 AND phash ≤25  — 同坐标 + 内容相关 (主路径, 处理 overlay 变化)
+            #   B. phash ≤12             — 纯 phash 接近 (无视坐标飘移)
+            #   C. anchor ≤6             — anchor 区域指纹接近 (老条目无 anchor 时不命中)
+            # 反例: 两个不同弹窗刚好都落 (834,84) ±10 → A 的 phash 一般 >25 不会撞,
+            #   B 也 >12, C 看 anchor (相同 X 按钮可能撞 — 这里靠 phash 25 阈值过滤).
             SAME_ENTRY_XY_TOL = 10
+            XY_PHASH_TOL = 25         # 同坐标但 phash 略松 (handle overlay 变化 / 红点)
             existing = None
             existing_needs_anchor_backfill = False
             for row in self._db.execute(
@@ -847,16 +873,18 @@ class FrameMemory:
             ):
                 rid, ph_s, anch_s, ox, oy, snap, hist_j, arch = row
                 xy_close = abs(int(ox) - x) <= SAME_ENTRY_XY_TOL and abs(int(oy) - y) <= SAME_ENTRY_XY_TOL
-                phash_close = _hamming(int(ph_s), ph) <= PENDING_PHASH_TOL
+                ph_dist = _hamming(int(ph_s), ph)
+                phash_strict = ph_dist <= PENDING_PHASH_TOL          # ≤12
+                phash_loose  = ph_dist <= XY_PHASH_TOL               # ≤25
                 anchor_close = False
                 if anch_s and anch_s != "0" and anch_s != "":
                     try:
                         anchor_close = _hamming(int(anch_s), anchor_ph) <= ANCHOR_PHASH_DIST_THRESHOLD
                     except Exception:
                         pass
-                if xy_close or phash_close or anchor_close:
+                # A: 同坐标且内容相关 / B: phash 严格 / C: anchor 严格
+                if (xy_close and phash_loose) or phash_strict or anchor_close:
                     existing = (rid, snap or "", hist_j or "[]", arch)
-                    # 老条目无 anchor → 顺手回填, 让 query() 后续能用 anchor 路径
                     if (not anch_s or anch_s in ("0", "")) and anchor_ph:
                         existing_needs_anchor_backfill = True
                     break
