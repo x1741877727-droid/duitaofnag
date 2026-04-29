@@ -264,47 +264,64 @@ export function PhaseTester() {
     }
 
     async function runOneSquad(sq: SquadAssignment): Promise<void> {
+      // 重设计 (2026-04-30): 不再对 P0/P1/P2 用 await Promise.all 等齐.
+      // 老逻辑: 队长 P2 完后白等慢队员 → 4-5s 浪费 (实测 inst0 等 inst2 慢 4s).
+      // 新逻辑: 每实例独立跑 P0→P1→P2 链 (per-instance pipeline);
+      //   队长 P2 完立刻进 P3a 出 scheme (不等队员);
+      //   队员 P2 完 + 队长 scheme 就绪 → 立即跑 P3b.
       const all = [sq.leader, ...sq.members]
+      const preSquadPhases = selKeys.filter((k) => !ROLE_PHASES.has(k))   // P0/P1/P2
 
-      // P0/P1/P2 (前三): 全组并发
-      const preSquadPhases = selKeys.filter((k) => !ROLE_PHASES.has(k))
-      for (const phase of preSquadPhases) {
-        const results = await Promise.all(all.map((idx) =>
-          runPhase(idx, phase, idx === sq.leader ? 'captain' : 'member')
-        ))
-        if (results.some((r) => !r.ok) && !keepGoing) return
+      // 每实例独立 P0→P1→P2 串链 (返回 promise: ok=false 时算失败)
+      const p2DonePromises: Record<number, Promise<boolean>> = {}
+      for (const idx of all) {
+        const role: 'captain' | 'member' = idx === sq.leader ? 'captain' : 'member'
+        p2DonePromises[idx] = (async () => {
+          for (const phase of preSquadPhases) {
+            const r = await runPhase(idx, phase, role)
+            if (!r.ok && !keepGoing) return false
+          }
+          return true
+        })()
       }
 
-      // P3a: 队长跑, 拿 scheme
-      let scheme = ''
+      // 队长 P3a: 自己 P0-P2 完立刻跑, 不等队员
+      let schemePromise: Promise<{ ok: boolean; scheme: string; error: string }> | null = null
       if (selKeys.includes('P3a')) {
-        const r = await runPhase(sq.leader, 'P3a', 'captain')
-        if (!r.ok && !keepGoing) return
-        scheme = r.scheme
-        if (!scheme) {
-          addLog({
-            timestamp: Date.now() / 1000, instance: sq.leader, level: 'warn',
-            message: `[阶段测试·大组] 大组 ${sq.group} 队长 P3a 没拿到 scheme, 队员 P3b 跳过`,
-          })
+        schemePromise = (async () => {
+          const ok = await p2DonePromises[sq.leader]
+          if (!ok && !keepGoing) return { ok: false, scheme: '', error: 'leader P0-P2 失败' }
+          return runPhase(sq.leader, 'P3a', 'captain')
+        })()
+      }
+
+      // 队员 P3b: 自己 P0-P2 完 AND 队长 scheme 就绪 → 立即跑 (互不等)
+      const p3bPromises: Promise<unknown>[] = []
+      if (selKeys.includes('P3b') && sq.members.length > 0 && schemePromise) {
+        for (const memIdx of sq.members) {
+          p3bPromises.push((async () => {
+            const memOk = await p2DonePromises[memIdx]
+            if (!memOk && !keepGoing) return
+            const lr = await schemePromise!
+            if (!lr.ok || !lr.scheme) {
+              addLog({
+                timestamp: Date.now() / 1000, instance: memIdx, level: 'warn',
+                message: `[阶段测试·大组] #${memIdx} 等不到 scheme (大组 ${sq.group} 队长 P3a ${lr.error || '无 scheme'}), P3b 跳过`,
+              })
+              return
+            }
+            await runPhase(memIdx, 'P3b', 'member', lr.scheme)
+          })())
         }
       }
 
-      // P3b: 所有队员并发, 用队长的 scheme
-      if (selKeys.includes('P3b') && sq.members.length > 0) {
-        if (!scheme) {
-          addLog({
-            timestamp: Date.now() / 1000, instance: sq.leader, level: 'warn',
-            message: `[阶段测试·大组] 大组 ${sq.group} 没 scheme, P3b 队员跳过`,
-          })
-        } else {
-          const results = await Promise.all(sq.members.map((idx) =>
-            runPhase(idx, 'P3b', 'member', scheme)
-          ))
-          if (results.some((r) => !r.ok) && !keepGoing) return
-        }
-      }
+      // 等队员 P3b 全部完, 再跑队长 P4 (P4 设计上要等队员就绪)
+      await Promise.allSettled([
+        ...(schemePromise ? [schemePromise] : []),
+        ...p3bPromises,
+      ])
 
-      // P4: 队长跑 (会等队员 P3b 完了才到这, 因为上面 await 了)
+      // P4: 队长收尾
       if (selKeys.includes('P4')) {
         await runPhase(sq.leader, 'P4', 'captain')
       }
