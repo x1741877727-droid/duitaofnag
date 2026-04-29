@@ -116,7 +116,10 @@ def _post_beacon():
         logger.debug(f"beacon 上报失败(可忽略): {e}")
 
 def _start_cloudflared_for(port: int, label: str, on_url):
-    """通用 cloudflared 拉起 + URL 解析. on_url(url) 命中后回调 (写全局变量 + 上报 beacon)."""
+    """通用 cloudflared 拉起 + URL 解析. on_url(url) 命中后回调 (写全局变量 + 上报 beacon).
+
+    注意: 必须持续 drain stdout, 否则 OS pipe buffer (Windows ~64KB) 满了后
+    cloudflared 写日志会阻塞 → 隧道整体卡死 → 502."""
     try:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         proc = subprocess.Popen(
@@ -125,14 +128,17 @@ def _start_cloudflared_for(port: int, label: str, on_url):
             creationflags=flags,
         )
         logger.info(f"cloudflared({label}:{port}) 启动中，等待公网 URL...")
+        url_found = False
         for raw in proc.stdout:
+            if url_found:
+                continue   # 持续读 + 丢弃, 防 pipe 阻塞
             line = raw.decode("utf-8", errors="replace")
             m = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', line)
             if m:
                 url = m.group()
                 logger.info(f"Cloudflare URL ({label}): {url}")
                 on_url(url)
-                break
+                url_found = True
         proc.wait()
     except FileNotFoundError:
         logger.warning(f"cloudflared 未安装，{label} 隧道跳过（仅局域网可用）")
