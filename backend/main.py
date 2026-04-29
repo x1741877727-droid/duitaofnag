@@ -6,6 +6,7 @@
 """
 
 import argparse
+import faulthandler
 import logging
 import os
 import socket
@@ -13,6 +14,14 @@ import sys
 import threading
 
 import uvicorn
+
+# native crash 保护: cv2 / OpenVINO / ONNX 偶发 segfault 时, faulthandler 把 C 栈
+# dump 到 stderr (我们的 exe.err.log), 让我们能定位 native 崩溃原因. 之前 backend
+# 莫名死掉 + err.log 无 traceback = 大概率是 native crash 没被 Python 捕获.
+try:
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+except Exception:
+    pass
 
 # 项目根目录（兼容 Nuitka/PyInstaller 打包后）
 if getattr(sys, 'frozen', False):

@@ -16,8 +16,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+
+# perceive 内部 5 个 to_thread 并发, 6 inst × 5 = 30 concurrent native calls.
+# cv2.matchTemplate / ONNX / OpenVINO 在 30+ 并发下偶发 native crash (无 Python
+# traceback, backend 直接 silent 死掉). 加 semaphore 限制全局同时 perceive 的
+# 实例数 — 默认 3, 仍能并发但不至于把 native lib 撑爆.
+_PERCEIVE_CONCURRENCY = int(os.environ.get("GAMEBOT_PERCEIVE_CONCURRENCY", "3"))
+_perceive_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_perceive_sem() -> asyncio.Semaphore:
+    """懒初始化 — 必须在 asyncio loop 里 get."""
+    global _perceive_sem
+    if _perceive_sem is None:
+        _perceive_sem = asyncio.Semaphore(_PERCEIVE_CONCURRENCY)
+    return _perceive_sem
 
 import numpy as np
 
@@ -92,7 +109,16 @@ async def perceive(ctx: RunContext) -> Perception:
       - quad 命中大厅 → short-circuit 跳 login_tpl 后续 + close_x_tpl + dismiss_tpl
       - phash 算 1 次, 不再 quad 内 + perceive 末重复
       - memory query 也 to_thread 防 GIL 阻塞
+
+    并发保护: 全局 semaphore 限制同时 perceive 的实例数 (默认 3),
+    防 cv2/ONNX/OpenVINO 在 30+ 并发下 native crash 拖死整个 backend.
     """
+    # 全局并发限制
+    async with _get_perceive_sem():
+        return await _perceive_locked(ctx)
+
+
+async def _perceive_locked(ctx: RunContext) -> Perception:
     import time as _time
     _t0 = _time.perf_counter()
     _perf = {"parallel_block": 0.0, "quad": 0.0,
