@@ -154,17 +154,23 @@ export function PhaseTester() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ instance: tgt, phase, role: selRole }),
           })
-          const data = await r.json()
-          duration = data.duration_ms ?? (performance.now() - t0)
-          if (!r.ok) {
+          // 容错: 后端可能返 502/HTML/空 — 先 text 再尝试 JSON, 失败显示明确错误
+          const text = await r.text()
+          duration = performance.now() - t0
+          let data: any = null
+          try { data = text ? JSON.parse(text) : null } catch {}
+          if (data === null) {
+            errMsg = `后端响应非 JSON (HTTP ${r.status}): ${text.slice(0, 80) || '空'}`
+          } else if (!r.ok) {
             errMsg = data.detail || data.error || `HTTP ${r.status}`
           } else {
             ok = data.ok
             phaseName = data.phase_name || phase
             errMsg = data.error || ''
+            if (typeof data.duration_ms === 'number') duration = data.duration_ms
           }
         } catch (e) {
-          errMsg = String(e)
+          errMsg = `网络异常: ${String(e)}`
         }
         done += 1
         updateProg()
@@ -231,22 +237,34 @@ export function PhaseTester() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ instance: tgt, phase, role, scheme }),
         })
-        const data = await r.json()
-        const dur = data.duration_ms ?? (performance.now() - t0)
-        const ok = r.ok && data.ok
-        const errMsg = !r.ok ? (data.detail || `HTTP ${r.status}`) : (data.error || '')
+        // 容错: 后端 502 / 空响应不要让 JSON.parse 炸 cryptic SyntaxError
+        const text = await r.text()
+        let data: any = null
+        try { data = text ? JSON.parse(text) : null } catch {}
+        const dur = (data && data.duration_ms) ?? (performance.now() - t0)
+        let ok = false
+        let errMsg = ''
+        if (data === null) {
+          errMsg = `后端响应非 JSON (HTTP ${r.status}, 可能崩了): ${text.slice(0, 80) || '空'}`
+        } else if (!r.ok) {
+          errMsg = data.detail || data.error || `HTTP ${r.status}`
+        } else {
+          ok = !!data.ok
+          errMsg = data.error || ''
+        }
+        const phaseName = (data && data.phase_name) || phase
         done += 1
         updateProg()
         addPhaseResult({
-          phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${data.phase_name || phase}`,
+          phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phaseName}`,
           ok, duration_ms: dur, error: errMsg,
         })
         addLog({
           timestamp: Date.now() / 1000, instance: tgt,
           level: ok ? 'info' : (errMsg ? 'error' : 'warn'),
-          message: `[阶段测试·大组] #${tgt} ${data.phase_name || phase} ${ok ? '✓ 完成' : '✗ 失败'} (${dur.toFixed(0)}ms)${errMsg ? ' — ' + errMsg : ''}`,
+          message: `[阶段测试·大组] #${tgt} ${phaseName} ${ok ? '✓ 完成' : '✗ 失败'} (${dur.toFixed(0)}ms)${errMsg ? ' — ' + errMsg : ''}`,
         })
-        return { ok, scheme: data.game_scheme_url || '', error: errMsg }
+        return { ok, scheme: (data && data.game_scheme_url) || '', error: errMsg }
       } catch (e) {
         done += 1
         updateProg()
