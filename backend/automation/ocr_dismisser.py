@@ -148,18 +148,27 @@ class OcrDismisser:
     def warmup(cls):
         """预热 OCR 引擎（启动时调用一次）
 
-        参数解析优先级：
-          1. config/runtime.json 里 ocr_backend.ocr_params（auto_configure 写的，跨硬件首选）
-          2. 自动检测 DirectML provider（Win 用户 pip install onnxruntime-directml 后自动启用）
-          3. 其他 fallback 到 CPU
+        后端选择优先级：
+          1. config/runtime.json 里 ocr_backend.ocr_params (auto_configure 写的)
+          2. 默认走 OpenVINO (Intel CPU/iGPU/dGPU 全兼容; thread-safe; 无 DML 那套
+             pybind11 utf-8 解码 bug; 虚拟显卡环境也能落 CPU 跑)
+          3. 装不到 OpenVINO 才退到 onnxruntime CPU (RapidOCR 默认)
 
-        实测：CPU 1570ms → DirectML 250ms (~6x)
+        DirectML 路径已弃用 — 中文 Windows 上 onnxruntime C++ 异常字符串走 ANSI
+        codepage (GBK), pybind11 用 utf-8 strict 解必炸; 虚拟显卡上 op 支持也不
+        全, 实测 6 实例并发不可靠.
+
+        速度参考 (RapidOCR PP-OCRv4_mobile, 960×540 单帧):
+          CPU (基准)     ~1500ms
+          OpenVINO CPU   ~30-80ms (Intel CPU 编译器优化)
+          OpenVINO iGPU  ~30-50ms
+          DirectML       50-250ms 但偶发 utf-8 崩 → 弃
         """
         if cls._shared_ocr is not None:
             return
 
-        # 中文 Windows 上 onnxruntime C++ 异常文本是 GBK, pybind 用 utf-8 strict 解
-        # 会抛 UnicodeDecodeError 把 OCR worker 拖死. patch 必须在创 session 前生效.
+        # 注意: yolo_detector 还是用 onnxruntime, 这个 patch 对 yolo 仍有保护意义.
+        # OCR 这边走 OpenVINO 后已经不踩这条路.
         try:
             from . import _onnxruntime_patch
             _onnxruntime_patch.apply()
@@ -171,21 +180,27 @@ class OcrDismisser:
 
         params = cls._load_ocr_params_from_config()
         if not params:
-            # 兜底：直接探测
+            # 默认走 OpenVINO; OpenVINO 装了就用, 没装 RapidOCR 自己会 raise,
+            # 我们 except 后退回 onnxruntime CPU.
             try:
-                import onnxruntime as ort
-                if "DmlExecutionProvider" in ort.get_available_providers():
-                    params = {"EngineConfig.onnxruntime.use_dml": True}
-                    logger.info("RapidOCR: 自动检测启用 DirectML GPU 加速")
-            except Exception:
-                pass
-
-        if not params:
-            logger.info("RapidOCR: 走 CPU（建议跑 python tools/auto_configure.py 启用 GPU 加速）")
+                import openvino  # noqa: F401  探测可用性
+                params = {
+                    "Det.engine_type": "openvino",
+                    "Cls.engine_type": "openvino",
+                    "Rec.engine_type": "openvino",
+                }
+                logger.info("RapidOCR: 默认 OpenVINO 后端 (CPU/iGPU/dGPU 自适应, thread-safe)")
+            except ImportError:
+                logger.info(
+                    "RapidOCR: OpenVINO 未装 → 退到 onnxruntime CPU. "
+                    "建议: pip install openvino"
+                )
 
         try:
             cls._shared_ocr = RapidOCR(params=params) if params else RapidOCR()
-        except TypeError:
+        except Exception as e:
+            # OpenVINO 启动失败 (例如 model 不兼容), 退到默认 onnxruntime CPU
+            logger.warning(f"RapidOCR 启 {params and params.get('Det.engine_type','?')} 失败, 退默认: {e}")
             cls._shared_ocr = RapidOCR()
         logger.info("RapidOCR 预热完成")
 
