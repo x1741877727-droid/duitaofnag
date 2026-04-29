@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
@@ -140,6 +141,9 @@ class OcrDismisser:
 
     # 类级别共享 OCR 实例（所有 OcrDismisser 实例共用，只初始化一次）
     _shared_ocr = None
+    # OpenVINO 后端单 InferRequest 不允许多线程并发调用 → 序列化主进程的 ocr() 调用.
+    # 真正并发由 OcrPool (3 个独立 worker 进程) 提供, 主进程这把锁只是防 "busy" 崩.
+    _inference_lock = threading.Lock()
 
     def __init__(self, max_rounds: int = 20):
         self.max_rounds = max_rounds
@@ -330,7 +334,8 @@ class OcrDismisser:
             tags["w"], tags["h"] = w, h
             ocr = self._get_ocr()
             try:
-                result = ocr(screenshot)
+                with OcrDismisser._inference_lock:
+                    result = ocr(screenshot)
             except (RuntimeError, UnicodeDecodeError) as e:
                 logger.warning(f"[ocr] _ocr_all 推理异常 (返回空): {e}")
                 tags["n_texts"] = 0
@@ -403,7 +408,8 @@ class OcrDismisser:
             crop = apply_preprocessing(crop, methods)
             ocr = self._get_ocr()
             try:
-                result = ocr(crop)
+                with OcrDismisser._inference_lock:
+                    result = ocr(crop)
             except (RuntimeError, UnicodeDecodeError) as e:
                 logger.warning(f"[ocr] _ocr_roi_with_preproc 推理异常 (返回空): {e}")
                 tags["n_texts"] = 0
@@ -452,7 +458,8 @@ class OcrDismisser:
 
             ocr = self._get_ocr()
             try:
-                result = ocr(crop)
+                with OcrDismisser._inference_lock:
+                    result = ocr(crop)
             except (RuntimeError, UnicodeDecodeError) as e:
                 logger.warning(f"[ocr] _ocr_roi 推理异常 (返回空): {e}")
                 tags["n_texts"] = 0
