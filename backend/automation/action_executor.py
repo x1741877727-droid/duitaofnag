@@ -98,9 +98,34 @@ class ActionExecutor:
                 logger.debug(f"[executor] set_tap err: {e}")
         _perf["set_tap"] = (_time.perf_counter() - _t) * 1000
 
-        # tap 后等待 (默认 0.2s, 让画面有时间响应)
+        # tap 后用 wait_for_change 自适应等画面变化, 替代固定 sleep.
+        # 优势: 快机 ~100ms 退出, 慢机给到 max_wait_ms 兜底, 不再死等.
+        # 兼容: 若调用方显式给了 act.seconds (比如 P3a 切 tab 等动画), 仍用固定 sleep.
         _t = _time.perf_counter()
-        await asyncio.sleep(act.seconds if act.seconds > 0 else 0.2)
+        shot_after = None
+        if act.seconds > 0:
+            # 调用方有意指定固定时长 (如 P3a 等面板动画)
+            await asyncio.sleep(act.seconds)
+        else:
+            # 默认: 等 phash 变化 (检测到 ≥10 距离立即返, 最多 400ms)
+            from .adb_lite import phash as _phash
+            try:
+                prev_ph = int(_phash(shot_before)) if shot_before is not None else 0
+            except Exception:
+                prev_ph = 0
+            from . import wait_helpers as _wh
+            grab = ctx.device.screenshot
+            shot_after, _ph_after, elapsed, changed = await _wh.wait_for_change(
+                grab, _phash,
+                prev_phash=prev_ph,
+                change_threshold=10,
+                poll_ms=50,
+                max_wait_ms=400,
+            )
+            logger.debug(
+                f"[executor] wait_for_change inst{inst_idx}: "
+                f"{elapsed:.0f}ms changed={changed}"
+            )
         _perf["sleep"] = (_time.perf_counter() - _t) * 1000
 
         # 没要求 verify → 跳过验证 (但仍记录到 pending_memory)
@@ -114,13 +139,14 @@ class ActionExecutor:
             )
             return True
 
-        # 取 after 帧
+        # 取 after 帧 (wait_for_change 已经返了 shot_after, 复用避免再截一次)
         _t = _time.perf_counter()
-        try:
-            shot_after = await ctx.device.screenshot()
-        except Exception as e:
-            logger.debug(f"[executor] verify 截图失败: {e}")
-            return True
+        if shot_after is None:
+            try:
+                shot_after = await ctx.device.screenshot()
+            except Exception as e:
+                logger.debug(f"[executor] verify 截图失败: {e}")
+                return True
         _perf["shot_after"] = (_time.perf_counter() - _t) * 1000
         if shot_after is None:
             return True

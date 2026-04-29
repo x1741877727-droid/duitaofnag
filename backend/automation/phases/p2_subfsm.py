@@ -27,9 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 # 守门常量
-LOBBY_CONFIRM_NEEDED = 2          # 连续 N 帧四元判大厅 → 确认
+LOBBY_CONFIRM_NEEDED = 2          # [legacy fallback] 连续 N 帧四元判大厅 → 确认
+LOBBY_POST_THRESHOLD = 0.92       # 贝叶斯早退: 后验 ≥ 此值即视为大厅
+LOBBY_FALSE_POS_RATE = 0.10       # P(quad fires | 实际不在大厅), 单帧 conf 太低时按这权重
 LOGIN_TIMEOUT_SECONDS = 60.0      # 登录页停留超过此 → game_restart
 EMPTY_STREAK_LIMIT = 12           # 连续 N 帧无目标 + 不在大厅 → game_restart (死屏)
+
+
+def _bayes_update(prior: float, p_frame: float) -> float:
+    """单帧 Bayesian 更新: 后验 = (prior * p) / (prior * p + (1-prior) * (1-p)).
+    p_frame 是这一帧"在大厅"的瞬时概率."""
+    p_frame = max(0.01, min(0.99, p_frame))   # 截断防数值爆炸
+    num = prior * p_frame
+    return num / (num + (1.0 - prior) * (1.0 - p_frame))
 
 
 class P2SubFSM:
@@ -53,26 +63,33 @@ class P2SubFSM:
         else:
             logger.info(f"[P2/R{rnd}] dets=0 (画面无 close_x/action_btn)")
 
-        # 2. 大厅守门 (优先, 防被 close_x 拽出来)
+        # 2. 大厅守门 — 贝叶斯早退 (替代死板 2-frame confirm).
+        #    单帧高 conf (>0.92 后验) 立即退, 慢机 / 边界帧自然多看一眼,
+        #    比 quad-2-frame 平均快 ~600ms.
         if p.quad_lobby_confirmed:
-            ctx.lobby_confirm_count += 1
-            if ctx.lobby_confirm_count >= LOBBY_CONFIRM_NEEDED:
+            # 命中: 用 template_conf 作单帧 P(在大厅), 没值用 0.85 默认
+            p_frame = p.quad_template_conf if p.quad_template_conf > 0.5 else 0.85
+            ctx.lobby_posterior = _bayes_update(ctx.lobby_posterior, p_frame)
+            ctx.lobby_confirm_count += 1   # legacy 计数仍维护, 兼容老 commit_pending 逻辑
+            if ctx.lobby_posterior >= LOBBY_POST_THRESHOLD:
                 n = ActionExecutor.commit_pending_memory(ctx)
                 if n:
-                    logger.info(f"[P2/R{rnd}] 🧠 Memory commit {n} 条 (P2 success)")
+                    logger.info(f"[P2/R{rnd}] Memory commit {n} 条 (P2 success)")
                 return PhaseStep(
                     PhaseResult.NEXT,
-                    note=f"大厅确认 {ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED}, "
+                    note=f"大厅确认 (贝叶斯 post={ctx.lobby_posterior:.3f}, 累计 {ctx.lobby_confirm_count} 帧), "
                          f"关闭 {ctx.popups_closed} 弹窗 · {p.quad_note}",
                     outcome_hint="lobby_confirmed_quad",
                 )
             return PhaseStep(
                 PhaseResult.WAIT,
-                wait_seconds=0.15,
-                note=f"大厅判定 {ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED} ({p.quad_note})",
-                outcome_hint=f"lobby_pending_{ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED}",
+                wait_seconds=0.1,
+                note=f"大厅 pending post={ctx.lobby_posterior:.3f}/{LOBBY_POST_THRESHOLD} ({p.quad_note})",
+                outcome_hint=f"lobby_pending_{ctx.lobby_posterior:.2f}",
             )
         else:
+            # 不命中: 用低 P 值更新 — 不直接归零, 给瞬态过渡帧容错
+            ctx.lobby_posterior = _bayes_update(ctx.lobby_posterior, LOBBY_FALSE_POS_RATE)
             ctx.lobby_confirm_count = 0
 
         # 3. 登录页守门 (60s 超时 → game_restart)
@@ -135,11 +152,13 @@ class P2SubFSM:
         # 这里多余, 反而误伤合法排队 (R14-R16 verify=True 但被加黑名单导致 R17 起 no_target).
 
         # 7. 真 tap — 返回 WAIT, executor 处理 verify + 缓冲 memory
+        # wait_seconds=0: ActionExecutor 内部 wait_for_change 已经 adaptive 等过了,
+        #   再 sleep 是浪费. 让下一 round 立即跑 (burst dismiss 模式 #3).
         ctx.popups_closed += 1
         return PhaseStep(
             PhaseResult.WAIT,
             action=action,
-            wait_seconds=0.3,
+            wait_seconds=0.0,
             note=f"tap {action.label}({action.x},{action.y})",
             outcome_hint="tapped",
         )

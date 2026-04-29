@@ -14,6 +14,7 @@ v3 P2 Perception 层 — 一帧多源识别融合, 纯函数, 无副作用.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -64,6 +65,7 @@ class Perception:
     lobby_template_hit: Optional[Any] = None    # MatchHit, lobby_start_btn 模板命中
     quad_lobby_confirmed: bool = False          # 四元融合判大厅 (含 phash 稳定 1s)
     quad_note: str = ""                          # 四元判定细节 (失败原因)
+    quad_template_conf: float = 0.0             # 大厅模板单帧 conf, 用于贝叶斯早退
 
     # 弹窗信号 (按优先级排序)
     yolo_close_xs: list = field(default_factory=list)     # [Detection], conf>0.5
@@ -83,10 +85,17 @@ class Perception:
 
 
 async def perceive(ctx: RunContext) -> Perception:
-    """跑一帧的所有识别源, 返回汇总 Perception. 各步骤打 PERF log."""
+    """跑一帧的所有识别源, 返回汇总 Perception.
+
+    优化 (2026-04-30 #4 #5):
+      - lobby_tpl + login_tpl + yolo 三组并发跑 (asyncio.gather + to_thread)
+      - quad 命中大厅 → short-circuit 跳 login_tpl 后续 + close_x_tpl + dismiss_tpl
+      - phash 算 1 次, 不再 quad 内 + perceive 末重复
+      - memory query 也 to_thread 防 GIL 阻塞
+    """
     import time as _time
     _t0 = _time.perf_counter()
-    _perf = {"lobby_tpl": 0.0, "login_tpl": 0.0, "yolo": 0.0, "quad": 0.0,
+    _perf = {"parallel_block": 0.0, "quad": 0.0,
              "close_x_tpl": 0.0, "dismiss_btn_tpl": 0.0, "memory": 0.0, "phash": 0.0}
     inst_idx = getattr(ctx, 'instance_idx', '?')
 
@@ -97,115 +106,137 @@ async def perceive(ctx: RunContext) -> Perception:
 
     matcher = ctx.matcher
 
-    # 1. 大厅模板 (lobby_start_btn / lobby_start_game)
-    _t = _time.perf_counter()
-    if matcher is not None:
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Block A 并发: lobby_tpl + login_tpl + YOLO + memory + phash
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    def _run_lobby_tpl():
+        if matcher is None: return None
         for tn in ("lobby_start_btn", "lobby_start_game"):
             try:
                 h = matcher.match_one(shot, tn, threshold=0.75)
             except Exception:
                 h = None
             if h is not None:
-                p.lobby_template_hit = h
-                break
-    _perf["lobby_tpl"] = (_time.perf_counter() - _t) * 1000
+                return h
+        return None
 
-    # 2. 登录页模板
-    _t = _time.perf_counter()
-    if matcher is not None:
+    def _run_login_tpl():
+        if matcher is None: return None
         for tn in LOGIN_TEMPLATE_NAMES:
             try:
                 h = matcher.match_one(shot, tn, threshold=0.80)
             except Exception:
                 h = None
             if h is not None:
-                p.login_template_hit = h
-                break
-    _perf["login_tpl"] = (_time.perf_counter() - _t) * 1000
+                return h
+        return None
 
-    # 3. YOLO 推理
-    _t = _time.perf_counter()
-    dets = []
-    if ctx.yolo is not None:
+    def _run_yolo():
+        if ctx.yolo is None: return []
         try:
-            dets = ctx.yolo.detect(shot)
-        except Exception as e:
-            logger.debug(f"[perceive] yolo err: {e}")
-            dets = []
-    _perf["yolo"] = (_time.perf_counter() - _t) * 1000
-    p.yolo_dets_raw = dets
-    p.yolo_close_xs = [
-        d for d in dets if getattr(d, "name", "") == "close_x" and d.conf > TAP_CONF_CLOSE
-    ]
-    p.yolo_action_btns = [
-        d for d in dets if getattr(d, "name", "") == "action_btn" and d.conf > TAP_CONF_ACTION
-    ]
+            return ctx.yolo.detect(shot)
+        except Exception:
+            return []
 
-    # 4. 四元融合大厅判定
+    def _run_memory():
+        if ctx.memory is None: return None
+        try:
+            return ctx.memory.query(shot, target_name="dismiss_popups", max_dist=5)
+        except Exception:
+            return None
+
+    def _run_phash():
+        try:
+            from ..adb_lite import phash as _phash
+            return _phash(shot)
+        except Exception:
+            return 0
+
+    _t = _time.perf_counter()
+    lobby_hit, login_hit, dets, mem_hit, ph_now = await asyncio.gather(
+        asyncio.to_thread(_run_lobby_tpl),
+        asyncio.to_thread(_run_login_tpl),
+        asyncio.to_thread(_run_yolo),
+        asyncio.to_thread(_run_memory),
+        asyncio.to_thread(_run_phash),
+    )
+    _perf["parallel_block"] = (_time.perf_counter() - _t) * 1000
+
+    p.lobby_template_hit = lobby_hit
+    p.login_template_hit = login_hit
+    p.yolo_dets_raw = dets or []
+    p.yolo_close_xs = [d for d in p.yolo_dets_raw if getattr(d, "name", "") == "close_x" and d.conf > TAP_CONF_CLOSE]
+    p.yolo_action_btns = [d for d in p.yolo_dets_raw if getattr(d, "name", "") == "action_btn" and d.conf > TAP_CONF_ACTION]
+    p.memory_hit = mem_hit
+    p.phash_now = ph_now or 0
+    _perf["memory"] = 0.0  # 已并发, 不单独算
+    _perf["phash"] = 0.0
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # quad 大厅判定 (依赖上面 dets, 不能并行)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     _t = _time.perf_counter()
     if ctx.lobby_detector is not None:
         try:
-            quad_r = ctx.lobby_detector.check(shot, matcher, dets)
+            quad_r = await asyncio.to_thread(
+                ctx.lobby_detector.check, shot, matcher, p.yolo_dets_raw
+            )
             p.quad_lobby_confirmed = quad_r.is_lobby
             p.quad_note = quad_r.note
+            p.quad_template_conf = float(getattr(quad_r, "template_conf", 0.0) or 0.0)
         except Exception as e:
             logger.debug(f"[perceive] lobby_quad err: {e}")
     _perf["quad"] = (_time.perf_counter() - _t) * 1000
 
-    # 5. 模板 close_x_* 兜底
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # short-circuit: 已确认大厅就跳后续兜底 (#5)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if p.quad_lobby_confirmed:
+        # 已在大厅, 不需要找 close_x / dismiss_btn 模板
+        _total = (_time.perf_counter() - _t0) * 1000
+        logger.info(
+            f"[PERF/perceive/inst{inst_idx}] total={_total:.0f}ms (quad-shortcut) "
+            f"parallel={_perf['parallel_block']:.0f} quad={_perf['quad']:.0f}"
+        )
+        return p
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 模板 close_x_* 兜底 (YOLO 漏检时)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     _t = _time.perf_counter()
     if matcher is not None and not p.yolo_close_xs:
-        for tn in CLOSE_X_TEMPLATE_NAMES:
-            try:
-                h = matcher.match_one(shot, tn, threshold=0.80)
-            except Exception:
-                h = None
-            if h is not None:
-                p.template_close_x = (tn, h)
-                break
+        def _run_close_x():
+            for tn in CLOSE_X_TEMPLATE_NAMES:
+                try:
+                    h = matcher.match_one(shot, tn, threshold=0.80)
+                except Exception:
+                    h = None
+                if h is not None:
+                    return (tn, h)
+            return None
+        p.template_close_x = await asyncio.to_thread(_run_close_x)
     _perf["close_x_tpl"] = (_time.perf_counter() - _t) * 1000
 
-    # 5.5 模板 btn_confirm_* / btn_agree 兜底
+    # 模板 btn_confirm_* 兜底 (没 X 但有"确定"按钮的弹窗)
     _t = _time.perf_counter()
     if matcher is not None and p.template_close_x is None and not p.yolo_close_xs:
-        for tn in DISMISS_BTN_TEMPLATE_NAMES:
-            try:
-                h = matcher.match_one(shot, tn, threshold=0.80)
-            except Exception:
-                h = None
-            if h is not None:
-                p.template_dismiss_btn = (tn, h)
-                break
+        def _run_dismiss():
+            for tn in DISMISS_BTN_TEMPLATE_NAMES:
+                try:
+                    h = matcher.match_one(shot, tn, threshold=0.80)
+                except Exception:
+                    h = None
+                if h is not None:
+                    return (tn, h)
+            return None
+        p.template_dismiss_btn = await asyncio.to_thread(_run_dismiss)
     _perf["dismiss_btn_tpl"] = (_time.perf_counter() - _t) * 1000
-
-    # 6. Memory L1 查询
-    _t = _time.perf_counter()
-    if ctx.memory is not None:
-        try:
-            mem_hit = ctx.memory.query(
-                shot, target_name="dismiss_popups", max_dist=5,
-            )
-            p.memory_hit = mem_hit
-        except Exception as e:
-            logger.debug(f"[perceive] memory err: {e}")
-    _perf["memory"] = (_time.perf_counter() - _t) * 1000
-
-    # phash
-    _t = _time.perf_counter()
-    try:
-        from ..adb_lite import phash as _phash
-        p.phash_now = _phash(shot)
-    except Exception:
-        p.phash_now = 0
-    _perf["phash"] = (_time.perf_counter() - _t) * 1000
 
     _total = (_time.perf_counter() - _t0) * 1000
     logger.info(
         f"[PERF/perceive/inst{inst_idx}] total={_total:.0f}ms "
-        f"lobby_tpl={_perf['lobby_tpl']:.0f} login_tpl={_perf['login_tpl']:.0f} "
-        f"yolo={_perf['yolo']:.0f} quad={_perf['quad']:.0f} "
-        f"close_x_tpl={_perf['close_x_tpl']:.0f} dismiss_tpl={_perf['dismiss_btn_tpl']:.0f} "
-        f"memory={_perf['memory']:.0f} phash={_perf['phash']:.0f}"
+        f"parallel={_perf['parallel_block']:.0f} quad={_perf['quad']:.0f} "
+        f"close_x_tpl={_perf['close_x_tpl']:.0f} dismiss_tpl={_perf['dismiss_btn_tpl']:.0f}"
     )
 
     return p

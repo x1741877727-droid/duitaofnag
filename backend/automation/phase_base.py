@@ -120,6 +120,7 @@ class RunContext:
     empty_dets_streak: int = 0
     login_first_seen_ts: Optional[float] = None
     lobby_confirm_count: int = 0
+    lobby_posterior: float = 0.5      # 贝叶斯早退: P(在大厅 | 历史观测), 阈 0.92 退出
     popups_closed: int = 0
 
     # phase 计时
@@ -141,6 +142,7 @@ class RunContext:
         self.empty_dets_streak = 0
         self.login_first_seen_ts = None
         self.lobby_confirm_count = 0
+        self.lobby_posterior = 0.5
         self.popups_closed = 0
         self.phase_started_at = time.perf_counter()
         self.phase_round = 0
