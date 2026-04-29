@@ -50,11 +50,12 @@ def _resolve_decision_dir(decision_id: str, session: str = "") -> Optional[Path]
 
 @router.get("/api/sessions")
 async def api_sessions():
-    """列出所有有决策记录的 session (含历史)."""
+    """列出所有有决策记录的 session (含历史). 扫盘走 to_thread."""
     try:
+        import asyncio as _aio
         from .automation.decision_log import get_recorder
         rec = get_recorder()
-        sessions = rec.list_sessions()
+        sessions = await _aio.to_thread(rec.list_sessions)
         cur = ""
         try:
             r = rec.root()
@@ -76,21 +77,28 @@ async def api_decisions(limit: int = 200, instance: int = -1, session: str = "")
     """
     决策列表.
       session 空 → 当前 session 内存索引 (最新最快)
-      session 有值 → 扫磁盘 logs/{session}/decisions/
+      session 有值 → 扫磁盘 logs/{session}/decisions/ (重 IO, 必须 to_thread)
+
+    *关键*: 历史 session 扫磁盘要 json.loads N 个文件, 在 async endpoint 里
+    直接调 = 阻塞整个 asyncio loop, 导致跑 runner 时其他页面全部加载中.
+    所以 list_session_decisions / list_recent 都必须 to_thread.
     """
     try:
+        import asyncio as _aio
         from .automation.decision_log import get_recorder
         rec = get_recorder()
         inst_filter = instance if instance >= 0 else None
         if session:
-            items = rec.list_session_decisions(session, limit=limit, instance=inst_filter)
+            items = await _aio.to_thread(
+                rec.list_session_decisions, session, limit, 0, inst_filter,
+            )
             return {
                 "count": len(items),
                 "items": items,
                 "session": session,
                 "enabled": rec.is_enabled(),
             }
-        items = rec.list_recent(limit=limit, instance=inst_filter)
+        items = await _aio.to_thread(rec.list_recent, limit, inst_filter)
         cur_name = ""
         try:
             r = rec.root()
@@ -114,7 +122,8 @@ async def api_decisions(limit: int = 200, instance: int = -1, session: str = "")
 
 @router.get("/api/decision/{decision_id}/data")
 async def api_decision_data(decision_id: str, session: str = ""):
-    """单条决策的完整 JSON."""
+    """单条决策的完整 JSON. 文件 IO 走 to_thread, 不阻塞 asyncio loop."""
+    import asyncio as _aio
     p = _resolve_decision_dir(_safe_id(decision_id), session)
     if p is None:
         raise HTTPException(404, "no active session")
@@ -125,18 +134,18 @@ async def api_decision_data(decision_id: str, session: str = ""):
             try:
                 from .automation.decision_log import get_recorder
                 rec = get_recorder()
-                sessions = rec.list_sessions()
+                sessions = await _aio.to_thread(rec.list_sessions)
                 for s in sessions:
                     p2 = _resolve_decision_dir(_safe_id(decision_id), s["session"])
                     if p2 and (p2 / "decision.json").is_file():
-                        return JSONResponse(
-                            json.loads((p2 / "decision.json").read_text(encoding="utf-8"))
-                        )
+                        text = await _aio.to_thread(p2.joinpath("decision.json").read_text, encoding="utf-8")
+                        return JSONResponse(json.loads(text))
             except Exception:
                 pass
         raise HTTPException(404, "decision not found")
     try:
-        return JSONResponse(json.loads(json_p.read_text(encoding="utf-8")))
+        text = await _aio.to_thread(json_p.read_text, encoding="utf-8")
+        return JSONResponse(json.loads(text))
     except Exception as e:
         raise HTTPException(500, str(e))
 

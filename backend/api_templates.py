@@ -210,16 +210,14 @@ def _categorize(name: str) -> str:
 # ─── /api/templates/list ───
 
 
-@router.get("/api/templates/list")
-async def list_templates():
-    """列出全部模版 + 文件元数据."""
+def _list_templates_sync():
+    """扫盘 + cv2.imread + phash 计算 — 同步重 IO, 必须从 endpoint 里 to_thread."""
     d = _template_dir()
     items = []
     if d.is_dir():
         for f in sorted(d.glob("*.png")):
             try:
                 st = f.stat()
-                # 读图获取尺寸 (轻量, 不读像素)
                 img = cv2.imread(str(f))
                 if img is None:
                     continue
@@ -235,13 +233,12 @@ async def list_templates():
                     "height": int(h),
                     "phash": f"0x{_phash_image(img):016x}",
                     "preprocessing": list(mm.get("preprocessing") or []),
-                    "threshold": float(mm.get("threshold") or 0.0),  # 0 = 用默认
+                    "threshold": float(mm.get("threshold") or 0.0),
                     "source_w": int(mm.get("source_w") or 0),
                     "source_h": int(mm.get("source_h") or 0),
                 })
             except Exception as e:
                 logger.debug(f"[templates] skip {f}: {e}")
-    # 按分类聚合
     by_cat: dict[str, int] = {}
     for it in items:
         by_cat[it["category"]] = by_cat.get(it["category"], 0) + 1
@@ -251,6 +248,14 @@ async def list_templates():
         "categories": [{"name": k, "count": v} for k, v in sorted(by_cat.items())],
         "template_dir": str(d).replace("\\", "/"),
     }
+
+
+@router.get("/api/templates/list")
+async def list_templates():
+    """列出全部模版 + 文件元数据. 重 IO 走 to_thread, 不阻塞 asyncio loop
+    (跑 runner 时其他页面别变加载中)."""
+    import asyncio as _aio
+    return await _aio.to_thread(_list_templates_sync)
 
 
 # ─── /api/templates/file/{name} ───
@@ -265,16 +270,25 @@ async def template_file(name: str):
     return FileResponse(p, media_type="image/png")
 
 
+def _template_detail_sync(name: str):
+    p = _template_dir() / f"{name}.png"
+    if not p.is_file():
+        return None
+    img = cv2.imread(str(p))
+    return {"img": img, "p": p}
+
+
 @router.get("/api/templates/detail/{name}")
 async def template_detail(name: str):
     """模版详情: 含元数据 + 原图存在性 + 裁剪 bbox.
     前端用 crop_bbox 在原图上画矩形, 显示"模版来自这里".
     """
+    import asyncio as _aio
     name = _safe_name(name)
-    p = _template_dir() / f"{name}.png"
-    if not p.is_file():
+    res = await _aio.to_thread(_template_detail_sync, name)
+    if res is None:
         raise HTTPException(404, "模版不存在")
-    img = cv2.imread(str(p))
+    img, p = res["img"], res["p"]
     h, w = (int(img.shape[0]), int(img.shape[1])) if img is not None else (0, 0)
     meta = _read_meta(name) or {}
     orig_filename = meta.get("orig_filename") or ""
