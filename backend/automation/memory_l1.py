@@ -235,8 +235,12 @@ CREATE TABLE IF NOT EXISTS frame_action (
     note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_target ON frame_action(target_name);
-CREATE INDEX IF NOT EXISTS idx_archived ON frame_action(archived);
 """
+# 注意: idx_archived 索引必须在 ALTER TABLE ADD COLUMN archived 之后建,
+# 不然 executescript 在老 db (没 archived 列) 会半失败.
+_POST_MIGRATION_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_archived ON frame_action(archived)",
+]
 
 _MIGRATIONS = [
     "ALTER TABLE frame_action ADD COLUMN snapshot_path TEXT DEFAULT ''",
@@ -274,7 +278,13 @@ class FrameMemory:
             try:
                 self._db.execute(m)
             except sqlite3.OperationalError:
-                pass
+                pass   # column already exists
+        # 列加完了再建 idx_archived 索引 (避免 executescript 在 archived 列没建出来时报错)
+        for idx_sql in _POST_MIGRATION_INDEXES:
+            try:
+                self._db.execute(idx_sql)
+            except sqlite3.OperationalError as e:
+                logger.debug(f"[memory_l1] post-migration index err: {e}")
         self._db.commit()
 
         self._snap_dir = self._db_path.parent / "snapshots"
