@@ -61,6 +61,12 @@ _worker_engine = None  # 每个 worker 进程独立的 RapidOCR 实例
 def _worker_init(ocr_params: Optional[Dict[str, Any]]) -> None:
     """新 worker 进程启动时初始化 RapidOCR"""
     global _worker_engine
+    # 每个 worker 子进程独立, patch 在主进程做不会继承到子进程, 这里再 apply 一次
+    try:
+        from . import _onnxruntime_patch
+        _onnxruntime_patch.apply()
+    except Exception:
+        pass
     try:
         from rapidocr import RapidOCR
         _worker_engine = RapidOCR(params=ocr_params) if ocr_params else RapidOCR()
@@ -74,7 +80,9 @@ def _worker_init(ocr_params: Optional[Dict[str, Any]]) -> None:
 
 
 def _worker_ocr(img: np.ndarray) -> List[Dict[str, Any]]:
-    """worker 处理单帧。返回 list of dict（可 pickle 跨进程）"""
+    """worker 处理单帧。返回 list of dict（可 pickle 跨进程）.
+    任何异常 (含 patch 后 onnxruntime DML 抛的 RuntimeError) 都返回 [],
+    保证 worker 不死, 主进程拿到空结果可走 fallback (重试 / template / 其他 tier)."""
     global _worker_engine
     if _worker_engine is None:
         return []

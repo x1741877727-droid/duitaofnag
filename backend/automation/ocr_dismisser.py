@@ -158,6 +158,14 @@ class OcrDismisser:
         if cls._shared_ocr is not None:
             return
 
+        # 中文 Windows 上 onnxruntime C++ 异常文本是 GBK, pybind 用 utf-8 strict 解
+        # 会抛 UnicodeDecodeError 把 OCR worker 拖死. patch 必须在创 session 前生效.
+        try:
+            from . import _onnxruntime_patch
+            _onnxruntime_patch.apply()
+        except Exception as e:
+            logger.debug(f"[ocr] onnxruntime patch 跳过: {e}")
+
         logger.info("预热 RapidOCR ...")
         from rapidocr import RapidOCR
 
@@ -242,12 +250,21 @@ class OcrDismisser:
         """OCR全屏，返回 [TextHit, ...]
 
         @_ocr_cached_full：全帧 16×16 指纹缓存，loading/popup 静止画面 80%+ 命中（0ms 返回）。
+
+        异常容错: ONNX (尤其 DML 在中文 Windows) 偶发 RuntimeError /
+        UnicodeDecodeError, 这里转空 hits, 保证 worker 不死 — 上游会按"没找到"重试.
         """
         with metrics.timed("ocr_full") as tags:
             h, w = screenshot.shape[:2]
             tags["w"], tags["h"] = w, h
             ocr = self._get_ocr()
-            result = ocr(screenshot)
+            try:
+                result = ocr(screenshot)
+            except (RuntimeError, UnicodeDecodeError) as e:
+                logger.warning(f"[ocr] _ocr_all 推理异常 (返回空): {e}")
+                tags["n_texts"] = 0
+                tags["err"] = type(e).__name__
+                return []
             hits = []
             if result and result.boxes is not None:
                 for box, text, conf in zip(result.boxes, result.txts, result.scores):
@@ -314,7 +331,13 @@ class OcrDismisser:
                                   interpolation=cv2.INTER_CUBIC)
             crop = apply_preprocessing(crop, methods)
             ocr = self._get_ocr()
-            result = ocr(crop)
+            try:
+                result = ocr(crop)
+            except (RuntimeError, UnicodeDecodeError) as e:
+                logger.warning(f"[ocr] _ocr_roi_with_preproc 推理异常 (返回空): {e}")
+                tags["n_texts"] = 0
+                tags["err"] = type(e).__name__
+                return []
             hits = []
             if result and result.boxes is not None:
                 for box, text, _conf in zip(result.boxes, result.txts, result.scores):
@@ -357,7 +380,13 @@ class OcrDismisser:
                                   interpolation=cv2.INTER_CUBIC)
 
             ocr = self._get_ocr()
-            result = ocr(crop)
+            try:
+                result = ocr(crop)
+            except (RuntimeError, UnicodeDecodeError) as e:
+                logger.warning(f"[ocr] _ocr_roi 推理异常 (返回空): {e}")
+                tags["n_texts"] = 0
+                tags["err"] = type(e).__name__
+                return []
             hits = []
             if result and result.boxes is not None:
                 for box, text, conf in zip(result.boxes, result.txts, result.scores):
