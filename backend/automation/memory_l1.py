@@ -259,6 +259,18 @@ CREATE TABLE IF NOT EXISTS frame_action (
     note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_target ON frame_action(target_name);
+
+-- 蓄水池 (pending) 持久化, 防 backend 重启后 in-memory 累计归零.
+-- 每条 entry 一行, samples_json 存 [[x,y,ts,anchor,snap_relpath], ...].
+-- 5-confirm 入库 / std 拒绝 / TTL 过期 / 手动 discard 都会 DELETE.
+CREATE TABLE IF NOT EXISTS pending_entries (
+    pkey TEXT PRIMARY KEY,
+    target_name TEXT NOT NULL,
+    phash TEXT NOT NULL,
+    samples_json TEXT NOT NULL DEFAULT '[]',
+    ts_first REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_target ON pending_entries(target_name);
 """
 # 注意: idx_archived 索引必须在 ALTER TABLE ADD COLUMN archived 之后建,
 # 不然 executescript 在老 db (没 archived 列) 会半失败.
@@ -347,7 +359,13 @@ class FrameMemory:
 
         # 启动时把现有 (非 archived) 记录加进 BK-tree
         self._rebuild_bktrees()
-        logger.info(f"[memory_l1 v2] db={self._db_path}, BKTree 索引建好 ({sum(len(t.find(0,64) or []) for t in self._bktree.values())} payload)")
+        # 启动时从 SQLite 恢复 pending 缓冲区, 让 5-confirm 跨 backend 重启可累计
+        n_pending = self._load_pending_from_db()
+        logger.info(
+            f"[memory_l1 v2] db={self._db_path}, "
+            f"BKTree 索引建好 ({sum(len(t.find(0,64) or []) for t in self._bktree.values())} payload), "
+            f"pending 恢复 {n_pending} 条"
+        )
 
     # ──────── 内部辅助 ────────
 
@@ -469,6 +487,81 @@ class FrameMemory:
         except Exception:
             pass
 
+    # ──────── pending 持久化 (SQLite, 防 backend 重启丢累计) ────────
+
+    def _persist_pending_entry(self, e: dict) -> None:
+        """同步落盘一条 pending entry. samples 序列化成 JSON.
+        并发: 调用方持 self._lock OR 在 _pending_add 内 (无并发风险)."""
+        try:
+            samples_serializable = [list(s) for s in e["samples"]]
+            with self._lock:
+                self._db.execute(
+                    "INSERT INTO pending_entries (pkey, target_name, phash, samples_json, ts_first) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(pkey) DO UPDATE SET samples_json=excluded.samples_json",
+                    (
+                        e["key"],
+                        e.get("_target", ""),
+                        str(e["phash"]),
+                        json.dumps(samples_serializable, separators=(",", ":")),
+                        float(e["ts_first"]),
+                    ),
+                )
+                self._db.commit()
+        except Exception as exc:
+            logger.debug(f"[memory_l1] persist pending {e.get('key','?')} 失败: {exc}")
+
+    def _remove_pending_entry(self, key: str) -> None:
+        """从 SQLite 删 pending entry (commit / std reject / TTL / 手动 discard 都调)."""
+        if not key:
+            return
+        try:
+            with self._lock:
+                self._db.execute("DELETE FROM pending_entries WHERE pkey=?", (key,))
+                self._db.commit()
+        except Exception as exc:
+            logger.debug(f"[memory_l1] remove pending {key} 失败: {exc}")
+
+    def _load_pending_from_db(self) -> int:
+        """启动时从 SQLite 恢复 _pending 字典. 返回恢复条数.
+        过期 (>TTL) 的不恢复并清掉表 + 快照."""
+        n_loaded = 0
+        n_expired = 0
+        now = time.time()
+        try:
+            with self._lock:
+                rows = list(self._db.execute(
+                    "SELECT pkey, target_name, phash, samples_json, ts_first "
+                    "FROM pending_entries"
+                ))
+        except sqlite3.OperationalError:
+            # 表不存在 (老 db) → schema 会建; 第一次没数据
+            return 0
+        for pkey, tgt, ph_str, samples_json, ts_first in rows:
+            try:
+                age = now - float(ts_first)
+                if age >= PENDING_TTL_S:
+                    # 过期, 清掉
+                    self._cleanup_pending_snaps(pkey)
+                    self._remove_pending_entry(pkey)
+                    n_expired += 1
+                    continue
+                samples_raw = json.loads(samples_json or "[]")
+                samples = [tuple(s) for s in samples_raw]
+                self._pending[tgt].append({
+                    "key": pkey,
+                    "phash": int(ph_str),
+                    "samples": samples,
+                    "ts_first": float(ts_first),
+                    "_target": tgt,   # 内部辅助, persist 用
+                })
+                n_loaded += 1
+            except Exception as exc:
+                logger.debug(f"[memory_l1] load pending row {pkey} 失败: {exc}")
+        if n_expired:
+            logger.info(f"[memory_l1] 启动清掉 {n_expired} 条过期 pending (>{PENDING_TTL_S}s)")
+        return n_loaded
+
     def _pending_add(self, target: str, phs: int, x: int, y: int,
                      anchor_phash: int = 0,
                      frame=None) -> Optional[dict]:
@@ -477,10 +570,11 @@ class FrameMemory:
         返回 commit dict 或 None (待累计/被拒绝)."""
         now = time.time()
         bucket = self._pending[target]
-        # 清掉过期 entry (顺手清快照)
+        # 清掉过期 entry (顺手清快照 + DB)
         expired = [e for e in bucket if now - e["ts_first"] >= PENDING_TTL_S]
         for e in expired:
             self._cleanup_pending_snaps(e.get("key", ""))
+            self._remove_pending_entry(e.get("key", ""))
         bucket[:] = [e for e in bucket if now - e["ts_first"] < PENDING_TTL_S]
         # 找接近 entry (按 phash + 中心点 mean 距离)
         for e in bucket:
@@ -492,12 +586,16 @@ class FrameMemory:
                 idx = len(e["samples"])
                 snap = self._save_pending_snapshot(frame, target, x, y, e["key"], idx) if frame is not None else ""
                 e["samples"].append((x, y, now, anchor_phash, snap))
+                # 持久化 (sample 加进去后必须立刻落盘, 防 backend 崩了丢这次)
+                e["_target"] = target
+                self._persist_pending_entry(e)
                 if len(e["samples"]) >= PENDING_CONFIRMATION_COUNT:
                     # 时间跨度检查
                     time_span = e["samples"][-1][2] - e["samples"][0][2]
                     if PENDING_MIN_TIME_SPAN_S > 0 and time_span < PENDING_MIN_TIME_SPAN_S:
                         logger.info(f"[memory_l1] 蓄水池拒绝: target={target} 时间跨度 {time_span:.1f}s < {PENDING_MIN_TIME_SPAN_S}s")
                         self._cleanup_pending_snaps(e["key"])
+                        self._remove_pending_entry(e["key"])
                         bucket.remove(e)
                         return None
                     # 算 std
@@ -514,6 +612,7 @@ class FrameMemory:
                             f"(samples={[(int(s[0]), int(s[1])) for s in e['samples']]})"
                         )
                         self._cleanup_pending_snaps(e["key"])
+                        self._remove_pending_entry(e["key"])
                         bucket.remove(e)
                         return None
                     # 通过 — 用中位数作为最终坐标
@@ -526,6 +625,7 @@ class FrameMemory:
                                key=lambda s: abs(s[0] - final_x) + abs(s[1] - final_y))
                     final_anchor = int(best[3]) if len(best) > 3 else 0
                     self._cleanup_pending_snaps(e["key"])
+                    self._remove_pending_entry(e["key"])
                     bucket.remove(e)
                     return {
                         "phash": phs, "x": int(final_x), "y": int(final_y),
@@ -538,12 +638,15 @@ class FrameMemory:
         # 新建
         new_key = self._pending_key(target, phs)
         new_snap = self._save_pending_snapshot(frame, target, x, y, new_key, 0) if frame is not None else ""
-        bucket.append({
+        new_entry = {
             "key": new_key,
             "phash": phs,
             "samples": [(x, y, now, anchor_phash, new_snap)],
             "ts_first": now,
-        })
+            "_target": target,
+        }
+        bucket.append(new_entry)
+        self._persist_pending_entry(new_entry)
         return None
 
     # ──────── 公开 API ────────
@@ -943,15 +1046,18 @@ class FrameMemory:
         return None
 
     def discard_pending(self, key: str) -> bool:
-        """手动丢弃一条 pending (前端"丢弃"按钮). 清掉该 key 的所有快照."""
+        """手动丢弃一条 pending (前端"丢弃"按钮). 清快照 + DB 行 + 内存."""
         if not key:
             return False
         for tgt, bucket in list(self._pending.items()):
             for e in list(bucket):
                 if e.get("key") == key:
                     self._cleanup_pending_snaps(key)
+                    self._remove_pending_entry(key)
                     bucket.remove(e)
                     return True
+        # 内存找不到也尝试清 DB (防孤儿行)
+        self._remove_pending_entry(key)
         return False
 
     # ──────── 兼容老 API (前端记忆库浏览用) ────────
