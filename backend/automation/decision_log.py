@@ -28,11 +28,35 @@ import logging
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Optional
 
 import cv2
+
+# 决策图片落盘用 — 主循环 fire-and-forget, JPEG 编码 + 写盘走后台线程,
+# 不阻塞 P2 round (单 round 节省 ~80-150ms).
+# imwrite 用 libjpeg, 内部 release GIL, 多 worker 真并行.
+_io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dlog-io")
+
+
+def _async_imwrite(path: str, img, q: int = 70) -> None:
+    """fire-and-forget JPEG 写. 异常吞掉记 debug, 不让 IO 错误拖死决策路径."""
+    def _worker():
+        try:
+            cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, q])
+        except Exception as e:
+            logger.debug(f"[decision] async imwrite {path} 失败: {e}")
+    try:
+        _io_executor.submit(_worker)
+    except Exception as e:
+        # 池已关 / 满 → 退到同步 (保证总能写)
+        logger.debug(f"[decision] io pool 不可用, 退同步: {e}")
+        try:
+            cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, q])
+        except Exception:
+            pass
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -534,8 +558,7 @@ class Decision:
         self.input_h, self.input_w = screenshot.shape[:2]
         self.input_phash = phash
         try:
-            cv2.imwrite(str(self.path / "input.jpg"), screenshot,
-                        [cv2.IMWRITE_JPEG_QUALITY, q])
+            _async_imwrite(str(self.path / "input.jpg"), screenshot, q)
             self.input_image = "input.jpg"
         except Exception as e:
             logger.warning(f"[decision] save input fail: {e}")
@@ -589,13 +612,9 @@ class Decision:
             label = f"{det.cls} {det.conf:.2f}"
             cv2.putText(annot, label, (x1, max(20, y1 - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        try:
-            cv2.imwrite(str(self.path / "yolo_annot.jpg"), annot,
-                        [cv2.IMWRITE_JPEG_QUALITY, q])
-            tier.yolo_annot_image = "yolo_annot.jpg"
-            tier.yolo_detections = detections
-        except Exception:
-            pass
+        _async_imwrite(str(self.path / "yolo_annot.jpg"), annot, q)
+        tier.yolo_annot_image = "yolo_annot.jpg"
+        tier.yolo_detections = detections
         return self
 
     # ────── OCR ROI 标注 ──────
@@ -627,14 +646,10 @@ class Decision:
                 text_items.append((h.text[:14], (hx1, max(15, hy1 - 4)),
                                    (0, 255, 0), 14))
         _put_texts_cn_batch(annot, text_items)
-        try:
-            cv2.imwrite(str(self.path / "ocr_annot.jpg"), annot,
-                        [cv2.IMWRITE_JPEG_QUALITY, q])
-            tier.ocr_roi_image = "ocr_annot.jpg"
-            tier.ocr_roi = list(roi) if roi else None
-            tier.ocr_hits = hits or []
-        except Exception:
-            pass
+        _async_imwrite(str(self.path / "ocr_annot.jpg"), annot, q)
+        tier.ocr_roi_image = "ocr_annot.jpg"
+        tier.ocr_roi = list(roi) if roi else None
+        tier.ocr_hits = hits or []
         return self
 
     # ────── 点击 ──────
@@ -676,28 +691,29 @@ class Decision:
                 (label, (int(x) + 40, int(y) - 12), (0, 0, 255), 18))
             # 一次性批量画所有文本
             _put_texts_cn_batch(annot, text_items)
-            try:
-                cv2.imwrite(str(self.path / "tap_annot.jpg"), annot,
-                            [cv2.IMWRITE_JPEG_QUALITY, 70])
-                self.tap.annot_image = "tap_annot.jpg"
-            except Exception:
-                pass
+            _async_imwrite(str(self.path / "tap_annot.jpg"), annot, 70)
+            self.tap.annot_image = "tap_annot.jpg"
 
             # 2) 把 tap 圆点叠加到 yolo_annot 图上 (用户要求: 一图同时看 bbox + tap)
-            yolo_annot_path = self.path / "yolo_annot.jpg"
-            if yolo_annot_path.exists():
+            # 这里走异步: 读 yolo_annot.jpg → 加圆 → 写回, 整段丢进 IO 池, 主路径不等
+            yolo_annot_path = str(self.path / "yolo_annot.jpg")
+            tx, ty = int(x), int(y)
+            def _overlay_tap_on_yolo():
                 try:
-                    img = cv2.imread(str(yolo_annot_path))
-                    if img is not None:
-                        cv2.circle(img, (int(x), int(y)), 36, (0, 255, 255), 3)  # 黄色外圈
-                        cv2.circle(img, (int(x), int(y)), 6, (0, 255, 255), -1)  # 黄色实心
-                        cv2.putText(img, f"TAP ({int(x)},{int(y)})",
-                                    (int(x) + 40, int(y) + 30),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                        cv2.imwrite(str(yolo_annot_path), img,
-                                    [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    img = cv2.imread(yolo_annot_path)
+                    if img is None:
+                        return
+                    cv2.circle(img, (tx, ty), 36, (0, 255, 255), 3)
+                    cv2.circle(img, (tx, ty), 6, (0, 255, 255), -1)
+                    cv2.putText(img, f"TAP ({tx},{ty})", (tx + 40, ty + 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    cv2.imwrite(yolo_annot_path, img, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 except Exception:
                     pass
+            try:
+                _io_executor.submit(_overlay_tap_on_yolo)
+            except Exception:
+                pass
         return self
 
     # ────── 验证 ──────

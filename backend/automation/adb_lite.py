@@ -14,6 +14,7 @@ import asyncio
 import io
 import logging
 import os
+import sys
 import platform
 import struct
 import subprocess
@@ -694,14 +695,25 @@ class ADBController:
         """[向后兼容名] 初始化截图流。
 
         backend = GAMEBOT_CAPTURE 环境变量：
-        - dxhook (生产推荐): 注入 64-bit DLL 到 Ld9BoxHeadless，glReadPixels 抓 GPU 帧
+        - dxhook (默认 + 推荐, Windows): 注入 64-bit DLL 到 Ld9BoxHeadless，glReadPixels 抓 GPU 帧 (~30ms)
         - wgc: Windows Graphics Capture 抓 LDPlayer 窗口（受窗口尺寸影响）
         - screenrecord: adb shell screenrecord（6 实例崩游戏）
-        - 默认 (空): screencap（慢但稳）
+        - screencap: adb shell screencap (慢 ~400ms 但稳, dxhook 失败时兜底)
 
-        旧名 setup_minicap 保留是因为外部调用点很多。
+        旧名 setup_minicap 保留是因为外部调用点很多.
+        默认改 dxhook (Windows 平台) — 之前默认 screencap 导致单 round 多 600-1000ms,
+        各种启动脚本 cmd `set X=Y && start` 链子常常没把 env 传到 python 子进程,
+        所以默认值要"积极"一点; dxhook 失败会自动回退 screencap, 不会更糟.
         """
-        backend = os.environ.get("GAMEBOT_CAPTURE", "").lower()
+        # 显式设了空字符串 / unset → 默认 Windows dxhook, 其他平台保持 screencap
+        env = os.environ.get("GAMEBOT_CAPTURE", "").lower()
+        if env:
+            backend = env
+        elif sys.platform == "win32":
+            backend = "dxhook"
+            logger.info(f"[capture] {self.serial} GAMEBOT_CAPTURE 未设, 默认 dxhook (Win)")
+        else:
+            backend = ""
 
         if backend == "dxhook":
             stream = DXHookStream(self.serial)

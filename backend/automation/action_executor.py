@@ -88,8 +88,10 @@ class ActionExecutor:
             except Exception as e:
                 logger.debug(f"[executor] set_tap err: {e}")
 
-        # tap 后等待 (默认 0.4s, 让画面有时间响应)
-        await asyncio.sleep(act.seconds if act.seconds > 0 else 0.4)
+        # tap 后等待 (默认 0.2s, 让画面有时间响应)
+        # 之前 0.4s 偏保守, 弹窗动画一般 100-200ms 就稳, 长 sleep 浪费 round 时间.
+        # 调用方 act.seconds > 0 时仍尊重 (P3a/P4 OCR 路径需要 0.3-0.5s 等面板).
+        await asyncio.sleep(act.seconds if act.seconds > 0 else 0.2)
 
         # 没要求 verify → 跳过验证 (但仍记录到 pending_memory)
         if not act.expectation:

@@ -23,7 +23,7 @@ class P2DismissHandler(PhaseHandler):
         "死屏: 无目标 > 12 轮 + 非大厅 → GAME_RESTART",
     ]
     max_rounds = 25
-    round_interval_s = 0.5
+    round_interval_s = 0.25   # 0.5→0.25, no_target 时复检间隔; YOLO 推理本身已耗 100-200ms, 不需要再额外 0.5s
 
     def __init__(self):
         self._sub = P2SubFSM()

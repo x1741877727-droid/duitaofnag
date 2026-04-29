@@ -68,7 +68,7 @@ class P2SubFSM:
                 )
             return PhaseStep(
                 PhaseResult.WAIT,
-                wait_seconds=0.3,
+                wait_seconds=0.15,
                 note=f"大厅判定 {ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED} ({p.quad_note})",
                 outcome_hint=f"lobby_pending_{ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED}",
             )
