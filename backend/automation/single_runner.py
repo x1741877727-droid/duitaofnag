@@ -1947,6 +1947,8 @@ class SingleInstanceRunner:
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 2: P3b-2-verify  轮询验证 "取消准备"
+        # 改动: sleep 1.0 → 0.5 (上限耗时不变, 检测延迟砍半);
+        # OCR 优先用 ROI team_ready_btn (用户在 OCR Tuner 配), 没配兜底走全屏
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         d2 = _make_d("2-verify")
         ocr = OcrDismisser()
@@ -1954,18 +1956,28 @@ class SingleInstanceRunner:
         last_hits: list = []
         last_shot = None
         attempt_idx = 0
-        for attempt in range(10):
+        # ROI 'team_ready_btn' 是队员屏幕"取消准备"按钮区域 (左上角小块)
+        # 优先用它 → OCR 区域小, ~200ms vs 全屏 2s
+        try:
+            from .roi_config import all_names as _all_roi
+            has_ready_roi = "team_ready_btn" in set(_all_roi())
+        except Exception:
+            has_ready_roi = False
+        for attempt in range(20):  # 20 × 0.5s = 10s 上限, 跟原来 10×1s 一致
             attempt_idx = attempt + 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             shot = await raw_adb.screenshot()
             if shot is None:
                 continue
             last_shot = shot
-            hits = ocr._ocr_all(shot)
+            if has_ready_roi:
+                hits = ocr._ocr_roi_named(shot, "team_ready_btn")
+            else:
+                hits = ocr._ocr_all(shot)
             last_hits = hits
             for h in hits:
                 if "取消" in h.text and "准备" in h.text:
-                    logger.info("[阶段5] 队员加入完成 ✓（检测到取消准备）")
+                    logger.info(f"[阶段5] 队员加入完成 ✓（{attempt_idx}×0.5s 检测到取消准备, ROI={'team_ready_btn' if has_ready_roi else 'fullscreen'}）")
                     self.dbg.log_screenshot(shot, tag="team_join_done")
                     joined = True
                     break
@@ -1988,8 +2000,10 @@ class SingleInstanceRunner:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
                                 cx=h.cx, cy=h.cy) for h in last_hits[:15]]
             tier2 = TierRecord(
-                tier=3, name="OCR·全屏(取消准备)", early_exit=joined,
-                note=f"轮询 {attempt_idx} 次, 加入={joined}",
+                tier=3,
+                name=f"OCR·{'team_ready_btn ROI' if has_ready_roi else '全屏'}(取消准备)",
+                early_exit=joined,
+                note=f"轮询 {attempt_idx} × 0.5s, 加入={joined}, ROI={'team_ready_btn' if has_ready_roi else 'fullscreen'}",
                 ocr_hits=_hits_d,
             )
             d2.add_tier(tier2)

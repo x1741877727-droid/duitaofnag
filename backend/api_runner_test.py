@@ -211,6 +211,27 @@ async def cancel_test():
     return {"ok": True, "msg": "已请求中止, 当前帧跑完即停"}
 
 
+def stop_test_controllers(svc) -> int:
+    """关闭所有 test_phase 注册的截图流 (dxhook / wgc / screenrecord).
+    在 backend 退出 (shutdown / SIGINT) 时调, 避免 hook DLL / SHM handle 残留.
+    返回关掉的实例数."""
+    n = 0
+    ctrls = getattr(svc, "_test_controllers", None) or {}
+    for idx, adb in list(ctrls.items()):
+        stream = getattr(adb, "_stream", None)
+        if stream:
+            try:
+                stream.stop()
+                n += 1
+                logger.info(f"[test_phase] 已 stop 截图流 inst{idx}")
+            except Exception as e:
+                logger.debug(f"[test_phase] stop inst{idx} 异常: {e}")
+        adb._stream = None
+    if hasattr(svc, "_test_controllers"):
+        svc._test_controllers.clear()
+    return n
+
+
 @router.post("/api/runner/test_new_session")
 async def test_new_session():
     """强制开新 test session — 前端每次"开始一轮测试"前调一次.
@@ -244,6 +265,27 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
         cfg.settings.ldplayer_path, "adb.exe")
     serial = f"emulator-{5554 + instance_idx * 2}"
     adb = ADBController(serial, adb_path)
+
+    # 启 dxhook / wgc 截图流 (跟主 runner 一样, 否则 test 模式截屏走 adb screencap = 慢)
+    try:
+        if adb.setup_minicap():
+            logger.info(f"[test_phase] {serial} 启 capture stream OK")
+        # setup 失败也不挡, screencap fallback 仍可用
+    except Exception as e:
+        logger.warning(f"[test_phase] {serial} setup_minicap 异常: {e}")
+
+    # 注册到 svc._test_controllers 用于 SIGINT / shutdown 时统一 stop()
+    try:
+        if not hasattr(svc, "_test_controllers"):
+            svc._test_controllers = {}
+        # 一个实例下只保留一个 controller, 旧的 stop 释放
+        prev = svc._test_controllers.get(instance_idx)
+        if prev is not None and prev is not adb and prev._stream is not None:
+            try: prev._stream.stop()
+            except Exception: pass
+        svc._test_controllers[instance_idx] = adb
+    except Exception:
+        pass
 
     # ScreenMatcher 用项目根的 fixtures/templates
     import sys

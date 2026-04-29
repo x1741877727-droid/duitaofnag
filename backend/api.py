@@ -320,6 +320,14 @@ def create_app(config: ConfigManager) -> FastAPI:
         ws_manager.stop_drain()
         if service.running:
             await service.stop_all()
+        # test_phase 走旁路构造的 controller 也要清理 dxhook / wgc 截图流
+        try:
+            from .api_runner_test import stop_test_controllers
+            n = stop_test_controllers(service)
+            if n > 0:
+                logger.info(f"[shutdown] 关 {n} 条 test 截图流")
+        except Exception as e:
+            logger.debug(f"[shutdown] stop test controllers 异常: {e}")
 
     # ── 模拟器检测 ──
 
