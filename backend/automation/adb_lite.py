@@ -704,7 +704,13 @@ class ADBController:
         默认改 dxhook (Windows 平台) — 之前默认 screencap 导致单 round 多 600-1000ms,
         各种启动脚本 cmd `set X=Y && start` 链子常常没把 env 传到 python 子进程,
         所以默认值要"积极"一点; dxhook 失败会自动回退 screencap, 不会更糟.
+
+        **幂等**: 已经 setup 过 (self._stream != None) 直接返回 True, 不重复注入 DLL.
+        **同步阻塞**: inject.exe subprocess 等最多 10s, 调用方应包 asyncio.to_thread.
         """
+        # 幂等: test_phase 反复点不再重新注入 DLL (之前一会话注入 3 次浪费 ~12s)
+        if self._stream is not None:
+            return True
         # 显式设了空字符串 / unset → 默认 Windows dxhook, 其他平台保持 screencap
         env = os.environ.get("GAMEBOT_CAPTURE", "").lower()
         if env:

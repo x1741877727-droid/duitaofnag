@@ -130,9 +130,10 @@ async def test_phase(req: TestPhaseReq):
         )
 
     # 拿/造 SingleInstanceRunner
+    # 优先级: 主 runner (svc._runners) > 测试缓存 (svc._test_runners) > 新建
     runner = svc._runners.get(int(req.instance))
-    fresh = runner is None
-    if fresh:
+    if runner is None:
+        # _build_test_runner 内部会查 _test_runners 缓存, 命中直接返
         try:
             runner = await _build_test_runner(svc, cfg, int(req.instance), req.role)
         except Exception as e:
@@ -229,6 +230,9 @@ def stop_test_controllers(svc) -> int:
         adb._stream = None
     if hasattr(svc, "_test_controllers"):
         svc._test_controllers.clear()
+    # 同时清 _test_runners 缓存 (避免下次启动复用悬挂的 runner)
+    if hasattr(svc, "_test_runners"):
+        svc._test_runners.clear()
     return n
 
 
@@ -256,21 +260,42 @@ async def test_new_session():
 
 
 async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
-    """临时构造 SingleInstanceRunner. 跟主 runner 隔离, 不进 svc._runners."""
+    """临时构造 SingleInstanceRunner. 跟主 runner 隔离, 不进 svc._runners.
+
+    缓存策略 (避免每次 test_phase 都重建):
+      svc._test_runners[instance_idx] = (runner, role)
+      role 一致 + adb._stream 还在 → 直接返
+      否则 → 重建 (旧 stream 显式 stop)
+
+    setup_minicap 是 sync subprocess (4-7s), **必须 to_thread** 防阻塞 asyncio loop.
+    """
+    import asyncio as _aio
     from .automation.adb_lite import ADBController
     from .automation.screen_matcher import ScreenMatcher
     from .automation.single_runner import SingleInstanceRunner
+
+    # 缓存命中? — role 一致 + adb stream 还在 → 直接返
+    cache = getattr(svc, "_test_runners", None)
+    if cache is None:
+        svc._test_runners = {}
+        cache = svc._test_runners
+    cached = cache.get(instance_idx)
+    if cached is not None:
+        cached_runner, cached_role = cached
+        if cached_role == role and cached_runner.adb._stream is not None:
+            logger.debug(f"[test_phase] inst{instance_idx} 复用 cached runner")
+            return cached_runner
 
     adb_path = cfg.settings.adb_path or os.path.join(
         cfg.settings.ldplayer_path, "adb.exe")
     serial = f"emulator-{5554 + instance_idx * 2}"
     adb = ADBController(serial, adb_path)
 
-    # 启 dxhook / wgc 截图流 (跟主 runner 一样, 否则 test 模式截屏走 adb screencap = 慢)
+    # 启 dxhook / wgc 截图流 — 包 to_thread 防 inject.exe subprocess wait 阻塞 asyncio
     try:
-        if adb.setup_minicap():
+        ok = await _aio.to_thread(adb.setup_minicap)
+        if ok:
             logger.info(f"[test_phase] {serial} 启 capture stream OK")
-        # setup 失败也不挡, screencap fallback 仍可用
     except Exception as e:
         logger.warning(f"[test_phase] {serial} setup_minicap 异常: {e}")
 
@@ -278,7 +303,6 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     try:
         if not hasattr(svc, "_test_controllers"):
             svc._test_controllers = {}
-        # 一个实例下只保留一个 controller, 旧的 stop 释放
         prev = svc._test_controllers.get(instance_idx)
         if prev is not None and prev is not adb and prev._stream is not None:
             try: prev._stream.stop()
@@ -287,7 +311,7 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     except Exception:
         pass
 
-    # ScreenMatcher 用项目根的 fixtures/templates
+    # ScreenMatcher 项目根 fixtures/templates
     import sys
     if getattr(sys, "frozen", False):
         proj_root = os.path.dirname(sys.executable)
@@ -297,10 +321,10 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     if not os.path.isdir(tmpl_dir):
         tmpl_dir = os.path.join(proj_root, "_internal", "fixtures", "templates")
     matcher = ScreenMatcher(tmpl_dir)
-    matcher.load_all()   # 必须显式 load, 否则 _templates 为空, P2 模板兜底永不命中
+    # load_all 是 sync I/O (10 个 PNG cv2.imread), 包 to_thread 不阻塞 loop
+    await _aio.to_thread(matcher.load_all)
 
-    # decision_log session 还没初始化 → 用跟 runner_service 同算法的 logs/ 路径
-    # (开发: <项目根>/logs/test_TS, exe: <exe目录>/logs/test_TS)
+    # decision_log session
     try:
         from .automation.decision_log import get_recorder
         rec = get_recorder()
@@ -314,8 +338,11 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     except Exception as e:
         logger.debug(f"[test_phase] init recorder err: {e}")
 
-    return SingleInstanceRunner(
+    runner = SingleInstanceRunner(
         adb=adb,
         matcher=matcher,
         role=role,
     )
+    # 写入缓存
+    svc._test_runners[instance_idx] = (runner, role)
+    return runner
