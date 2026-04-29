@@ -196,11 +196,15 @@ class OcrDismisser:
                     "建议: pip install openvino"
                 )
 
+        # RapidOCR 3.x 要求 engine_type / lang_type / model_type 必须是对应 Enum 实例,
+        # 不接受字符串. JSON 只能存字符串, 这里统一转一遍 (string→enum).
+        params = cls._params_strings_to_enums(params)
+
         try:
             cls._shared_ocr = RapidOCR(params=params) if params else RapidOCR()
         except Exception as e:
             # OpenVINO 启动失败 (例如 model 不兼容), 退到默认 onnxruntime CPU
-            logger.warning(f"RapidOCR 启 {params and params.get('Det.engine_type','?')} 失败, 退默认: {e}")
+            logger.warning(f"RapidOCR 启自定义 params 失败, 退默认: {e}")
             cls._shared_ocr = RapidOCR()
         logger.info("RapidOCR 预热完成")
 
@@ -244,6 +248,58 @@ class OcrDismisser:
                 except Exception as e:
                     logger.warning(f"读 {p} 失败：{e}")
         return {}
+
+    @staticmethod
+    def _params_strings_to_enums(params: dict) -> dict:
+        """RapidOCR 3.x 严格要求 *.engine_type / *.lang_type / *.model_type 是 Enum.
+        但 runtime.json 只能存字符串. 这里把已知字段的字符串转成对应 Enum 实例.
+        未知字段 / 已经是 Enum 的值不动."""
+        if not params:
+            return params
+        try:
+            from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion
+        except ImportError:
+            # rapidocr 老版本没这些 Enum, 直接返回 (params 是字符串也能 work)
+            return params
+        # 字段名后缀 → Enum 类的映射
+        suffix_to_enum = {
+            "engine_type": EngineType,
+            "lang_type": (LangDet, LangRec),     # det/rec 用不同 lang enum, 按 prefix 选
+            "model_type": ModelType,
+            "ocr_version": OCRVersion,
+        }
+        out = {}
+        for k, v in params.items():
+            if not isinstance(v, str):
+                out[k] = v
+                continue
+            converted = False
+            for suffix, enum_target in suffix_to_enum.items():
+                if not k.endswith("." + suffix):
+                    continue
+                if isinstance(enum_target, tuple):
+                    # lang_type: Det/Cls.* → LangDet, Rec.* → LangRec
+                    LangDetCls, LangRecCls = enum_target
+                    enum_cls = LangRecCls if k.startswith("Rec.") else LangDetCls
+                else:
+                    enum_cls = enum_target
+                # 用 v.lower() 找 enum 成员; OPENVINO / openvino 都接受
+                target = v.upper() if hasattr(enum_cls, v.upper()) else v
+                try:
+                    out[k] = enum_cls[target]
+                    converted = True
+                    break
+                except KeyError:
+                    # 可能 enum 用 value 不是 name (如 LangDet.CH = "ch")
+                    for member in enum_cls:
+                        if str(member.value).lower() == v.lower():
+                            out[k] = member
+                            converted = True
+                            break
+                    break
+            if not converted:
+                out[k] = v
+        return out
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OCR引擎
