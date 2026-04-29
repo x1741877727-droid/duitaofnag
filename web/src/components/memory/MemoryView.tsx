@@ -409,9 +409,20 @@ function PendingCard({
       </div>
       <div className="flex items-center gap-2 text-[10px] text-muted-foreground mb-1">
         <span>📍 ({e.median_xy[0]},{e.median_xy[1]})</span>
-        <span className={stdBad ? 'text-destructive font-bold' : ''}>
-          σ {e.std_x}/{e.std_y}px
-        </span>
+        {e.samples < 2 ? (
+          <span className="text-muted-foreground/60" title="只有 1 个样本, σ 暂无意义">
+            σ —
+          </span>
+        ) : e.std_x === 0 && e.std_y === 0 ? (
+          <span className="text-success" title="所有样本同坐标, 完美一致">
+            σ 0px ✓
+          </span>
+        ) : (
+          <span className={stdBad ? 'text-destructive font-bold' : 'text-success'}
+                title={`阈值 ${e.max_std_allowed}px, 超过则拒绝入库`}>
+            σ {e.std_x}/{e.std_y}px
+          </span>
+        )}
         <span className="ml-auto">{e.age_s}s</span>
       </div>
       {/* 样本按钮 */}
