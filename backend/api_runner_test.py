@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import time
 from typing import Any, Optional
 
@@ -25,6 +26,13 @@ router = APIRouter()
 # 全局取消令牌 (前端按"停止测试" → POST /cancel → set v=True)
 # single_runner._run_v3_phase 每轮检查这个 flag.
 CANCEL_FLAG: dict = {"v": False}
+
+# 后台任务表: task_id → {status, result, started_at, ...}
+# 长任务 (P1/P2/P3a/P4 可能 30-90s) 走异步, POST 立即返 task_id, 前端轮询 GET status.
+# 解决: trycloudflare 隧道单请求 ~30s 超时, 长任务被它 502 误报.
+_TASKS: dict[str, dict] = {}
+_TASKS_TTL_S = 3600                  # 任务结果保留 1h, 之后自动清
+_TASKS_MAX = 500                     # 表内最多 500 条, 超了删最早的
 
 
 # phase 名 → handler class
@@ -104,56 +112,43 @@ async def phase_doc(phase: str):
     }
 
 
-@router.post("/api/runner/test_phase")
-async def test_phase(req: TestPhaseReq):
-    """单阶段 dryrun.
-
-    1. 主 runner 未跑 → 临时构造 SingleInstanceRunner + 跑该 phase
-    2. 主 runner 在跑 → 拒绝 (避免 ADB 抢占)
-
-    返回: {ok, phase, instance, decision_session, error?}
-    """
+async def _execute_test_phase(req: TestPhaseReq) -> dict:
+    """实际跑 phase 的核心逻辑. 返回完整结果 dict.
+    异常自己捕获, 写到 result.error 不抛."""
     phase = req.phase.strip()
     if phase not in _HANDLER_MAP:
-        raise HTTPException(400, f"未知 phase: {phase} (有效: {list(_HANDLER_MAP.keys())})")
+        return {"ok": False, "error": f"未知 phase: {phase}", "phase": phase}
 
     from . import api as _api_mod
     svc = getattr(_api_mod, "_active_service", None)
     cfg = getattr(_api_mod, "_active_config", None)
     if svc is None or cfg is None:
-        raise HTTPException(503, "主 service 不可用")
+        return {"ok": False, "error": "主 service 不可用", "phase": phase}
 
     if svc.running:
-        raise HTTPException(
-            409,
-            "主 runner 在跑, 阶段测试要求主 runner 停 (避免 ADB 抢帧 / 状态打架)",
-        )
+        return {
+            "ok": False, "phase": phase,
+            "error": "主 runner 在跑, 阶段测试要求主 runner 停 (避免 ADB 抢帧 / 状态打架)",
+        }
 
-    # 拿/造 SingleInstanceRunner
-    # 优先级: 主 runner (svc._runners) > 测试缓存 (svc._test_runners) > 新建
     runner = svc._runners.get(int(req.instance))
     if runner is None:
-        # _build_test_runner 内部会查 _test_runners 缓存, 命中直接返
         try:
             runner = await _build_test_runner(svc, cfg, int(req.instance), req.role)
         except Exception as e:
             logger.warning(f"[test_phase] build_runner err: {e}", exc_info=True)
-            raise HTTPException(500, f"构造测试 runner 失败: {e}")
+            return {"ok": False, "phase": phase, "error": f"构造测试 runner 失败: {e}"}
 
-    # 拿 handler
     cls_name, _ = _HANDLER_MAP[phase]
     try:
         from .automation import phases as _p
         handler_cls = getattr(_p, cls_name)
     except Exception as e:
-        raise HTTPException(500, f"加载 handler 失败: {e}")
+        return {"ok": False, "phase": phase, "error": f"加载 handler 失败: {e}"}
 
     handler = handler_cls()
-
-    # 跑前重置取消令牌
     CANCEL_FLAG["v"] = False
 
-    # 队员 P3b 入口前注入队长的 scheme (前端协调)
     if req.scheme:
         try:
             ctx = runner._build_v3_ctx()
@@ -161,7 +156,6 @@ async def test_phase(req: TestPhaseReq):
         except Exception as e:
             logger.debug(f"[test_phase] 注入 scheme 失败: {e}")
 
-    # 跑
     t0 = time.perf_counter()
     error: Optional[str] = None
     ok = False
@@ -173,7 +167,6 @@ async def test_phase(req: TestPhaseReq):
 
     dur_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-    # 队长 P3a 跑完后, ctx.game_scheme_url 已被 P3aHandler 写入 (大组联动用)
     scheme_out = ""
     try:
         ctx = runner._v3_ctx
@@ -182,7 +175,6 @@ async def test_phase(req: TestPhaseReq):
     except Exception:
         pass
 
-    # 决策记录所在 session
     try:
         from .automation.decision_log import get_recorder
         rec = get_recorder()
@@ -201,7 +193,82 @@ async def test_phase(req: TestPhaseReq):
         "decision_session": sess_name,
         "fresh_runner": runner is not None and svc._runners.get(int(req.instance)) is None,
         "error": error,
-        "game_scheme_url": scheme_out,   # 队长 P3a 跑完后吐出, 给队员 P3b 用
+        "game_scheme_url": scheme_out,
+    }
+
+
+def _gc_old_tasks() -> None:
+    """清过期任务 (TTL + 表上限)."""
+    now = time.time()
+    expired = [tid for tid, t in _TASKS.items()
+               if now - t.get("created_at", now) > _TASKS_TTL_S]
+    for tid in expired:
+        _TASKS.pop(tid, None)
+    # 表上限: 删最早的
+    if len(_TASKS) > _TASKS_MAX:
+        sorted_ids = sorted(_TASKS.keys(), key=lambda t: _TASKS[t].get("created_at", 0))
+        for tid in sorted_ids[: len(_TASKS) - _TASKS_MAX]:
+            _TASKS.pop(tid, None)
+
+
+async def _run_test_phase_bg(task_id: str, req: TestPhaseReq) -> None:
+    """后台 task: 跑 phase, 把结果写回 _TASKS[task_id]. 异常不抛."""
+    try:
+        result = await _execute_test_phase(req)
+    except Exception as e:
+        result = {"ok": False, "error": f"后台异常: {e}", "phase": req.phase}
+        logger.warning(f"[test_phase bg {task_id}] 异常: {e}", exc_info=True)
+    t = _TASKS.get(task_id)
+    if t is not None:
+        t["status"] = "done"
+        t["finished_at"] = time.time()
+        t["result"] = result
+
+
+@router.post("/api/runner/test_phase")
+async def test_phase(req: TestPhaseReq):
+    """单阶段 dryrun. **后台任务模型** — 立即返 task_id, 前端轮询 status.
+
+    解决: trycloudflare 隧道单请求 ~30s 超时, 长 phase (P1/P2/P3a/P4 可能 30-90s)
+    被中间层 502 截断. 改成后台 task 后单 HTTP 永远 < 100ms, cloudflared 满意.
+
+    Response: { ok: True, task_id, status: "running" }
+    前端: GET /api/runner/test_phase/{task_id} 轮询直到 status=="done"
+    """
+    _gc_old_tasks()
+    task_id = secrets.token_urlsafe(8)
+    _TASKS[task_id] = {
+        "status": "running",
+        "created_at": time.time(),
+        "phase": req.phase,
+        "instance": req.instance,
+        "role": req.role,
+    }
+    asyncio.create_task(_run_test_phase_bg(task_id, req))
+    return {"ok": True, "task_id": task_id, "status": "running"}
+
+
+@router.get("/api/runner/test_phase/{task_id}")
+async def test_phase_status(task_id: str):
+    """查后台任务状态 / 结果. 单次 HTTP < 5ms (内存查表)."""
+    t = _TASKS.get(task_id)
+    if t is None:
+        raise HTTPException(404, f"task_id 不存在或已过期: {task_id}")
+    if t["status"] == "running":
+        elapsed = (time.time() - t["created_at"]) * 1000
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "elapsed_ms": round(elapsed, 1),
+            "phase": t.get("phase", ""),
+            "instance": t.get("instance", -1),
+        }
+    # done
+    return {
+        "task_id": task_id,
+        "status": "done",
+        "elapsed_ms": round((t.get("finished_at", time.time()) - t["created_at"]) * 1000, 1),
+        **t.get("result", {}),
     }
 
 

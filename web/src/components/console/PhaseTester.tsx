@@ -31,6 +31,66 @@ interface RunResult {
 
 const ROLE_PHASES = new Set(['P3a', 'P3b', 'P4'])
 
+
+/**
+ * 提交 test_phase 后台任务并轮询直到完成.
+ * 后端 POST 立即返 task_id (< 100ms), 前端每 1s GET status 直到 done.
+ * 解决 trycloudflare 隧道单 HTTP ~30s 超时, 长 phase 被 502 截断.
+ */
+async function runPhaseAsync(body: {
+  instance: number; phase: string; role: 'captain' | 'member'; scheme?: string;
+}): Promise<{ ok: boolean; phaseName: string; duration: number; error: string; scheme: string }> {
+  const phaseName0 = body.phase
+  const t0 = performance.now()
+  // 1) 提交
+  let taskId = ''
+  try {
+    const r = await fetch('/api/runner/test_phase', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const text = await r.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch {}
+    if (!r.ok || !data || !data.task_id) {
+      const errMsg = data?.detail || data?.error || `HTTP ${r.status}: ${text.slice(0, 80)}`
+      return { ok: false, phaseName: phaseName0, duration: performance.now() - t0, error: errMsg, scheme: '' }
+    }
+    taskId = data.task_id
+  } catch (e) {
+    return { ok: false, phaseName: phaseName0, duration: performance.now() - t0, error: `提交异常: ${e}`, scheme: '' }
+  }
+
+  // 2) 轮询 (每 1s, 最多 10 分钟兜底)
+  const POLL_MS = 1000
+  const MAX_WAIT_MS = 10 * 60 * 1000
+  const pollT0 = performance.now()
+  while (performance.now() - pollT0 < MAX_WAIT_MS) {
+    await new Promise((res) => setTimeout(res, POLL_MS))
+    try {
+      const r = await fetch(`/api/runner/test_phase/${encodeURIComponent(taskId)}`)
+      const text = await r.text()
+      let data: any = null
+      try { data = text ? JSON.parse(text) : null } catch {}
+      if (!data) continue                  // 网络毛刺, 下次再轮
+      if (data.status === 'running') continue
+      // done
+      const duration = data.duration_ms ?? (performance.now() - t0)
+      return {
+        ok: !!data.ok,
+        phaseName: data.phase_name || phaseName0,
+        duration,
+        error: data.error || '',
+        scheme: data.game_scheme_url || '',
+      }
+    } catch {
+      continue
+    }
+  }
+  return { ok: false, phaseName: phaseName0, duration: performance.now() - t0, error: '轮询超时 10 分钟', scheme: '' }
+}
+
 export function PhaseTester() {
   const isRunning = useAppStore((s) => s.isRunning)
   const emulators = useAppStore((s) => s.emulators)
@@ -135,7 +195,7 @@ export function PhaseTester() {
     let done = 0
     const updateProg = () => setPhaseTester({ progress: `${done}/${total}` })
 
-    // 每实例独立跑自己的阶段链 (像主 runner 多实例并发)
+    // 每实例独立跑自己的阶段链 — 用 runPhaseAsync 后台任务 + 轮询
     async function runOneInstance(tgt: number): Promise<void> {
       for (const phase of selKeys) {
         addLog({
@@ -143,52 +203,21 @@ export function PhaseTester() {
           instance: tgt, level: 'info',
           message: `[阶段测试 #${tgt}] 开始 ${phase}…`,
         })
-        let ok = false
-        let errMsg = ''
-        let phaseName = phase
-        let duration = 0
-        try {
-          const t0 = performance.now()
-          const r = await fetch('/api/runner/test_phase', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ instance: tgt, phase, role: selRole }),
-          })
-          // 容错: 后端可能返 502/HTML/空 — 先 text 再尝试 JSON, 失败显示明确错误
-          const text = await r.text()
-          duration = performance.now() - t0
-          let data: any = null
-          try { data = text ? JSON.parse(text) : null } catch {}
-          if (data === null) {
-            errMsg = `后端响应非 JSON (HTTP ${r.status}): ${text.slice(0, 80) || '空'}`
-          } else if (!r.ok) {
-            errMsg = data.detail || data.error || `HTTP ${r.status}`
-          } else {
-            ok = data.ok
-            phaseName = data.phase_name || phase
-            errMsg = data.error || ''
-            if (typeof data.duration_ms === 'number') duration = data.duration_ms
-          }
-        } catch (e) {
-          errMsg = `网络异常: ${String(e)}`
-        }
+        const r = await runPhaseAsync({ instance: tgt, phase, role: selRole })
         done += 1
         updateProg()
         addPhaseResult({
           phase: `#${tgt}/${phase}`,
-          phase_name: `#${tgt} ${phaseName}`,
-          ok, duration_ms: duration, error: errMsg,
+          phase_name: `#${tgt} ${r.phaseName}`,
+          ok: r.ok, duration_ms: r.duration, error: r.error,
         })
         addLog({
           timestamp: Date.now() / 1000,
           instance: tgt,
-          level: ok ? 'info' : (errMsg ? 'error' : 'warn'),
-          message: `[阶段测试] #${tgt} ${phaseName} ${ok ? '✓ 完成' : '✗ 失败'} (${duration.toFixed(0)}ms)${errMsg ? ' — ' + errMsg : ''}`,
+          level: r.ok ? 'info' : (r.error ? 'error' : 'warn'),
+          message: `[阶段测试] #${tgt} ${r.phaseName} ${r.ok ? '✓ 完成' : '✗ 失败'} (${r.duration.toFixed(0)}ms)${r.error ? ' — ' + r.error : ''}`,
         })
-        if (!ok && !keepGoing) {
-          // 该实例链停, 但其他实例继续
-          return
-        }
+        if (!r.ok && !keepGoing) return
       }
     }
 
@@ -230,55 +259,19 @@ export function PhaseTester() {
         timestamp: Date.now() / 1000, instance: tgt, level: 'info',
         message: `[阶段测试·大组] #${tgt} ${role} 开始 ${phase}…`,
       })
-      try {
-        const t0 = performance.now()
-        const r = await fetch('/api/runner/test_phase', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instance: tgt, phase, role, scheme }),
-        })
-        // 容错: 后端 502 / 空响应不要让 JSON.parse 炸 cryptic SyntaxError
-        const text = await r.text()
-        let data: any = null
-        try { data = text ? JSON.parse(text) : null } catch {}
-        const dur = (data && data.duration_ms) ?? (performance.now() - t0)
-        let ok = false
-        let errMsg = ''
-        if (data === null) {
-          errMsg = `后端响应非 JSON (HTTP ${r.status}, 可能崩了): ${text.slice(0, 80) || '空'}`
-        } else if (!r.ok) {
-          errMsg = data.detail || data.error || `HTTP ${r.status}`
-        } else {
-          ok = !!data.ok
-          errMsg = data.error || ''
-        }
-        const phaseName = (data && data.phase_name) || phase
-        done += 1
-        updateProg()
-        addPhaseResult({
-          phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phaseName}`,
-          ok, duration_ms: dur, error: errMsg,
-        })
-        addLog({
-          timestamp: Date.now() / 1000, instance: tgt,
-          level: ok ? 'info' : (errMsg ? 'error' : 'warn'),
-          message: `[阶段测试·大组] #${tgt} ${phaseName} ${ok ? '✓ 完成' : '✗ 失败'} (${dur.toFixed(0)}ms)${errMsg ? ' — ' + errMsg : ''}`,
-        })
-        return { ok, scheme: (data && data.game_scheme_url) || '', error: errMsg }
-      } catch (e) {
-        done += 1
-        updateProg()
-        const err = String(e)
-        addPhaseResult({
-          phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${phase}`,
-          ok: false, error: err,
-        })
-        addLog({
-          timestamp: Date.now() / 1000, instance: tgt, level: 'error',
-          message: `[阶段测试·大组] #${tgt} ${phase} 异常: ${err}`,
-        })
-        return { ok: false, scheme: '', error: err }
-      }
+      const r = await runPhaseAsync({ instance: tgt, phase, role, scheme })
+      done += 1
+      updateProg()
+      addPhaseResult({
+        phase: `#${tgt}/${phase}`, phase_name: `#${tgt} ${r.phaseName}`,
+        ok: r.ok, duration_ms: r.duration, error: r.error,
+      })
+      addLog({
+        timestamp: Date.now() / 1000, instance: tgt,
+        level: r.ok ? 'info' : (r.error ? 'error' : 'warn'),
+        message: `[阶段测试·大组] #${tgt} ${r.phaseName} ${r.ok ? '✓ 完成' : '✗ 失败'} (${r.duration.toFixed(0)}ms)${r.error ? ' — ' + r.error : ''}`,
+      })
+      return { ok: r.ok, scheme: r.scheme, error: r.error }
     }
 
     async function runOneSquad(sq: SquadAssignment): Promise<void> {
