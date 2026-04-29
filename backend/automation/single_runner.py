@@ -179,6 +179,50 @@ class SingleInstanceRunner:
         )
         return self._v3_ctx
 
+    def _mem_query(self, shot, target_name: str, max_dist: int = 5):
+        """统一 memory 查询入口 (P3a / P4 各 sub-decision 用).
+        memory 没初始化 / 异常 → 返 None, 不阻塞流程."""
+        if self._v3_memory is None or shot is None:
+            return None
+        try:
+            return self._v3_memory.query(shot, target_name=target_name, max_dist=max_dist)
+        except Exception as e:
+            logger.debug(f"[mem_query {target_name}] err: {e}")
+            return None
+
+    def _mem_remember(self, shot, target_name: str, x: int, y: int, success: bool = True):
+        """统一 memory 写入入口. 成功 tap 后调."""
+        if self._v3_memory is None or shot is None:
+            return
+        try:
+            self._v3_memory.remember(shot, target_name, (int(x), int(y)), success=success)
+        except Exception as e:
+            logger.debug(f"[mem_remember {target_name}] err: {e}")
+
+    async def _try_memory_first(self, shot, target_name: str, decision, target_class_zh: str = "") -> bool:
+        """memory 快速路径: 命中即 tap + remember + 写 decision tier. 返回 True=命中.
+        各 sub-decision 在 OCR/template 之前调一下, 命中则跳过 OCR 省 1-2s."""
+        from .decision_log import TierRecord
+        mem = self._mem_query(shot, target_name)
+        if mem is None:
+            return False
+        target_lbl = target_class_zh or target_name
+        if decision is not None:
+            try:
+                decision.add_tier(TierRecord(
+                    tier=1, name=f"Memory·{target_name}", early_exit=True,
+                    note=f"Memory 命中 (省 OCR/模板): {mem.note}",
+                ))
+                decision.set_tap(int(mem.cx), int(mem.cy), method="记忆",
+                                  target_class=f"{target_lbl}(memory)",
+                                  target_conf=float(mem.confidence), screenshot=shot)
+            except Exception:
+                pass
+        await self.adb.tap(mem.cx, mem.cy)
+        # 成功 tap → 累计学习 (蓄水池里)
+        self._mem_remember(shot, target_name, mem.cx, mem.cy, success=True)
+        return True
+
     async def _run_v3_phase(self, handler, instance_idx: int = -1) -> bool:
         """用 v3 PhaseHandler 跑一个 phase. 返回 True=NEXT/DONE, False=FAIL/超时.
 
@@ -837,8 +881,15 @@ class SingleInstanceRunner:
         ocr_hits = []
         found = None
         p4_1_attempts = 0
+        memory_hit_p4_1 = False
         for _retry in range(len(_P4_RETRY_SLEEPS) + 1):  # 4 次
             p4_1_attempts = _retry + 1
+            # ① Memory 快速路径 (每次 retry 先查一次, 命中即 break)
+            if await self._try_memory_first(shot, "P4-1-open", d1, "开始游戏"):
+                _slog(f"[阶段6] P4-1 Memory 命中 (第 {p4_1_attempts} 次)")
+                memory_hit_p4_1 = True
+                hit = None; found = None
+                break
             # 模板 1: lobby_start_game (用户裁的)
             hit = self.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
             tmpl_used = "lobby_start_game"
@@ -863,7 +914,10 @@ class SingleInstanceRunner:
                 if shot_r is not None:
                     shot = shot_r
 
-        if hit:
+        if memory_hit_p4_1:
+            # Memory 命中分支: tap 已在 _try_memory_first 内做了, 这里只 finalize
+            if d1: d1.finalize(outcome="opened_panel", note=f"Memory 命中(第 {p4_1_attempts} 次)")
+        elif hit:
             if d1:
                 d1.add_tier(TierRecord(
                     tier=0, name=f"模板·{tmpl_used}", early_exit=True,
@@ -878,6 +932,7 @@ class SingleInstanceRunner:
                            target_class="开始游戏(下方模式名)",
                            target_conf=float(hit.confidence), screenshot=shot)
             await self.adb.tap(hit.cx, hit.cy + 60)
+            self._mem_remember(shot, "P4-1-open", hit.cx, hit.cy + 60, success=True)
             _slog(f"[阶段6] 模板定位'开始游戏' conf={hit.confidence:.2f} → tap ({hit.cx},{hit.cy+60})")
             if d1: d1.finalize(outcome="opened_panel", note=f"模板命中(第 {p4_1_attempts} 次) → 已 tap")
         elif found is not None:
@@ -895,6 +950,7 @@ class SingleInstanceRunner:
                 d1.set_tap(int(found.cx), int(found.cy + 60), method="OCR",
                            target_class="开始游戏", target_text=found.text, screenshot=shot)
             await self.adb.tap(found.cx, found.cy + 60)
+            self._mem_remember(shot, "P4-1-open", found.cx, found.cy + 60, success=True)
             _slog(f"[阶段6] OCR 兜底找到'开始游戏' → tap ({found.cx},{found.cy+60})")
             if d1: d1.finalize(outcome="opened_panel", note=f"OCR 兜底命中(第 {p4_1_attempts} 次)")
         else:
@@ -1001,6 +1057,7 @@ class SingleInstanceRunner:
                                method="OCR", target_class="团队竞技tab",
                                target_text=team_battle_hit.text, screenshot=shot)
                 await self.adb.tap(team_battle_hit.cx, team_battle_hit.cy)
+                self._mem_remember(shot, "P4-2-mode", team_battle_hit.cx, team_battle_hit.cy, success=True)
                 await asyncio.sleep(0.5)
                 _slog(f"[阶段6] 切团竞 tap ({team_battle_hit.cx},{team_battle_hit.cy})")
                 if d2: d2.finalize(outcome="mode_switched", note="切到团竞")
@@ -1210,8 +1267,15 @@ class SingleInstanceRunner:
         confirm_hits_last: list = []
         _btn_roi_px_last = None
         p4_5_attempts = 0
+        memory_hit_p4_5 = False
         for _retry in range(len(_P4_RETRY_SLEEPS) + 1):  # 4 次
             p4_5_attempts = _retry + 1
+            # ① Memory 快速路径
+            if shot_d5 is not None and await self._try_memory_first(shot_d5, "P4-5-confirm", d5, "确定按钮"):
+                _slog(f"[阶段6] P4-5 Memory 命中 (第 {p4_5_attempts} 次)")
+                memory_hit_p4_5 = True
+                confirm_tmpl_fresh = None; confirm_hit_ocr = None
+                break
             confirm_tmpl_fresh = None
             confirm_tmpl_used = "queding"
             try:
@@ -1262,7 +1326,10 @@ class SingleInstanceRunner:
                 if shot_r is not None:
                     shot_d5 = shot_r
 
-        if confirm_tmpl_fresh:
+        if memory_hit_p4_5:
+            # tap 已在 _try_memory_first 内做了
+            if d5: d5.finalize(outcome="confirmed", note=f"Memory 命中(第 {p4_5_attempts} 次)")
+        elif confirm_tmpl_fresh:
             if d5:
                 d5.add_tier(TierRecord(
                     tier=0, name=f"模板·{confirm_tmpl_used}", early_exit=True,
@@ -1280,6 +1347,7 @@ class SingleInstanceRunner:
                            method="模板", target_class="确定",
                            target_conf=float(confirm_tmpl_fresh.confidence), screenshot=shot_d5)
             await self.adb.tap(confirm_tmpl_fresh.cx, confirm_tmpl_fresh.cy)
+            self._mem_remember(shot_d5, "P4-5-confirm", confirm_tmpl_fresh.cx, confirm_tmpl_fresh.cy, success=True)
             _slog(f"[阶段6] 确定 {confirm_tmpl_used} 模板命中(尝试 {p4_5_attempts} 次) → tap ({confirm_tmpl_fresh.cx},{confirm_tmpl_fresh.cy}) conf={confirm_tmpl_fresh.confidence:.2f}")
             if d5: d5.finalize(outcome="confirmed", note=f"模板命中 conf={confirm_tmpl_fresh.confidence:.2f} (尝试 {p4_5_attempts} 次)")
         elif confirm_hit_ocr:
@@ -1298,6 +1366,7 @@ class SingleInstanceRunner:
                            method="OCR", target_class="确定",
                            target_text=confirm_hit_ocr.text, screenshot=shot)
             await self.adb.tap(confirm_hit_ocr.cx, confirm_hit_ocr.cy)
+            self._mem_remember(shot, "P4-5-confirm", confirm_hit_ocr.cx, confirm_hit_ocr.cy, success=True)
             _slog(f"[阶段6] OCR 兜底命中确定 (尝试 {p4_5_attempts} 次) → tap ({confirm_hit_ocr.cx},{confirm_hit_ocr.cy})")
             if d5: d5.finalize(outcome="confirmed", note=f"OCR 兜底命中 (尝试 {p4_5_attempts} 次)")
         else:
@@ -1401,15 +1470,18 @@ class SingleInstanceRunner:
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
+            # ① Memory 快速路径 (命中省 OCR ~1.3s)
+            if await self._try_memory_first(shot, "P3a-1-open", d1, "组队按钮"):
+                logger.info("[阶段4] Memory 命中, 跳过 OCR")
+                clicked = True
+                break
             self.dbg.log_screenshot(shot, f"attempt{attempt}")
             _pt_ocr = _tm.perf_counter()
             left_hits = ocr._ocr_roi_named(shot, "team_btn_left")
             logger.info(f"[P3a-1 PERF] attempt {attempt+1}: OCR team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_left_hits = left_hits
             self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
-            # 主匹配: 文字含 "组" 或 "队" 都算 (用户要求放宽, OCR 经常把"组队" → "如WB"
-            # 之类乱识别, 但只要有一个字命中就 tap, 因为 ROI 已限定在左侧栏组队按钮区域).
-            # 排除"队友"避免错点找队友按钮 (两者位置不同).
+            # ② OCR 主匹配: 文字含 "组" 或 "队" 都算
             for h in left_hits:
                 if "队友" in h.text:
                     continue
@@ -1420,6 +1492,8 @@ class SingleInstanceRunner:
                                    target_class="组队按钮", target_text=h.text,
                                    screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
+                    # 成功 tap → 给 memory 累计 (5 次同位置 + std<15px 才落库)
+                    self._mem_remember(shot, "P3a-1-open", h.cx, h.cy, success=True)
                     logger.info(f"[阶段4] 点击组队 (text='{h.text}', cx={h.cx}, cy={h.cy})")
                     clicked = True
                     break
@@ -1484,9 +1558,13 @@ class SingleInstanceRunner:
                 await asyncio.sleep(0.3)
                 continue
 
-            # 直接 OCR 底部"组队码" tab. 之前的中部"使用组队码加入"弹窗检测删了
-            # (实测从来不命中, 311K 像素的 OCR 每次浪费 ~2-3s).
-            # 如果某天真撞到那个弹窗, 这 5 次 retry 都会找不到 tab → P3a-2 fail.
+            # ① Memory 快速路径
+            if await self._try_memory_first(shot, "P3a-2-tab", d2, "组队码tab"):
+                logger.info("[阶段4] P3a-2 Memory 命中, 跳过 OCR")
+                tab_clicked = True
+                break
+
+            # ② OCR 底部"组队码" tab
             _pt_ocr = _tm.perf_counter()
             bottom_hits = ocr._ocr_roi_named(shot, "team_code_tab_bottom")
             logger.info(f"[P3a-2 PERF] attempt {attempt+1}: OCR team_code_tab_bottom {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(bottom_hits)} 文字)")
@@ -1498,6 +1576,7 @@ class SingleInstanceRunner:
                                    target_class="组队码 tab", target_text=h.text,
                                    screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
+                    self._mem_remember(shot, "P3a-2-tab", h.cx, h.cy, success=True)
                     logger.info(f"[阶段4] 点击组队码tab ({h.cx},{h.cy})")
                     tab_clicked = True
                     break
@@ -1543,6 +1622,12 @@ class SingleInstanceRunner:
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
+            # ① Memory 快速路径
+            if await self._try_memory_first(shot, "P3a-3-qr", d3, "二维码组队"):
+                logger.info("[阶段4] P3a-3 Memory 命中, 跳过 OCR")
+                qr_clicked = True
+                break
+            # ② OCR
             _pt_ocr = _tm.perf_counter()
             left_hits = ocr._ocr_roi_named(shot, "qr_team_btn_left")
             logger.info(f"[P3a-3 PERF] attempt {attempt+1}: OCR qr_team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
@@ -1554,6 +1639,7 @@ class SingleInstanceRunner:
                                    target_class="二维码组队", target_text=h.text,
                                    screenshot=shot)
                     await self.adb.tap(h.cx, h.cy)
+                    self._mem_remember(shot, "P3a-3-qr", h.cx, h.cy, success=True)
                     logger.info(f"[阶段4] 点击二维码组队 ({h.cx},{h.cy})")
                     qr_clicked = True
                     break

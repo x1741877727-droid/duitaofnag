@@ -39,10 +39,12 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────
 # 配置常量 (实测调优后再改)
 # ────────────────────────────────────────────────────────────────────
-PENDING_CONFIRMATION_COUNT = 3       # 蓄水池: 同 phash 累计 N 次 success 才落库
+PENDING_CONFIRMATION_COUNT = 5       # 蓄水池: 同 phash 累计 N 次 success 才落库
 PENDING_PHASH_TOL = 3                # 蓄水池中聚合时 phash 距离容差
 PENDING_XY_TOL = 30                  # 蓄水池中聚合时坐标容差
-PENDING_TTL_S = 300                  # 蓄水池条目最大留存时间 (5min 没确认就丢)
+PENDING_TTL_S = 600                  # 蓄水池条目最大留存时间 (10min 累计 5 次)
+PENDING_STD_MAX_PX = 15              # 5 次坐标 std > 此值视为不一致, 拒绝 (说明可能命中不同位置)
+PENDING_MIN_TIME_SPAN_S = 0          # 5 次确认间最小时间跨度 (0=不限, 防 1 秒爆学可设 30)
 
 HISTORY_WINDOW = 20                  # 滑动窗口: 最近 N 次 attempt
 CONFIDENCE_THRESHOLD = 0.5           # 滑动窗口胜率低于此值认为记忆失效
@@ -381,26 +383,62 @@ class FrameMemory:
     # ──────── 蓄水池 (Tier 1.2) ────────
 
     def _pending_add(self, target: str, phs: int, x: int, y: int) -> Optional[dict]:
-        """累计同 phash + 同坐标的 success. 累计 ≥ N → 返回 commit 信号 (含次数)."""
+        """累计同 phash + 同坐标的 success. 5 次确认 + std 检查 + 中位数:
+          1. 同 phash + 坐标接近的 entry, 累加 sample
+          2. 累计 ≥ N → 算 std(x), std(y); std > 阈值 → 拒绝丢弃 (不可信)
+          3. 通过则用中位数作为最终落库坐标 (抗离群点)
+        返回 commit dict 或 None (待累计/被拒绝)."""
         now = time.time()
         bucket = self._pending[target]
         # 清掉过期 entry
         bucket[:] = [e for e in bucket if now - e["ts_first"] < PENDING_TTL_S]
-        # 找接近 entry
+        # 找接近 entry (按 phash + 中心点 mean 距离)
         for e in bucket:
+            cx_mean = sum(s[0] for s in e["samples"]) / len(e["samples"])
+            cy_mean = sum(s[1] for s in e["samples"]) / len(e["samples"])
             if (_hamming(e["phash"], phs) <= PENDING_PHASH_TOL
-                    and abs(e["x"] - x) < PENDING_XY_TOL
-                    and abs(e["y"] - y) < PENDING_XY_TOL):
-                e["count"] += 1
-                e["x"] = (e["x"] + x) // 2     # 平均化抗噪
-                e["y"] = (e["y"] + y) // 2
-                if e["count"] >= PENDING_CONFIRMATION_COUNT:
+                    and abs(cx_mean - x) < PENDING_XY_TOL
+                    and abs(cy_mean - y) < PENDING_XY_TOL):
+                e["samples"].append((x, y, now))
+                if len(e["samples"]) >= PENDING_CONFIRMATION_COUNT:
+                    # 时间跨度检查
+                    time_span = e["samples"][-1][2] - e["samples"][0][2]
+                    if PENDING_MIN_TIME_SPAN_S > 0 and time_span < PENDING_MIN_TIME_SPAN_S:
+                        # 太密集, 不可信; 重置该 entry 让重新累积
+                        logger.info(f"[memory_l1] 蓄水池拒绝: target={target} 时间跨度 {time_span:.1f}s < {PENDING_MIN_TIME_SPAN_S}s")
+                        bucket.remove(e)
+                        return None
+                    # 算 std
+                    xs = [s[0] for s in e["samples"]]
+                    ys = [s[1] for s in e["samples"]]
+                    mean_x = sum(xs) / len(xs)
+                    mean_y = sum(ys) / len(ys)
+                    std_x = (sum((v - mean_x) ** 2 for v in xs) / len(xs)) ** 0.5
+                    std_y = (sum((v - mean_y) ** 2 for v in ys) / len(ys)) ** 0.5
+                    if std_x > PENDING_STD_MAX_PX or std_y > PENDING_STD_MAX_PX:
+                        logger.info(
+                            f"[memory_l1] 蓄水池拒绝: target={target} "
+                            f"std_x={std_x:.1f} std_y={std_y:.1f} > {PENDING_STD_MAX_PX}px "
+                            f"(samples={[(int(s[0]), int(s[1])) for s in e['samples']]})"
+                        )
+                        bucket.remove(e)
+                        return None
+                    # 通过 — 用中位数作为最终坐标
+                    sorted_xs = sorted(xs); sorted_ys = sorted(ys)
+                    n = len(sorted_xs)
+                    final_x = sorted_xs[n // 2]
+                    final_y = sorted_ys[n // 2]
                     bucket.remove(e)
-                    return {"phash": phs, "x": x, "y": y, "count": e["count"]}
+                    return {
+                        "phash": phs, "x": int(final_x), "y": int(final_y),
+                        "count": len(e["samples"]),
+                        "std_x": round(std_x, 1), "std_y": round(std_y, 1),
+                        "time_span_s": round(time_span, 1),
+                    }
                 return None
         # 新建
         bucket.append({
-            "phash": phs, "x": x, "y": y, "count": 1, "ts_first": now,
+            "phash": phs, "samples": [(x, y, now)], "ts_first": now,
         })
         return None
 
@@ -594,7 +632,9 @@ class FrameMemory:
             self._lru[target_name].invalidate_all()
             logger.info(
                 f"[memory_l1] 蓄水池 commit: id={new_id} target={target_name} "
-                f"@({commit['x']},{commit['y']}) phash={ph:#x} count={commit['count']}"
+                f"@({commit['x']},{commit['y']}) phash={ph:#x} count={commit['count']} "
+                f"std=({commit.get('std_x',0)},{commit.get('std_y',0)})px "
+                f"span={commit.get('time_span_s',0)}s"
             )
 
     def _save_snapshot(self, frame: np.ndarray, target: str, x: int, y: int) -> str:
