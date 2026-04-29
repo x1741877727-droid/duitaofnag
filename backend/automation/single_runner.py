@@ -343,6 +343,11 @@ class SingleInstanceRunner:
             logger.info("[阶段0] FightMaster 已连接 ✓ 跳过启动")
             shot = await self.adb.screenshot()
             self.dbg.log_screenshot(shot, tag="vpn_connected")
+            try:
+                from .screenshot_collector import collect as _yolo_collect
+                _yolo_collect(shot, tag="P0-vpn_connected")
+            except Exception:
+                pass
             return True
 
         # 先尝试广播启动（快速路径）
@@ -351,6 +356,11 @@ class SingleInstanceRunner:
             logger.info("[阶段0] FightMaster 广播启动成功 ✓")
             shot = await self.adb.screenshot()
             self.dbg.log_screenshot(shot, tag="vpn_connected")
+            try:
+                from .screenshot_collector import collect as _yolo_collect
+                _yolo_collect(shot, tag="P0-vpn_connected")
+            except Exception:
+                pass
             return True
 
         # 广播失败 → UI 回退（拉起界面点连接）
@@ -372,6 +382,11 @@ class SingleInstanceRunner:
         logger.error("[阶段0] FightMaster 所有方式均失败")
         shot = await self.adb.screenshot()
         self.dbg.log_screenshot(shot, tag="vpn_failed")
+        try:
+            from .screenshot_collector import collect as _yolo_collect
+            _yolo_collect(shot, tag="P0-vpn_failed")
+        except Exception:
+            pass
         return False
 
     async def _check_vpn_connected(self) -> bool:
@@ -745,14 +760,26 @@ class SingleInstanceRunner:
             logger.info(msg)
             self._stage_log.append(msg)
 
-        def _make_d(sub_name: str):
-            """创建子 decision (phase 名带 'P4-XXX' 后缀, 档案前端能区分)"""
+        def _make_d(sub_name: str, shot_in=None):
+            """创建子 decision + (可选) set_input + 顺带采样到 yolo raw screenshots.
+            shot_in=None 时退化成只建 decision; 给了 shot_in 等价于 _make_d(name)+set_input+collect."""
             try:
-                return recorder.new_decision(
+                d = recorder.new_decision(
                     instance=inst_idx, phase=f"P4-{sub_name}", round_idx=1)
             except Exception as e:
                 logger.debug(f"new_decision err: {e}")
                 return None
+            if d is not None and shot_in is not None:
+                try:
+                    d.set_input(shot_in, q=70)
+                except Exception:
+                    pass
+                try:
+                    from .screenshot_collector import collect as _yolo_collect
+                    _yolo_collect(shot_in, instance=inst_idx, tag=f"P4-{sub_name}")
+                except Exception:
+                    pass
+            return d
 
         self.phase = Phase.MAP_SETUP
         _slog(f"[阶段6] 地图设置: {self.target_mode} - {self.target_map}")
@@ -800,9 +827,7 @@ class SingleInstanceRunner:
         if shot is None:
             self._restore_guard()
             return False
-        d1 = _make_d("1-open")
-        if d1:
-            d1.set_input(shot, q=70)
+        d1 = _make_d("1-open", shot_in=shot)
 
         # P4-1 retry: 4 次尝试, 每次跑 模板 lobby_start_game → lobby_start_btn → OCR 兜底,
         # 全 miss 后 sleep [0.25/0.4/1.0] 再来一次. 最坏 1.65s 延迟但抗 cold OCR/动画.
@@ -903,9 +928,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 2: P4-2-mode  切团竞模式 (OCR left_tabs 找团竞 tab)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        d2 = _make_d("2-mode")
-        if d2 and shot is not None:
-            d2.set_input(shot, q=70)
+        d2 = _make_d("2-mode", shot_in=shot)
 
         import time as _tm
 
@@ -1052,9 +1075,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 3: P4-3-map  选地图. 加 retry: gather 第一次没找到地图就重新 OCR list_center
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        d3 = _make_d("3-map")
-        if d3 and shot is not None:
-            d3.set_input(shot, q=70)
+        d3 = _make_d("3-map", shot_in=shot)
 
         p4_3_attempts = 1  # gather 那次算第 1 次
         if map_hit is None:
@@ -1113,9 +1134,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 4: P4-4-fill  补位检测 (ROI 颜色)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        d4 = _make_d("4-fill")
-        if d4 and shot is not None:
-            d4.set_input(shot, q=70)
+        d4 = _make_d("4-fill", shot_in=shot)
 
         # P4-3 可能 retry 过, shot 已变, 用新 shot 重新算 fill_state.
         # 同时加 retry: ROI 已配置但 fill_state 仍 None (截屏问题) → sleep + 重试.
@@ -1179,9 +1198,7 @@ class SingleInstanceRunner:
         shot_d5 = await self.adb.screenshot()
         if shot_d5 is None:
             shot_d5 = shot  # 截屏失败 fallback 用旧 shot
-        d5 = _make_d("5-confirm")
-        if d5 and shot_d5 is not None:
-            d5.set_input(shot_d5, q=70)
+        d5 = _make_d("5-confirm", shot_in=shot_d5)
 
         # P4-5 retry: queding → btn_1 (带区域约束) → OCR ROI/全屏 全 miss 才进 retry,
         # sleep [0.25/0.4/1.0] 重新截屏后再试. 任何一级命中即 break.
@@ -1327,13 +1344,25 @@ class SingleInstanceRunner:
         recorder = get_recorder()
         inst_idx = getattr(self._v3_ctx, "instance_idx", 0) if self._v3_ctx else 0
 
-        def _make_d(sub_name: str):
+        def _make_d(sub_name: str, shot_in=None):
+            """创建子 decision + (可选) set_input + 顺带采样到 yolo raw screenshots."""
             try:
-                return recorder.new_decision(
+                d = recorder.new_decision(
                     instance=inst_idx, phase=f"P3a-{sub_name}", round_idx=1)
             except Exception as e:
                 logger.debug(f"new_decision err: {e}")
                 return None
+            if d is not None and shot_in is not None:
+                try:
+                    d.set_input(shot_in, q=70)
+                except Exception:
+                    pass
+                try:
+                    from .screenshot_collector import collect as _yolo_collect
+                    _yolo_collect(shot_in, instance=inst_idx, tag=f"P3a-{sub_name}")
+                except Exception:
+                    pass
+            return d
 
         def _roi_pixels(name: str, img):
             if img is None:
@@ -1362,9 +1391,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         import time as _tm
         _p3a_t0 = _tm.perf_counter()
-        d1 = _make_d("1-open")
-        if d1 and shot is not None:
-            d1.set_input(shot, q=70)
+        d1 = _make_d("1-open", shot_in=shot)
         clicked = False
         last_left_hits: list = []
         for attempt in range(3):
@@ -1442,12 +1469,10 @@ class SingleInstanceRunner:
         _pt_sleep = _tm.perf_counter()
         await asyncio.sleep(0.3)  # 等面板动画 (从 0.8 改 0.3, 拍过渡帧也有 retry 兜底)
         logger.info(f"[P3a-2 PERF] 等面板动画 sleep: {(_tm.perf_counter()-_pt_sleep)*1000:.0f}ms")
-        d2 = _make_d("2-tab")
         _pt_shot = _tm.perf_counter()
         shot_d2 = await self.adb.screenshot()
         logger.info(f"[P3a-2 PERF] 入口 screenshot: {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
-        if d2 and shot_d2 is not None:
-            d2.set_input(shot_d2, q=70)
+        d2 = _make_d("2-tab", shot_in=shot_d2)
         _p3a2_t0 = _tm.perf_counter()
         tab_clicked = False
         last_bottom_hits: list = []
@@ -1506,10 +1531,8 @@ class SingleInstanceRunner:
         # 子 decision 3: P3a-3-qr  点"二维码组队"
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         await asyncio.sleep(0.3)  # 等 tab 切换 (从 0.5 改 0.3, retry 兜底)
-        d3 = _make_d("3-qr")
         shot_d3 = await self.adb.screenshot()
-        if d3 and shot_d3 is not None:
-            d3.set_input(shot_d3, q=70)
+        d3 = _make_d("3-qr", shot_in=shot_d3)
         qr_clicked = False
         last_qr_hits: list = []
         _p3a3_t0 = _tm.perf_counter()
@@ -1564,10 +1587,8 @@ class SingleInstanceRunner:
         # 子 decision 4: P3a-4-decode  截屏 + QR 解码 + fetch scheme
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         await asyncio.sleep(0.3)  # 等 QR 显示 (从 0.5 改 0.3, decode loop 已有 retry)
-        d4 = _make_d("4-decode")
         shot_d4 = await self.adb.screenshot()
-        if d4 and shot_d4 is not None:
-            d4.set_input(shot_d4, q=70)
+        d4 = _make_d("4-decode", shot_in=shot_d4)
         qr_url = ""
         decode_attempts = 0
         decode_winner = ""  # 哪种策略最后赢了 (打 PERF)
@@ -1716,10 +1737,8 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 子 decision 5: P3a-5-close  关闭面板
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        d5 = _make_d("5-close")
         shot_d5 = await self.adb.screenshot()
-        if d5 and shot_d5 is not None:
-            d5.set_input(shot_d5, q=70)
+        d5 = _make_d("5-close", shot_in=shot_d5)
         last_close_hit = None
         last_method = ""
         closed = False
@@ -1872,13 +1891,25 @@ class SingleInstanceRunner:
         recorder = get_recorder()
         inst_idx = getattr(self._v3_ctx, "instance_idx", 0) if self._v3_ctx else 0
 
-        def _make_d(sub_name: str):
+        def _make_d(sub_name: str, shot_in=None):
+            """创建子 decision + (可选) set_input + 顺带采样到 yolo raw screenshots."""
             try:
-                return recorder.new_decision(
+                d = recorder.new_decision(
                     instance=inst_idx, phase=f"P3b-{sub_name}", round_idx=1)
             except Exception as e:
                 logger.debug(f"new_decision err: {e}")
                 return None
+            if d is not None and shot_in is not None:
+                try:
+                    d.set_input(shot_in, q=70)
+                except Exception:
+                    pass
+                try:
+                    from .screenshot_collector import collect as _yolo_collect
+                    _yolo_collect(shot_in, instance=inst_idx, tag=f"P3b-{sub_name}")
+                except Exception:
+                    pass
+            return d
 
         self.phase = Phase.TEAM_JOIN
         logger.info(f"[阶段5] 队员加入队伍 (scheme: {game_scheme_url[:50]}...)")
@@ -1891,9 +1922,7 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         shot = await self.adb.screenshot()
         self.dbg.log_screenshot(shot, tag="team_join_start")
-        d1 = _make_d("1-launch")
-        if d1 and shot is not None:
-            d1.set_input(shot, q=70)
+        d1 = _make_d("1-launch", shot_in=shot)
 
         output = await loop.run_in_executor(
             None, raw_adb._cmd, "shell",
@@ -1950,6 +1979,12 @@ class SingleInstanceRunner:
         if d2:
             if last_shot is not None:
                 d2.set_input(last_shot, q=70)
+                # 顺带采样到 yolo raw screenshots
+                try:
+                    from .screenshot_collector import collect as _yolo_collect
+                    _yolo_collect(last_shot, instance=inst_idx, tag="P3b-2-verify")
+                except Exception:
+                    pass
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
                                 cx=h.cx, cy=h.cy) for h in last_hits[:15]]
             tier2 = TierRecord(
