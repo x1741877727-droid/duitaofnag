@@ -22,7 +22,9 @@ class P2DismissHandler(PhaseHandler):
         "兜底: 连续 3 轮无目标 + 大厅模板命中 → NEXT",
         "死屏: 无目标 > 12 轮 + 非大厅 → GAME_RESTART",
     ]
-    max_rounds = 25
+    # 25→35: 弹窗多 + no_target 排队间隙长的 inst (R25 大厅 pending_1/2 后再没机会跑下一帧 → FAIL)
+    # 多给 10 round 余裕, 单 round ~2s = 20s 能容多关几个弹窗或 lobby_confirmed_quad 的 2 帧确认
+    max_rounds = 35
     round_interval_s = 0.25   # 0.5→0.25, no_target 时复检间隔; YOLO 推理本身已耗 100-200ms, 不需要再额外 0.5s
 
     def __init__(self):
