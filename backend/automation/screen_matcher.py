@@ -186,6 +186,7 @@ class ScreenMatcher:
         use_edge: bool = False,
         scales: "list[float] | None" = None,
         preprocessing: "list | None" = None,
+        roi: "tuple[float,float,float,float] | None" = None,
     ) -> Optional[MatchHit]:
         """匹配单个模板，返回命中或None
 
@@ -193,6 +194,8 @@ class ScreenMatcher:
             use_edge: 使用 Canny 边缘检测匹配，对光照/对比度变化更鲁棒
             scales: 显式指定 scale 列表（覆盖 multi_scale 默认值）
             preprocessing: 临时 preprocessing list, 覆盖模板 yaml 持久值 (调试用)
+            roi: (x1, y1, x2, y2) 比例 (0-1), 限定搜索区域. 例: (0.7, 0, 1, 0.3) 只搜右上.
+                 ROI 限定能把 cv2.matchTemplate 速度提 5-10x. 命中坐标自动转回全屏空间.
         """
         if template_name not in self._templates:
             return None
@@ -248,6 +251,21 @@ class ScreenMatcher:
 
         if scales is None:
             scales = SCALES if multi_scale else [1.0]
+
+        # ROI 裁剪 — 只在指定区域搜模板, 显著加速 (e.g. 右上 1/5 = 5× 加速).
+        # 命中坐标后续会加 roi_offset 转回完整 NORM 空间.
+        roi_offset_x, roi_offset_y = 0, 0
+        if roi is not None:
+            rx1, ry1, rx2, ry2 = roi
+            sg_h, sg_w = screen_gray.shape[:2]
+            px1 = max(0, int(sg_w * rx1))
+            py1 = max(0, int(sg_h * ry1))
+            px2 = min(sg_w, int(sg_w * rx2))
+            py2 = min(sg_h, int(sg_h * ry2))
+            if px2 > px1 and py2 > py1:
+                screen_gray = screen_gray[py1:py2, px1:px2]
+                roi_offset_x, roi_offset_y = px1, py1
+
         best_val = 0.0
         best_loc = None
         best_scale = 1.0
@@ -280,9 +298,9 @@ class ScreenMatcher:
 
         _dur_ms = round((__import__('time').perf_counter() - _m_t0) * 1000, 2)
         if best_val >= th and best_loc is not None:
-            # NORM 空间的命中坐标
-            cx_norm = best_loc[0] + best_tw // 2
-            cy_norm = best_loc[1] + best_th_px // 2
+            # NORM 空间的命中坐标 (加 ROI offset 转回全图坐标系)
+            cx_norm = best_loc[0] + best_tw // 2 + roi_offset_x
+            cy_norm = best_loc[1] + best_th_px // 2 + roi_offset_y
             # 缩回原截图尺寸 (设备像素), adb.tap 用的是设备空间坐标
             src_h, src_w = screenshot.shape[:2]
             sx = src_w / NORM_W

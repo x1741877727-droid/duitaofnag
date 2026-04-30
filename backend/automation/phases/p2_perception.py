@@ -135,11 +135,18 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Block A 并发: lobby_tpl + login_tpl + YOLO + memory + phash
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ROI 限定: 大厅"开始游戏"按钮总在屏幕中下偏右 (大概 50%-100% 横, 50%-100% 竖).
+    # 登录按钮总在屏幕中下 (30%-100% 竖, 全宽). 限定 ROI 把单模板 30ms → 5-10ms.
+    LOBBY_ROI = (0.35, 0.45, 1.0, 1.0)        # 中下偏右
+    LOGIN_ROI = (0.0, 0.30, 1.0, 1.0)         # 屏幕下半
+    CLOSE_X_ROI = (0.65, 0.0, 1.0, 0.4)       # 右上 (公告 X / 关闭 X)
+    DISMISS_BTN_ROI = (0.0, 0.40, 1.0, 1.0)   # 屏幕下半 (确定/同意/不再提示)
+
     def _run_lobby_tpl():
         if matcher is None: return None
         for tn in ("lobby_start_btn", "lobby_start_game"):
             try:
-                h = matcher.match_one(shot, tn, threshold=0.75)
+                h = matcher.match_one(shot, tn, threshold=0.75, roi=LOBBY_ROI)
             except Exception:
                 h = None
             if h is not None:
@@ -150,7 +157,7 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         if matcher is None: return None
         for tn in LOGIN_TEMPLATE_NAMES:
             try:
-                h = matcher.match_one(shot, tn, threshold=0.80)
+                h = matcher.match_one(shot, tn, threshold=0.80, roi=LOGIN_ROI)
             except Exception:
                 h = None
             if h is not None:
@@ -234,7 +241,7 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         def _run_close_x():
             for tn in CLOSE_X_TEMPLATE_NAMES:
                 try:
-                    h = matcher.match_one(shot, tn, threshold=0.80)
+                    h = matcher.match_one(shot, tn, threshold=0.80, roi=CLOSE_X_ROI)
                 except Exception:
                     h = None
                 if h is not None:
@@ -249,7 +256,7 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         def _run_dismiss():
             for tn in DISMISS_BTN_TEMPLATE_NAMES:
                 try:
-                    h = matcher.match_one(shot, tn, threshold=0.80)
+                    h = matcher.match_one(shot, tn, threshold=0.80, roi=DISMISS_BTN_ROI)
                 except Exception:
                     h = None
                 if h is not None:
