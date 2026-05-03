@@ -14,6 +14,8 @@ v2 P2 dismiss_popups 四元信号融合判大厅 — 修当前最大 bug "半透
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -40,6 +42,8 @@ class LobbyQuadResult:
     yolo_dialog_count: int = 0
     button_brightness: float = 0.0  # 按钮 ROI HSV V 均值. 干净大厅 200+, 遮罩下 <80
     yolo_lobby_count: int = 0       # lobby_v1 模型: 检出"角色站立大厅" 数量 (recall 100% on val)
+    lobby_streak: int = 0           # 当前连续命中 lobby (yolo + 无弹窗) 的帧数
+    lobby_streak_required: int = 2  # 需连续 N 帧才判 lobby (防关弹窗瞬间 yolo 闪现误判)
     note: str = ""
 
 
@@ -73,9 +77,18 @@ class LobbyQuadDetector:
         self._overlay_corner_dark = overlay_corner_dark
         self._overlay_center_diff = overlay_center_diff
         self._phash_history: list[int] = []
+        # YOLO lobby streak 状态: 关弹窗瞬间 yolo 可能"看穿"动画看到角色, 连续 N 帧才信
+        # GAMEBOT_LOBBY_STREAK env 可调; 默认 2 (~0.5-1s)
+        self.lobby_streak_required: int = int(os.environ.get("GAMEBOT_LOBBY_STREAK", "2"))
+        self._lobby_streak: int = 0
+        self._last_check_ts: float = 0.0
+        # 跨长 gap 重置 (phase 切换间隔大, 老 streak 不能跨用)
+        self._streak_reset_gap_s: float = 5.0
 
     def reset(self) -> None:
         self._phash_history.clear()
+        self._lobby_streak = 0
+        self._last_check_ts = 0.0
 
     # ─── 四个独立信号 ───
 
@@ -189,43 +202,44 @@ class LobbyQuadDetector:
         # dialog 类是新训弹窗本体. 模型未训时 _count_yolo 返 0, 整条信号失效不影响判定 — 安全降级.
         dialog = self._count_yolo(yolo_detections, "dialog")
         # lobby 类: lobby_v1 模型 (recall 100% on val + inst-1 外部样本 conf 0.91).
-        # 模型未训含 lobby 类时 _count_yolo 返 0, 走原 template 路径 — 安全降级.
+        # 模型未训含 lobby 类时 _count_yolo 返 0, streak 永不增长 → 永远 is_lobby=False — 安全降级.
         yolo_lobby = self._count_yolo(yolo_detections, "lobby")
         has_overlay = self._check_overlay(frame)
         # phash stable 只为日志保留, 不参与判定 (大厅永远在动, 这条永远过不了)
         stable_n, _ = self._check_phash_stable(frame)
 
-        # 主判定: 模板找到 ∧ 按钮亮 ∧ 没X ∧ 没弹窗 ∧ 4角不黑
-        # 删了 action_btn=0 (直播 banner 占用 action_btn 类, 留这条直播下永远不算大厅)
-        # 删了 phash stable (大厅角色/横幅/特效永远在动)
-        is_lobby = (
-            t_hit
-            and brightness >= self.button_brightness_min
+        # ─── 主判定 (改 v3): YOLO lobby + 排除信号 + N 帧稳定 ───
+        # 旧版 (template 主信号) 因游戏 UI 改版后模板分数永远 < 0.78 而失效.
+        # 新版以 YOLO lobby_v1 (训 100% recall) 为主: 连续 N 帧 (默认 2) 都
+        # "看到角色 + 没 X + 没 dialog + 没 overlay" 才判大厅.
+        # 关弹窗瞬间 (~0.3-0.7s 动画) yolo 偶尔"看穿"半透明弹窗看到角色,
+        # 单帧就信会跳到 P3a 找不到组队按钮; 2 帧门槛过滤掉这类闪现.
+        now = time.time()
+        if now - self._last_check_ts > self._streak_reset_gap_s:
+            # 跨长 gap = 不同 phase 的同一 detector 重用, 旧 streak 失效
+            self._lobby_streak = 0
+        self._last_check_ts = now
+
+        # 候选: 这一帧符合"安静大厅"特征
+        candidate = (
+            yolo_lobby >= 1
             and close_x == 0
             and dialog == 0
             and not has_overlay
         )
-
-        # YOLO lobby 救场: 模板挂时只要 YOLO 看到角色 + 没 X/dialog/overlay, 就判大厅
-        # 解决"模板与游戏 UI 不一致 → t_hit=False → 永远判不出大厅"
-        yolo_saved = False
-        if not is_lobby and yolo_lobby >= 1 and close_x == 0 and dialog == 0 and not has_overlay:
-            is_lobby = True
-            yolo_saved = True
-
-        if is_lobby:
-            if yolo_saved:
-                note = (f"OK (yolo_lobby={yolo_lobby} 救场; "
-                        f"template={t_conf:.2f} brightness={brightness:.0f})")
-            else:
-                note = f"OK (brightness={brightness:.0f}, yolo_lobby={yolo_lobby})"
+        if candidate:
+            self._lobby_streak += 1
         else:
-            reasons = []
-            if not t_hit:
-                reasons.append(f"template={t_conf:.2f}<{self.template_threshold}")
-            elif brightness < self.button_brightness_min:
-                # 模板命中但按钮被遮罩 → 用户截图 2 那种暗按钮场景
-                reasons.append(f"brightness={brightness:.0f}<{self.button_brightness_min:.0f}")
+            self._lobby_streak = 0
+
+        is_lobby = self._lobby_streak >= self.lobby_streak_required
+
+        # template + brightness 只用于 note 显示, 不再参与判定
+        if is_lobby:
+            note = (f"OK (yolo_lobby={yolo_lobby} streak={self._lobby_streak}/"
+                    f"{self.lobby_streak_required}, template={t_conf:.2f} br={brightness:.0f})")
+        else:
+            reasons = [f"streak={self._lobby_streak}/{self.lobby_streak_required}"]
             if yolo_lobby == 0:
                 reasons.append("yolo_lobby=0")
             if close_x > 0:
@@ -245,6 +259,8 @@ class LobbyQuadDetector:
             yolo_action_btn_count=action_btn,
             yolo_dialog_count=dialog,
             yolo_lobby_count=yolo_lobby,
+            lobby_streak=self._lobby_streak,
+            lobby_streak_required=self.lobby_streak_required,
             has_overlay=has_overlay,
             phash_stable_frames=stable_n,
             phash_stable_required=self.stable_required,
