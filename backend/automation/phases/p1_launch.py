@@ -74,8 +74,9 @@ class P1LaunchHandler(PhaseHandler):
         decision = ctx.current_decision
 
         # ① 模板检测大厅
+        # 改 v3: 包 to_thread, 不锁 main loop (旧 sync 调 6 实例 P1 串行 4-8s 阻塞)
         t0 = _time.perf_counter()
-        if matcher and matcher.is_at_lobby(shot):
+        if matcher and await matcher.is_at_lobby_async(shot):
             record_signal_tier(decision, name="模板", hit=True, tier_idx=0,
                                note="大厅模板命中 (lobby_start_btn / is_at_lobby)",
                                duration_ms=(_time.perf_counter() - t0) * 1000)
@@ -84,9 +85,10 @@ class P1LaunchHandler(PhaseHandler):
                              outcome_hint="lobby_template_hit")
 
         # ② 模板检测 close_x + 登录页
+        # 改 v3: match_one_async, 12 个模板 × 50-100ms 不再串行卡 main loop
         if matcher:
             for tn in CLOSE_X_TEMPLATE_NAMES + LOGIN_TEMPLATE_NAMES:
-                h = matcher.match_one(shot, tn, threshold=0.80)
+                h = await matcher.match_one_async(shot, tn, threshold=0.80)
                 if h:
                     record_signal_tier(decision, name="模板", hit=True, tier_idx=0,
                                        note=f"模板 {tn}({h.confidence:.2f}) 命中",
@@ -101,10 +103,12 @@ class P1LaunchHandler(PhaseHandler):
                            duration_ms=(_time.perf_counter() - t0) * 1000)
 
         # ③ YOLO 推理 (任何 dets > 0 → 脱离加载黑屏)
+        # 改 v3: to_thread, yolo onnx 推理 30-50ms 也不锁 main loop
         t1 = _time.perf_counter()
         if ctx.yolo is not None and ctx.yolo.is_available():
             try:
-                dets = ctx.yolo.detect(shot)
+                import asyncio as _aio
+                dets = await _aio.to_thread(ctx.yolo.detect, shot)
                 if dets:
                     names = ",".join(f"{d.name}({d.conf:.2f})" for d in dets[:3])
                     record_signal_tier(decision, name="YOLO", hit=True, tier_idx=2,
