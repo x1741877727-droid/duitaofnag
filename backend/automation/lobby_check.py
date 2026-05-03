@@ -39,6 +39,7 @@ class LobbyQuadResult:
     phash_stable_required: int
     yolo_dialog_count: int = 0
     button_brightness: float = 0.0  # 按钮 ROI HSV V 均值. 干净大厅 200+, 遮罩下 <80
+    yolo_lobby_count: int = 0       # lobby_v1 模型: 检出"角色站立大厅" 数量 (recall 100% on val)
     note: str = ""
 
 
@@ -122,7 +123,10 @@ class LobbyQuadDetector:
     def _count_yolo(detections: list, target_cls: str) -> int:
         if not detections:
             return 0
-        return sum(1 for d in detections if getattr(d, "cls", "") == target_cls)
+        # 预存 bug 修复: Detection.cls 是 int class id, Detection.name 才是字符串
+        # 旧代码 getattr(d, "cls", "") == "close_x" 永远 False,
+        # 整条 yolo 信号失效. 改用 .name 比对.
+        return sum(1 for d in detections if getattr(d, "name", "") == target_cls)
 
     def _check_overlay(self, frame: np.ndarray) -> bool:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
@@ -184,11 +188,14 @@ class LobbyQuadDetector:
         action_btn = self._count_yolo(yolo_detections, "action_btn")
         # dialog 类是新训弹窗本体. 模型未训时 _count_yolo 返 0, 整条信号失效不影响判定 — 安全降级.
         dialog = self._count_yolo(yolo_detections, "dialog")
+        # lobby 类: lobby_v1 模型 (recall 100% on val + inst-1 外部样本 conf 0.91).
+        # 模型未训含 lobby 类时 _count_yolo 返 0, 走原 template 路径 — 安全降级.
+        yolo_lobby = self._count_yolo(yolo_detections, "lobby")
         has_overlay = self._check_overlay(frame)
         # phash stable 只为日志保留, 不参与判定 (大厅永远在动, 这条永远过不了)
         stable_n, _ = self._check_phash_stable(frame)
 
-        # 新判定: 模板找到 ∧ 按钮亮 ∧ 没X ∧ 没弹窗 ∧ 4角不黑
+        # 主判定: 模板找到 ∧ 按钮亮 ∧ 没X ∧ 没弹窗 ∧ 4角不黑
         # 删了 action_btn=0 (直播 banner 占用 action_btn 类, 留这条直播下永远不算大厅)
         # 删了 phash stable (大厅角色/横幅/特效永远在动)
         is_lobby = (
@@ -199,8 +206,19 @@ class LobbyQuadDetector:
             and not has_overlay
         )
 
+        # YOLO lobby 救场: 模板挂时只要 YOLO 看到角色 + 没 X/dialog/overlay, 就判大厅
+        # 解决"模板与游戏 UI 不一致 → t_hit=False → 永远判不出大厅"
+        yolo_saved = False
+        if not is_lobby and yolo_lobby >= 1 and close_x == 0 and dialog == 0 and not has_overlay:
+            is_lobby = True
+            yolo_saved = True
+
         if is_lobby:
-            note = f"OK (brightness={brightness:.0f})"
+            if yolo_saved:
+                note = (f"OK (yolo_lobby={yolo_lobby} 救场; "
+                        f"template={t_conf:.2f} brightness={brightness:.0f})")
+            else:
+                note = f"OK (brightness={brightness:.0f}, yolo_lobby={yolo_lobby})"
         else:
             reasons = []
             if not t_hit:
@@ -208,6 +226,8 @@ class LobbyQuadDetector:
             elif brightness < self.button_brightness_min:
                 # 模板命中但按钮被遮罩 → 用户截图 2 那种暗按钮场景
                 reasons.append(f"brightness={brightness:.0f}<{self.button_brightness_min:.0f}")
+            if yolo_lobby == 0:
+                reasons.append("yolo_lobby=0")
             if close_x > 0:
                 reasons.append(f"close_x={close_x}")
             if dialog > 0:
@@ -224,6 +244,7 @@ class LobbyQuadDetector:
             yolo_close_x_count=close_x,
             yolo_action_btn_count=action_btn,
             yolo_dialog_count=dialog,
+            yolo_lobby_count=yolo_lobby,
             has_overlay=has_overlay,
             phash_stable_frames=stable_n,
             phash_stable_required=self.stable_required,
