@@ -230,7 +230,8 @@ class MultiRunnerService:
             adb_path = os.path.join(settings.ldplayer_path, "adb.exe")
 
         # 降低模拟器进程优先级（减轻系统卡顿）
-        self._lower_emulator_priority()
+        # to_thread: wmic 同步 1-3s × 2 进程, 直接调会卡 event loop
+        await asyncio.to_thread(self._lower_emulator_priority)
 
         # 预热 OCR（所有实例共享，只初始化一次）
         from .automation.ocr_dismisser import OcrDismisser
@@ -243,23 +244,28 @@ class MultiRunnerService:
         logger.info(f"已加载 {n} 个模板: {matcher.template_names}")
 
         # 获取 ADB 在线设备真实端口
+        # to_thread: subprocess.run 最坏 5s 超时, 直接调会卡 event loop
         import subprocess
         adb_devices = {}
-        try:
-            result = subprocess.run(
-                [adb_path, "devices"], capture_output=True, timeout=5
-            )
-            for line in result.stdout.decode("utf-8", errors="replace").splitlines():
-                if line.strip().startswith("emulator-") and "device" in line:
-                    serial = line.split()[0]
-                    adb_devices[serial] = True
-        except Exception:
-            pass
+        def _scan_adb_devices():
+            out = {}
+            try:
+                result = subprocess.run(
+                    [adb_path, "devices"], capture_output=True, timeout=5
+                )
+                for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+                    if line.strip().startswith("emulator-") and "device" in line:
+                        out[line.split()[0]] = True
+            except Exception:
+                pass
+            return out
+        adb_devices = await asyncio.to_thread(_scan_adb_devices)
 
         self._team_schemes.clear()
         self._team_events.clear()
 
-        # 为每个账号创建实例
+        # Pass 1: 选 serial + 创建 ADBController (纯逻辑, 无 IO)
+        prepared: list[tuple] = []  # (account, idx, raw_adb)
         for account in accounts:
             idx = account.instance_index
             # 优先用默认端口，如果不在线则扫描可用端口
@@ -276,13 +282,23 @@ class MultiRunnerService:
                         break
 
             raw_adb = ADBController(serial, adb_path)
+            prepared.append((account, idx, raw_adb))
 
-            # 初始化 minicap 流式截图（失败则自动回退到 screencap）
-            if raw_adb.setup_minicap():
+        # Pass 2: 并行 setup_minicap (旧实现 6 实例串行 ×10s = 60s 卡死 event loop)
+        minicap_results = await asyncio.gather(
+            *[asyncio.to_thread(raw_adb.setup_minicap) for _, _, raw_adb in prepared],
+            return_exceptions=True,
+        )
+        for (_, idx, _), ok in zip(prepared, minicap_results):
+            if isinstance(ok, Exception):
+                logger.warning(f"[实例{idx}] setup_minicap 异常: {ok}, 回退 screencap")
+            elif ok:
                 logger.info(f"[实例{idx}] minicap 流式截图就绪 ✓")
             else:
                 logger.info(f"[实例{idx}] minicap 不可用，使用 screencap 回退")
 
+        # Pass 3: 装配每实例的 dismisser / runner / handler / task
+        for account, idx, raw_adb in prepared:
             # v2-4: GuardedADB 已被 PopupWatchdog 取代 (后台 task + phase 感知).
             # 设 GAMEBOT_ENABLE_GUARDED_ADB=1 可临时回退老路径.
             from .automation.ocr_dismisser import OcrDismisser

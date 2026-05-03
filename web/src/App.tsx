@@ -14,6 +14,7 @@ import { YoloView } from '@/components/yolo/YoloView'
 import { OcrTuner } from '@/components/ocr/OcrTuner'
 import { MemoryView } from '@/components/memory/MemoryView'
 import { PerfView } from '@/components/perf/PerfView'
+import { OracleView } from '@/components/oracle/OracleView'
 
 function App() {
   useWebSocket()
@@ -57,7 +58,7 @@ function App() {
         <main className="flex-1 overflow-y-auto p-4">
           <div
             className={
-              currentView === 'console' || currentView === 'yolo' || currentView === 'ocr' || currentView === 'templates' || currentView === 'template-tuner' || currentView === 'memory' || currentView === 'archive' || currentView === 'perf'
+              currentView === 'console' || currentView === 'yolo' || currentView === 'ocr' || currentView === 'templates' || currentView === 'template-tuner' || currentView === 'memory' || currentView === 'archive' || currentView === 'perf' || currentView === 'oracle'
                 ? 'h-full animate-page'
                 : 'max-w-5xl mx-auto animate-page'
             }
@@ -72,6 +73,7 @@ function App() {
             {currentView === 'ocr' && <OcrTuner />}
             {currentView === 'memory' && <MemoryView />}
             {currentView === 'perf' && <PerfView />}
+            {currentView === 'oracle' && <OracleView />}
             {currentView === 'settings' && <SettingsView />}
           </div>
         </main>

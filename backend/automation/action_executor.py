@@ -169,12 +169,13 @@ class ActionExecutor:
         _perf["phash_set_verify"] = (_time.perf_counter() - _t) * 1000
 
         # 防线 1+2: state_expectation 综合判定 (内部含 phash + 自定义 verifier)
+        # 包 to_thread: verify 内部可能跑模板匹配/OCR, 同步直接调会卡 main loop.
         _t = _time.perf_counter()
         try:
             from .state_expectation import verify as _verify
             verify_ctx = dict(act.payload or {})
             verify_ctx.setdefault("matcher", ctx.matcher)
-            exp_r = _verify(act.expectation, shot_before, shot_after, verify_ctx)
+            exp_r = await asyncio.to_thread(_verify, act.expectation, shot_before, shot_after, verify_ctx)
         except Exception as e:
             logger.debug(f"[executor] state_expectation.verify err: {e}")
             return True

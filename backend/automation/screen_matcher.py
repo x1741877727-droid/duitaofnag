@@ -3,6 +3,7 @@ ScreenMatcher — 基于真实截图模板的屏幕匹配引擎
 精简版：只做模板匹配 + OCR关键词查找，不依赖LLM
 """
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -247,7 +248,15 @@ class ScreenMatcher:
                 self._screen_cache[screen_cache_key] = screen_gray
         else:
             tmpl_gray = tdata["gray"]
-            screen_gray = self._normalize(screenshot)
+            # 同帧 cache: id(screenshot) → normalized gray. 旧实现每个模板都重做 cvtColor+resize,
+            # 单 perceive 7+ 个 close_x_* + N 个 btn_* 时浪费 ~600ms (实测 close_x_tpl=1254ms).
+            screen_cache_key = (id(screenshot), None)  # None = 无 preproc
+            screen_gray = self._screen_cache.get(screen_cache_key)
+            if screen_gray is None:
+                screen_gray = self._normalize(screenshot)
+                if len(self._screen_cache) > 32:
+                    self._screen_cache.clear()
+                self._screen_cache[screen_cache_key] = screen_gray
 
         if scales is None:
             scales = SCALES if multi_scale else [1.0]
@@ -327,8 +336,13 @@ class ScreenMatcher:
         screenshot: np.ndarray,
         names: list[str] | None = None,
         threshold: float | None = None,
+        early_exit: bool = False,
     ) -> Optional[MatchHit]:
-        """在模板列表中找第一个匹配的，返回置信度最高的命中"""
+        """在模板列表中匹配, 默认返回置信度最高的命中.
+
+        early_exit=True: 命中第一个 ≥threshold 即返回 (用于 close_x_*/btn_* 这种"任意命中即可"
+        的 UI 元素族, 节省遍历剩余模板的时间).
+        """
         if names is None:
             names = list(self._templates.keys())
 
@@ -337,6 +351,8 @@ class ScreenMatcher:
             hit = self.match_one(screenshot, name, threshold)
             if hit and (best is None or hit.confidence > best.confidence):
                 best = hit
+                if early_exit:
+                    return best
         return best
 
     def find_all(
@@ -378,24 +394,23 @@ class ScreenMatcher:
         """
         hit = self.find_any(screenshot, [
             "lobby_start_btn", "lobby_start_game"
-        ], threshold=0.75)
+        ], threshold=0.75, early_exit=True)
         return hit is not None
 
     def find_close_button(self, screenshot: np.ndarray) -> Optional[MatchHit]:
-        """查找任何X关闭按钮 — 用 SCALES_CLOSE_X 覆盖更广尺度（全屏弹窗的大 X）"""
+        """查找任何X关闭按钮 — 用 SCALES_CLOSE_X 覆盖更广尺度（全屏弹窗的大 X）.
+        early_exit: close_x_* 是同一 UI 元素的不同模板, 任何 ≥0.70 即返回."""
         names = [n for n in self._templates if n.startswith("close_x_")]
-        # 直接展开 find_any 逻辑，因为要传 scales 参数
-        best: Optional[MatchHit] = None
         for name in names:
             hit = self.match_one(screenshot, name, threshold=0.70, scales=SCALES_CLOSE_X)
-            if hit and (best is None or hit.confidence > best.confidence):
-                best = hit
-        return best
+            if hit:
+                return hit
+        return None
 
     def find_action_button(self, screenshot: np.ndarray) -> Optional[MatchHit]:
-        """查找任何操作按钮（确定/同意/加入等）"""
+        """查找任何操作按钮（确定/同意/加入等）— early_exit 同 find_close_button."""
         names = [n for n in self._templates if n.startswith("btn_")]
-        return self.find_any(screenshot, names, threshold=0.75)
+        return self.find_any(screenshot, names, threshold=0.75, early_exit=True)
 
     def is_accelerator_connected(self, screenshot: np.ndarray) -> Optional[bool]:
         """检测加速器状态: True=已连接, False=未连接, None=不在加速器界面"""
@@ -412,9 +427,38 @@ class ScreenMatcher:
         return None
 
     def find_dialog_close(self, screenshot: np.ndarray) -> Optional[MatchHit]:
-        """查找对话框类的X关闭按钮（包括活动弹窗和对话框面板）"""
+        """查找对话框类的X关闭按钮（包括活动弹窗和对话框面板）— early_exit."""
         names = [n for n in self._templates if n.startswith("close_x_")]
-        return self.find_any(screenshot, names, threshold=0.70)
+        return self.find_any(screenshot, names, threshold=0.70, early_exit=True)
+
+    # ────────────────────────────────────────────────────────────────
+    # async 包装层 — phase 跑 perceive 时 main asyncio loop 不被 cv2.matchTemplate 锁住.
+    # 旧版 phase 直接同步调 match_one/find_*, 单次 50-200ms × 多模板 = perceive 1-3s
+    # 期间所有 API 请求 / WS 推送排队. 包 to_thread 后 GIL 释放给其他协程.
+    # 注意: 同帧 _screen_cache 在多线程下有竞态, 但 GIL 保 dict 操作原子, 最差只是
+    # 重复算 normalize 一次, 不影响正确性.
+    # ────────────────────────────────────────────────────────────────
+
+    async def match_one_async(self, *args, **kwargs) -> Optional[MatchHit]:
+        return await asyncio.to_thread(self.match_one, *args, **kwargs)
+
+    async def find_any_async(self, *args, **kwargs) -> Optional[MatchHit]:
+        return await asyncio.to_thread(self.find_any, *args, **kwargs)
+
+    async def find_close_button_async(self, screenshot: np.ndarray) -> Optional[MatchHit]:
+        return await asyncio.to_thread(self.find_close_button, screenshot)
+
+    async def find_action_button_async(self, screenshot: np.ndarray) -> Optional[MatchHit]:
+        return await asyncio.to_thread(self.find_action_button, screenshot)
+
+    async def find_dialog_close_async(self, screenshot: np.ndarray) -> Optional[MatchHit]:
+        return await asyncio.to_thread(self.find_dialog_close, screenshot)
+
+    async def is_at_lobby_async(self, screenshot: np.ndarray) -> bool:
+        return await asyncio.to_thread(self.is_at_lobby, screenshot)
+
+    async def find_button_async(self, screenshot: np.ndarray, name: str, threshold: float = 0.75) -> Optional[MatchHit]:
+        return await asyncio.to_thread(self.find_button, screenshot, name, threshold)
 
     def find_button(self, screenshot: np.ndarray, name: str, threshold: float = 0.75) -> Optional[MatchHit]:
         """按名称查找特定按钮，返回匹配命中（含坐标）"""

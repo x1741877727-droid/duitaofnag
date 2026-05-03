@@ -38,7 +38,8 @@ import cv2
 # 决策图片落盘用 — 主循环 fire-and-forget, JPEG 编码 + 写盘走后台线程,
 # 不阻塞 P2 round (单 round 节省 ~80-150ms).
 # imwrite 用 libjpeg, 内部 release GIL, 多 worker 真并行.
-_io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dlog-io")
+# pool=8: 6 实例并发每帧 4-7 张, 旧 max_workers=2 队列堆积导致后续决策 IO 滞后.
+_io_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dlog-io")
 
 
 def _async_imwrite(path: str, img, q: int = 70) -> None:

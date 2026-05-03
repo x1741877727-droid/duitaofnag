@@ -136,9 +136,10 @@ class OcrPool:
             return True
 
         if workers is None:
-            # 默认 2 个 worker（低显存机器友好；4GB GPU 大致 ~500MB/worker × 2 = 1GB OCR 占用）
-            # 重型机用 GAMEBOT_OCR_WORKERS=4 / 8 显式抬高
-            workers = int(os.environ.get("GAMEBOT_OCR_WORKERS", "2"))
+            # 默认 6 worker（6 实例并发跑 OCR 时, 旧 default=2 会让 4 个实例排队 90-240ms/帧）
+            # 低显存机器 / 4GB GPU 设 GAMEBOT_OCR_WORKERS=2 显式降到 2
+            # 重型机可设 8
+            workers = int(os.environ.get("GAMEBOT_OCR_WORKERS", "6"))
 
         cls._workers = workers
         cls._ocr_params = ocr_params

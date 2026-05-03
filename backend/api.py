@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 _active_service = None
 _active_config = None
 
+# /api/emulators 缓存：ldconsole list2 + adb devices 在 Windows 慢机最坏 15s，
+# 旧实现直接同步 subprocess.run 阻塞 asyncio 主循环，是"全页面慢"根因之一。
+# 5s TTL 缓存 + to_thread，前端多次轮询期间只刷一次盘。
+_emulators_cache: "tuple[float, list, str] | None" = None  # (monotonic_ts, instances, ldplayer_path)
+_EMULATORS_CACHE_TTL = 5.0
+
 
 # =====================
 # WebSocket 连接管理
@@ -286,6 +292,14 @@ def create_app(config: ConfigManager) -> FastAPI:
     except Exception as _e:
         logger.warning(f"[api] api_memory 挂载失败: {_e}")
 
+    # 决策回放 + Oracle 标注 (新)
+    try:
+        from .api_oracle import router as _oracle_router
+        app.include_router(_oracle_router)
+        logger.info("[api] /api/oracle/* 已挂载")
+    except Exception as _e:
+        logger.warning(f"[api] api_oracle 挂载失败: {_e}")
+
     # ROI 调试 / 校准
     try:
         from .api_roi import router as _roi_router
@@ -360,8 +374,15 @@ def create_app(config: ConfigManager) -> FastAPI:
                 {"index": 4, "name": "雷电模拟器-4", "running": False, "pid": -1, "adb_serial": "emulator-5562", "adb_port": 5562},
                 {"index": 5, "name": "雷电模拟器-5", "running": False, "pid": -1, "adb_serial": "emulator-5564", "adb_port": 5564},
             ], "ldplayer_path": config.settings.ldplayer_path}
-        instances = detect_ldplayer_instances(config.settings.ldplayer_path)
-        return {"instances": instances, "ldplayer_path": config.settings.ldplayer_path}
+        global _emulators_cache
+        ldp = config.settings.ldplayer_path
+        now = time.monotonic()
+        cached = _emulators_cache
+        if cached and now - cached[0] < _EMULATORS_CACHE_TTL and cached[2] == ldp:
+            return {"instances": cached[1], "ldplayer_path": ldp}
+        instances = await asyncio.to_thread(detect_ldplayer_instances, ldp)
+        _emulators_cache = (now, instances, ldp)
+        return {"instances": instances, "ldplayer_path": ldp}
 
     # ── 控制 ──
 

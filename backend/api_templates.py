@@ -209,9 +209,21 @@ def _categorize(name: str) -> str:
 
 # ─── /api/templates/list ───
 
+# mtime-based cache: 模板目录没变就直接返缓存. 38 个模板首次扫 ~2.5s
+# (每张 cv2.imread + phash), 缓存命中 < 1ms. upload/delete 后下次自动重建.
+_LIST_CACHE: "tuple[float, dict] | None" = None  # (dir_mtime, response_dict)
+
 
 def _list_templates_sync():
     """扫盘 + cv2.imread + phash 计算 — 同步重 IO, 必须从 endpoint 里 to_thread."""
+    global _LIST_CACHE
+    d = _template_dir()
+    try:
+        cur_mtime = d.stat().st_mtime if d.is_dir() else 0.0
+    except Exception:
+        cur_mtime = 0.0
+    if _LIST_CACHE is not None and _LIST_CACHE[0] == cur_mtime:
+        return _LIST_CACHE[1]
     d = _template_dir()
     items = []
     if d.is_dir():
@@ -242,12 +254,14 @@ def _list_templates_sync():
     by_cat: dict[str, int] = {}
     for it in items:
         by_cat[it["category"]] = by_cat.get(it["category"], 0) + 1
-    return {
+    result = {
         "count": len(items),
         "items": items,
         "categories": [{"name": k, "count": v} for k, v in sorted(by_cat.items())],
         "template_dir": str(d).replace("\\", "/"),
     }
+    _LIST_CACHE = (cur_mtime, result)
+    return result
 
 
 @router.get("/api/templates/list")

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair, Brain, Type, SlidersHorizontal } from 'lucide-react'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair, Brain, Type, SlidersHorizontal, Target } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export function Header() {
@@ -46,6 +46,7 @@ export function Header() {
             { key: 'ocr', label: 'OCR', Icon: Type, title: 'OCR 调试 / ROI 校准' },
             { key: 'memory', label: '记忆', Icon: Brain, title: '记忆库' },
             { key: 'perf', label: '性能', Icon: BarChart3, title: '性能监控' },
+            { key: 'oracle', label: 'Oracle', Icon: Target, title: 'Oracle 集 — 决策回放 + 回归' },
             { key: 'settings', label: '设置', Icon: Settings, title: '设置' },
           ] as const).map(({ key, label, Icon, title }) => {
             const active = currentView === key

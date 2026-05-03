@@ -102,6 +102,7 @@ export type ConsoleView =
   | 'ocr'            // OCR 调试 (ROI 校准 + OCR 实测)
   | 'memory'         // 记忆库 (Memory L1 浏览)
   | 'perf'           // 性能
+  | 'oracle'         // Oracle 集 (决策回放 + 回归)
   | 'settings'
 
 export interface LiveDecisionEvent {

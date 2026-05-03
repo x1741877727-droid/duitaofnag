@@ -17,6 +17,12 @@ import {
   type DecisionData,
   type DecisionTier,
 } from '@/lib/archiveApi'
+import {
+  createOracle,
+  replayArbitrary,
+  type ReplayResult,
+  type OracleCorrect,
+} from '@/lib/oracleApi'
 
 const PHASE_LABEL: Record<string, string> = {
   P0: '加速器校验', P1: '启动游戏', P2: '清弹窗',
@@ -467,6 +473,10 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
   const [lastError, setLastError] = useState('')
   const [lightboxSrc, setLightboxSrc] = useState<string>('')
   const [phaseDoc, setPhaseDoc] = useState<PhaseDocData | null>(null)
+  // Oracle 标注 / replay
+  const [annotatorOpen, setAnnotatorOpen] = useState(false)
+  const [replayResult, setReplayResult] = useState<ReplayResult | null>(null)
+  const [replayLoading, setReplayLoading] = useState(false)
 
   useEffect(() => {
     if (!decisionId) {
@@ -618,6 +628,73 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
           </div>
         )}
 
+        {/* Oracle 工具栏 */}
+        <div className="flex items-center gap-2 -mb-1">
+          <button
+            onClick={() => setAnnotatorOpen(true)}
+            className="text-xs px-2.5 py-1 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 font-medium"
+            title="此决策有错？标注正确位置 → 加进 Oracle 集"
+          >
+            🐞 标记错误
+          </button>
+          <button
+            onClick={async () => {
+              setReplayLoading(true)
+              try {
+                const r = await replayArbitrary(decisionId, session)
+                setReplayResult(r)
+              } catch (e) {
+                setReplayResult({ ok: false, error: String(e) })
+              } finally {
+                setReplayLoading(false)
+              }
+            }}
+            className="text-xs px-2.5 py-1 rounded border border-blue-500/40 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20"
+            title="不重启 backend, 把这帧扔回当前代码看选什么"
+          >
+            {replayLoading ? '回放中...' : '🔁 看现在代码选啥'}
+          </button>
+          {replayResult && (
+            <button
+              onClick={() => setReplayResult(null)}
+              className="text-xs px-2 py-1 text-muted-foreground hover:text-foreground"
+            >清除</button>
+          )}
+        </div>
+
+        {/* Replay 结果面板 */}
+        {replayResult && (
+          <div className="rounded border border-blue-500/30 bg-blue-500/5 p-2 text-[11px] space-y-1">
+            {!replayResult.ok ? (
+              <div className="text-red-300">回放失败: {replayResult.error}</div>
+            ) : (
+              <>
+                <div className="font-semibold text-blue-300">
+                  当前代码会选: {replayResult.current_chosen
+                    ? <span className="font-mono">{replayResult.current_chosen.label} @ ({replayResult.current_chosen.x}, {replayResult.current_chosen.y}) conf={replayResult.current_chosen.conf} (tier={replayResult.current_chosen.tier})</span>
+                    : <span className="text-muted-foreground">不动作 (无目标)</span>}
+                </div>
+                <div className="text-muted-foreground">
+                  is_at_lobby: <b>{String(replayResult.matchers?.is_at_lobby)}</b>
+                  {' · '} find_close: {replayResult.matchers?.find_close_button
+                    ? <span className="font-mono">{replayResult.matchers.find_close_button.name}@({replayResult.matchers.find_close_button.cx},{replayResult.matchers.find_close_button.cy}) {replayResult.matchers.find_close_button.conf}</span>
+                    : 'null'}
+                  {' · '} find_action: {replayResult.matchers?.find_action_button
+                    ? <span className="font-mono">{replayResult.matchers.find_action_button.name}@({replayResult.matchers.find_action_button.cx},{replayResult.matchers.find_action_button.cy}) {replayResult.matchers.find_action_button.conf}</span>
+                    : 'null'}
+                </div>
+                {(replayResult.all_hits?.length ?? 0) > 0 && (
+                  <div className="text-muted-foreground">
+                    其他命中: {replayResult.all_hits!.map(h =>
+                      <span key={h.name} className="inline-block mr-2 font-mono">{h.name}({h.conf})@{h.cx},{h.cy}</span>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* 三联截图 (点击放大) */}
         <div className="grid gap-2" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
           {(() => {
@@ -675,6 +752,214 @@ function DecisionDetail({ decisionId, session }: { decisionId: string; session: 
 
       {/* Lightbox */}
       {lightboxSrc && <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc('')} />}
+
+      {/* Oracle 标注 modal */}
+      {annotatorOpen && (
+        <OracleAnnotator
+          decisionId={decisionId}
+          session={session}
+          imgSrc={data.input_image ? decisionImgSrc(data.id, data.input_image, session) : ''}
+          originalTap={data.tap ? { x: data.tap.x, y: data.tap.y, label: data.tap.method || '' } : null}
+          onClose={() => setAnnotatorOpen(false)}
+          onSaved={() => {
+            setAnnotatorOpen(false)
+            // 刷新 replay 看 oracle 是否符合
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+
+// ─── Oracle 标注 modal ────────────────────────────────────────────
+//
+// 用户工作流: 看到错决策 → 点截图上的"应该点这里" → 选标签 → 提交
+// 坐标转换: img.naturalWidth/Height vs displayed rect, 自动算出原图坐标
+//
+function OracleAnnotator({
+  decisionId, session, imgSrc, originalTap, onClose, onSaved,
+}: {
+  decisionId: string
+  session: string
+  imgSrc: string
+  originalTap: { x: number; y: number; label: string } | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [correct, setCorrect] = useState<OracleCorrect>('tap')
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
+  const [label, setLabel] = useState('')
+  const [note, setNote] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const [imgRect, setImgRect] = useState<{ w: number; h: number } | null>(null)
+
+  function handleClickImage(e: React.MouseEvent<HTMLImageElement>) {
+    if (correct !== 'tap') return
+    const img = e.currentTarget
+    const rect = img.getBoundingClientRect()
+    if (img.naturalWidth === 0) return
+    setImgRect({ w: img.naturalWidth, h: img.naturalHeight })
+    const xRatio = img.naturalWidth / rect.width
+    const yRatio = img.naturalHeight / rect.height
+    const x = Math.round((e.clientX - rect.left) * xRatio)
+    const y = Math.round((e.clientY - rect.top) * yRatio)
+    setPos({ x, y })
+  }
+
+  async function handleSubmit() {
+    setErr('')
+    if (correct === 'tap' && (pos === null || !label.trim())) {
+      setErr('点击模式必须: 在图上点位置 + 填标签 (close_x / btn_join 等)')
+      return
+    }
+    setSaving(true)
+    try {
+      await createOracle({
+        decision_id: decisionId,
+        session,
+        correct,
+        click_x: pos?.x ?? null,
+        click_y: pos?.y ?? null,
+        label: label.trim(),
+        note: note.trim(),
+      })
+      onSaved()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // 计算红圈在 displayed 坐标系的位置
+  const dotStyle: React.CSSProperties | null = pos && imgRect
+    ? {
+        position: 'absolute',
+        left: `${(pos.x / imgRect.w) * 100}%`,
+        top: `${(pos.y / imgRect.h) * 100}%`,
+        transform: 'translate(-50%, -50%)',
+        pointerEvents: 'none',
+      }
+    : null
+
+  // 常用标签快捷
+  const labelPresets = ['close_x', 'btn_join', 'btn_paste_code', 'btn_no_need', 'lobby_start', 'queding']
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-card border border-border rounded-lg max-w-5xl w-full max-h-[95vh] overflow-auto p-4 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold">🐞 标记此决策错误</h3>
+          <span className="text-xs text-muted-foreground font-mono">{decisionId}</span>
+          <button onClick={onClose} className="ml-auto text-sm text-muted-foreground hover:text-foreground">✕</button>
+        </div>
+
+        {originalTap && (
+          <div className="text-[11px] text-muted-foreground bg-muted/50 rounded px-2 py-1.5">
+            原决策: <span className="font-mono">{originalTap.label}</span> @ ({originalTap.x}, {originalTap.y})
+          </div>
+        )}
+
+        {/* 模式选择 */}
+        <div className="flex items-center gap-3 text-xs">
+          <span className="text-muted-foreground">期望:</span>
+          {(['tap', 'no_action', 'exit_phase'] as const).map(c => (
+            <label key={c} className="flex items-center gap-1 cursor-pointer">
+              <input
+                type="radio"
+                checked={correct === c}
+                onChange={() => { setCorrect(c); if (c !== 'tap') setPos(null) }}
+              />
+              {c === 'tap' && '点击某位置'}
+              {c === 'no_action' && '不应动作 (代码该忍住)'}
+              {c === 'exit_phase' && '该退出 phase'}
+            </label>
+          ))}
+        </div>
+
+        {/* 截图 + 点击标注 */}
+        {correct === 'tap' && (
+          <div className="space-y-2">
+            <div className="text-xs text-muted-foreground">
+              在下面截图上点击 <b>正确的位置</b> ({pos ? <span className="text-amber-400 font-mono">已选 ({pos.x}, {pos.y})</span> : '未选'})
+            </div>
+            {imgSrc ? (
+              <div className="relative inline-block max-w-full bg-foreground/95 rounded">
+                <img
+                  src={imgSrc}
+                  alt="标注"
+                  onClick={handleClickImage}
+                  className="block max-w-full max-h-[60vh] cursor-crosshair"
+                  draggable={false}
+                />
+                {dotStyle && (
+                  <div
+                    style={dotStyle}
+                    className="w-6 h-6 rounded-full border-2 border-amber-400 bg-amber-400/40 shadow-lg shadow-amber-500/50"
+                  />
+                )}
+              </div>
+            ) : (
+              <div className="text-xs text-red-300">没有 input.jpg 可标注</div>
+            )}
+          </div>
+        )}
+
+        {/* 标签 + 备注 */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          <div>
+            <label className="block text-muted-foreground mb-1">标签 {correct === 'tap' && <span className="text-amber-400">(必填)</span>}</label>
+            <input
+              type="text"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="如 close_x / btn_join"
+              className="w-full px-2 py-1 rounded border border-border bg-background"
+            />
+            <div className="flex gap-1 mt-1 flex-wrap">
+              {labelPresets.map(p => (
+                <button
+                  key={p}
+                  onClick={() => setLabel(p)}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-muted/70 text-muted-foreground font-mono"
+                >{p}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="block text-muted-foreground mb-1">备注 (可选)</label>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="为什么错的 / 应该怎样"
+              rows={3}
+              className="w-full px-2 py-1 rounded border border-border bg-background resize-none"
+            />
+          </div>
+        </div>
+
+        {err && <div className="text-xs text-red-300">{err}</div>}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            onClick={onClose}
+            className="text-xs px-3 py-1.5 rounded border border-border hover:bg-muted"
+          >取消</button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="text-xs px-4 py-1.5 rounded bg-amber-500/80 hover:bg-amber-500 text-zinc-900 font-semibold disabled:opacity-50"
+          >{saving ? '保存中...' : '保存到 Oracle 集'}</button>
+        </div>
+      </div>
     </div>
   )
 }

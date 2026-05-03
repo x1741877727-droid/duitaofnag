@@ -286,12 +286,15 @@ class SingleInstanceRunner:
                 pass
             decision = None
             try:
-                decision = recorder.new_decision(
-                    instance=ctx.instance_idx,
-                    phase=handler.name,
-                    round_idx=ctx.phase_round,
+                # new_decision 同步 mkdir, Windows 上 6 实例并发 mkdir 累积 ~100-300ms
+                # 卡 main loop. 包 to_thread 让 mkdir 跑在线程里.
+                decision = await asyncio.to_thread(
+                    recorder.new_decision,
+                    ctx.instance_idx,
+                    handler.name,
+                    ctx.phase_round,
                 )
-                decision.set_input(shot, phash_str, q=70)
+                decision.set_input(shot, phash_str, q=70)  # 内部已用 _async_imwrite
                 ctx.current_decision = decision
             except Exception as e:
                 logger.debug(f"[{handler.name}] new_decision err: {e}")
@@ -311,14 +314,16 @@ class SingleInstanceRunner:
                 except Exception as e:
                     logger.warning(f"[{handler.name}] ActionExecutor 异常: {e}")
 
-            # finalize
+            # finalize — 序列化 dict + json.dump 已 thread-pool, 但 _serialize_tier
+            # + record_summary + _notify_listeners 仍在调用方线程执行. 包 to_thread.
             try:
                 if decision is not None:
                     if step is not None:
                         outcome = step.outcome_hint or _result_to_outcome_str(step.result)
-                        decision.finalize(outcome=outcome, note=step.note or "")
+                        await asyncio.to_thread(decision.finalize, outcome, step.note or "")
                     else:
-                        decision.finalize(outcome="phase_exception", note=repr(handle_exc) if handle_exc else "")
+                        await asyncio.to_thread(decision.finalize, "phase_exception",
+                                                repr(handle_exc) if handle_exc else "")
             except Exception as _e:
                 pass
             ctx.current_decision = None
@@ -542,7 +547,8 @@ class SingleInstanceRunner:
             logger.error("[阶段0] UI 模式截图失败")
             return
 
-        hits = self.ocr_dismisser._ocr_all(shot)
+        # OCR 单次 200-800ms + 持 _inference_lock, 不包 to_thread 直接卡 main loop.
+        hits = await asyncio.to_thread(self.ocr_dismisser._ocr_all, shot)
         all_text = " ".join(h.text for h in hits)
         logger.info(f"[阶段0] FightMaster UI OCR: {all_text[:100]}")
 
@@ -614,7 +620,8 @@ class SingleInstanceRunner:
             )
             return
 
-        hits = self.ocr_dismisser._ocr_all(shot)
+        # OCR 单次 200-800ms + 持 _inference_lock, 不包 to_thread 直接卡 main loop.
+        hits = await asyncio.to_thread(self.ocr_dismisser._ocr_all, shot)
         for h in hits:
             if "确定" in h.text or h.text.upper() == "OK":
                 logger.info(f"[阶段0] 点击 VPN 授权确定 ({h.cx},{h.cy})")
@@ -684,7 +691,7 @@ class SingleInstanceRunner:
                 pass
 
             # ① 模板检测大厅 (~5ms, 现有逻辑)
-            if self.matcher and self.matcher.is_at_lobby(shot):
+            if self.matcher and await self.matcher.is_at_lobby_async(shot):
                 logger.info(f"[阶段1] R{attempt+1}: 大厅模板命中 → done")
                 self.dbg.log_screenshot(shot, tag="p1_done_lobby")
                 return True
@@ -692,7 +699,7 @@ class SingleInstanceRunner:
             # ② 模板检测 close_x 系列 + 登录页 (~20ms)
             if self.matcher:
                 for tn in close_x_template_names + login_template_names:
-                    h = self.matcher.match_one(shot, tn, threshold=0.80)
+                    h = await self.matcher.match_one_async(shot, tn, threshold=0.80)
                     if h:
                         logger.info(
                             f"[阶段1] R{attempt+1}: 模板 {tn}({h.confidence:.2f}) 命中 → done"
@@ -745,7 +752,7 @@ class SingleInstanceRunner:
             except Exception:
                 pass
 
-            if self.matcher.is_at_lobby(shot):
+            if await self.matcher.is_at_lobby_async(shot):
                 logger.info("[阶段2] 登录成功，已在大厅 ✓")
                 return True
 
@@ -1951,7 +1958,7 @@ class SingleInstanceRunner:
 
             # ── 快速路径: 模板匹配 (~20ms) ──
             if template_fallback:
-                tmpl_hit = self.matcher.match_one(shot, template_fallback, threshold=0.65)
+                tmpl_hit = await self.matcher.match_one_async(shot, template_fallback, threshold=0.65)
                 if tmpl_hit:
                     logger.info(f"[{step}] 模板匹配 '{template_fallback}' → ({tmpl_hit.cx},{tmpl_hit.cy})")
                     await self.adb.tap(tmpl_hit.cx, tmpl_hit.cy)

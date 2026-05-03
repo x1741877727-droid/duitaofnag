@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections import defaultdict
@@ -40,26 +39,25 @@ def _global_perf() -> dict:
         return {"error": str(e)}
 
 
-def _read_metrics_tail(path: Path, max_lines: int = 5000) -> list[dict]:
-    """读 metrics.jsonl 最后 N 行 (从尾部反向读); 文件可能很大."""
-    if not path.is_file():
-        return []
-    out: list[dict] = []
+def _read_metrics_tail(path: Path | None = None, max_lines: int = 5000) -> list[dict]:
+    """从 metrics._recent in-memory ring 读，不再走磁盘.
+
+    metrics._recent 是 deque(maxlen=10000)，每条 record() 都无条件 append（参见
+    metrics.py:130）。它独立于 configure() / 文件写入，进程一启动就有数据。
+    旧实现每次 API 调用都 readlines() 整个 metrics.jsonl（可能几十 MB），是
+    "测试时全页面慢" 的首要根因——同步 IO 阻塞 asyncio 主循环。
+
+    `path` 参数保留以兼容调用点，但当前未使用。
+    """
     try:
-        # 简单做法: 全读 split (metrics.jsonl 每会话一文件, 通常 < 50MB)
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            lines = fh.readlines()
-        for line in lines[-max_lines:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
+        from .automation import metrics
+        records = list(metrics._recent)  # 浅拷贝避免迭代时被并发改
+        if max_lines and len(records) > max_lines:
+            records = records[-max_lines:]
+        return records
     except Exception as e:
-        logger.debug(f"[perf] read metrics err: {e}")
-    return out
+        logger.debug(f"[perf] read recent err: {e}")
+        return []
 
 
 def _current_metrics_path() -> Optional[Path]:
