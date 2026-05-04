@@ -35,6 +35,20 @@ _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows
 # screencap 回退用信号量
 _screenshot_semaphore: Optional[asyncio.Semaphore] = None
 
+# adbutils 持久 socket — 替代 subprocess.run 的 30-80ms spawn 开销.
+# 全局 singleton client (127.0.0.1:5037 = 默认 adb server). 多 ADBController
+# 共享同一 client, 它内部维护连接池. 失败/未装 fallback subprocess.
+_ADBUTILS_AVAILABLE = False
+_adbutils_client = None
+if not os.environ.get("GAMEBOT_DISABLE_ADBUTILS"):
+    try:
+        import adbutils
+        _adbutils_client = adbutils.AdbClient(host="127.0.0.1", port=5037)
+        _ADBUTILS_AVAILABLE = True
+        logger.info(f"[adb] adbutils backend enabled (v{getattr(adbutils, '__version__', '?')})")
+    except Exception as _e:
+        logger.warning(f"[adb] adbutils 不可用, fallback subprocess: {_e}")
+
 
 def _get_semaphore() -> asyncio.Semaphore:
     global _screenshot_semaphore
@@ -250,6 +264,21 @@ class ADBController:
         # lazy: 第一次 screenshot 时查并缓存.
         self._device_w: Optional[int] = None
         self._device_h: Optional[int] = None
+        # adbutils.AdbDevice (lazy): _get_adb_device() 第一次创建后缓存.
+        # subprocess fallback 始终保留, adbutils 任何步骤失败都回退.
+        self._adb_device = None
+
+    def _get_adb_device(self):
+        """惰性创建 adbutils.AdbDevice. 失败 / 未装返 None, caller 走 subprocess 兜底."""
+        if not _ADBUTILS_AVAILABLE or _adbutils_client is None:
+            return None
+        if self._adb_device is None:
+            try:
+                self._adb_device = _adbutils_client.device(serial=self.serial)
+            except Exception as e:
+                logger.debug(f"[adb] {self.serial} adbutils device 创建失败: {e}")
+                return None
+        return self._adb_device
 
     def setup_minicap(self) -> bool:
         """[向后兼容名] 初始化截图流。
@@ -277,7 +306,24 @@ class ADBController:
         # 默认: raw adb screencap (调用方直接走 _raw_screencap, 不创建 stream)
         return False
     def _cmd(self, *args) -> str:
-        """同步执行adb命令"""
+        """同步执行 adb 命令.
+
+        优先 adbutils 持久 socket (约 5-10ms / 调用), 失败 fallback subprocess.run
+        (30-80ms spawn 开销). 仅 'shell' 子命令走 adbutils — 其他 (push/install/...)
+        adbutils API 不一定全覆盖, 直接 subprocess 更稳.
+        """
+        # adbutils 路径: shell 命令直接走 5037 socket
+        if args and args[0] == "shell":
+            device = self._get_adb_device()
+            if device is not None:
+                shell_cmd = " ".join(str(a) for a in args[1:])
+                try:
+                    out = device.shell(shell_cmd, timeout=self._proc_timeout)
+                    return out if isinstance(out, str) else out.decode("utf-8", errors="replace")
+                except Exception as e:
+                    logger.debug(f"[adb] adbutils shell 失败 fallback subprocess: {e}")
+
+        # subprocess 兜底
         cmd = [self.adb_path, "-s", self.serial] + list(args)
         try:
             result = subprocess.run(
@@ -370,18 +416,39 @@ class ADBController:
 
     def _screenshot_sync(self) -> Optional[np.ndarray]:
         """raw screencap: `adb exec-out screencap` (无 -p) 拿 12/16 字节 header + raw RGBA.
-        ~80ms (vs PNG screencap 300-500ms). UE4 兼容, 跟 LDPlayer 窗口大小完全无关."""
+        ~80ms (vs PNG screencap 300-500ms). UE4 兼容, 跟 LDPlayer 窗口大小完全无关.
+
+        优先 adbutils socket (省 30-80ms subprocess spawn), 失败 fallback subprocess.
+        """
         t0 = time.perf_counter()
-        cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap"]
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=10,
-                                    creationflags=_SUBPROCESS_FLAGS)
-        except Exception as e:
-            logger.error(f"raw screencap 失败 {self.serial}: {e}")
-            return None
-        if result.returncode != 0 or len(result.stdout) < 16:
-            return None
-        raw = result.stdout
+        raw: Optional[bytes] = None
+
+        # adbutils 路径: device.shell("screencap", encoding=None) → bytes
+        device = self._get_adb_device()
+        if device is not None:
+            try:
+                raw = device.shell("screencap", encoding=None, timeout=10)
+                if isinstance(raw, str):
+                    # 极少数版本返字符串, 转 bytes (latin-1 保字节不丢)
+                    raw = raw.encode("latin-1")
+                if not raw or len(raw) < 16:
+                    raw = None
+            except Exception as e:
+                logger.debug(f"[adb] adbutils screencap 失败 fallback subprocess: {e}")
+                raw = None
+
+        # subprocess 兜底
+        if raw is None:
+            cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap"]
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=10,
+                                        creationflags=_SUBPROCESS_FLAGS)
+            except Exception as e:
+                logger.error(f"raw screencap 失败 {self.serial}: {e}")
+                return None
+            if result.returncode != 0 or len(result.stdout) < 16:
+                return None
+            raw = result.stdout
 
         # screencap raw header: Android 9+ 是 16 字节 (w/h/fmt/colorSpace), 老版本 12 字节.
         # 像素 format=1 是 RGBA_8888 (4 字节/像素), w*h*4 + header_size 应 = 总长度.
