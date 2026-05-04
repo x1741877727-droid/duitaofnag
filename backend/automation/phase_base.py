@@ -141,6 +141,11 @@ class RunContext:
     carryover_phash: int = 0
     carryover_ts: float = 0.0     # time.perf_counter() 写入时刻
 
+    # 推迟 verify: _do_tap 完只 stash, 下一轮 perceive 跑完后用 YOLO 结果判定.
+    # 替代旧版同步 wait_for_change polling + state_expectation.verify, 省 100-300ms/tap.
+    # dict: {xy: (cx,cy), label: str, shot_before, expectation: str}
+    pending_verify: Optional[Any] = None
+
     # 决策记录 (RunnerFSM._loop_phase 每轮 new_decision, finalize 时清; phase 中可 add_tier)
     current_decision: Optional[Any] = None
 
@@ -164,6 +169,7 @@ class RunContext:
         self.carryover_shot = None
         self.carryover_phash = 0
         self.carryover_ts = 0.0
+        self.pending_verify = None
 
     def is_blacklisted(self, x: int, y: int, radius: int = 30) -> bool:
         """坐标是否在会话黑名单内 (距离 < radius)"""

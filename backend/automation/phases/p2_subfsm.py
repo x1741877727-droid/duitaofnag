@@ -58,6 +58,11 @@ class P2SubFSM:
         p: Perception = await perceive(ctx)
         rnd = ctx.phase_round
 
+        # 1.5 推迟 verify: 上一轮 _do_tap 把 pending_verify 留在 ctx,
+        # 这里用 perception 的 YOLO 输出判 "上次 tap 的 close_x 还在不在".
+        # 替代 _do_tap 中同步 wait_for_change polling + state_expectation.verify.
+        ActionExecutor.apply_pending_verify(ctx, p)
+
         # 把 perception 8 字段写进 5 层 Tier (decision_log)
         record_perception(ctx.current_decision, p)
 

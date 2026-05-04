@@ -98,49 +98,36 @@ class ActionExecutor:
                 logger.debug(f"[executor] set_tap err: {e}")
         _perf["set_tap"] = (_time.perf_counter() - _t) * 1000
 
-        # tap 后用 wait_for_change 自适应等画面变化, 替代固定 sleep.
-        # 优势: 快机 ~100ms 退出, 慢机给到 max_wait_ms 兜底, 不再死等.
-        # 兼容: 若调用方显式给了 act.seconds (比如 P3a 切 tab 等动画), 仍用固定 sleep.
+        # tap 后等动画启动 — 旧版 wait_for_change polling 删了 (100-400ms 浪费),
+        # 改成: 短 sleep 启动动画 + 1 次 screencap 拿 shot_after.
+        # 准确度由"推迟 verify 到下一轮 perceive 用 YOLO 判"接管, 见下面 popup_dismissed 分支.
         _t = _time.perf_counter()
-        shot_after = None
         if act.seconds > 0:
-            # 调用方有意指定固定时长 (如 P3a 等面板动画)
+            # 调用方指定 (P3a 切 tab 等长动画)
             await asyncio.sleep(act.seconds)
         else:
-            # 默认: 等 phash 变化 (检测到 ≥10 距离立即返, 最多 400ms)
-            from .adb_lite import phash as _phash
-            try:
-                prev_ph = int(_phash(shot_before)) if shot_before is not None else 0
-            except Exception:
-                prev_ph = 0
-            from . import wait_helpers as _wh
-            grab = ctx.device.screenshot
-            shot_after, _ph_after, elapsed, changed = await _wh.wait_for_change(
-                grab, _phash,
-                prev_phash=prev_ph,
-                change_threshold=10,
-                poll_ms=50,
-                max_wait_ms=400,
-            )
-            logger.debug(
-                f"[executor] wait_for_change inst{inst_idx}: "
-                f"{elapsed:.0f}ms changed={changed}"
-            )
+            # 默认 50ms 让 UE4 动画启动 (典型 200-300ms 关闭动画, 50ms 已足够开始变)
+            await asyncio.sleep(0.05)
+        try:
+            shot_after = await ctx.device.screenshot()
+        except Exception as e:
+            logger.debug(f"[executor] tap-after 截图失败: {e}")
+            return True
         _perf["sleep"] = (_time.perf_counter() - _t) * 1000
+        if shot_after is None:
+            return True
 
-        # 没要求 verify → 跳过验证 (但仍记录到 pending_memory)
+        # 没要求 verify → 跳过验证, 直接缓冲 memory + 写 carryover
         if not act.expectation:
             if ctx.memory is not None and act.label and act.label != "memory_hit":
                 ctx.pending_memory_writes.append((shot_before, (cx, cy), act.label))
-            # 帧复用: wait_for_change 路径已拿到 shot_after, 顺手写 carryover
-            if shot_after is not None:
-                ctx.carryover_shot = shot_after
-                try:
-                    from .adb_lite import phash as _phash
-                    ctx.carryover_phash = int(_phash(shot_after))
-                except Exception:
-                    ctx.carryover_phash = 0
-                ctx.carryover_ts = _time.perf_counter()
+            ctx.carryover_shot = shot_after
+            try:
+                from .adb_lite import phash as _phash
+                ctx.carryover_phash = int(_phash(shot_after))
+            except Exception:
+                ctx.carryover_phash = 0
+            ctx.carryover_ts = _time.perf_counter()
             _total = (_time.perf_counter() - _t0) * 1000
             logger.info(
                 f"[PERF/exec/inst{inst_idx}] tap_no_verify total={_total:.0f}ms "
@@ -148,17 +135,7 @@ class ActionExecutor:
             )
             return True
 
-        # 取 after 帧 (wait_for_change 已经返了 shot_after, 复用避免再截一次)
-        _t = _time.perf_counter()
-        if shot_after is None:
-            try:
-                shot_after = await ctx.device.screenshot()
-            except Exception as e:
-                logger.debug(f"[executor] verify 截图失败: {e}")
-                return True
-        _perf["shot_after"] = (_time.perf_counter() - _t) * 1000
-        if shot_after is None:
-            return True
+        _perf["shot_after"] = 0.0  # 已经在上面 sleep 块取了, 不单独计时
 
         # 写 decision.verify (phash before/after + distance) + 顺便给下一轮 carryover
         _t = _time.perf_counter()
@@ -184,13 +161,30 @@ class ActionExecutor:
 
         # 帧复用: 把 tap 后的 shot_after + 已算的 phash 写到 ctx, 下一轮 _loop_phase
         # 在 200ms 时效内会直接拿来用, 省一次 screencap (~80ms).
-        if shot_after is not None:
-            ctx.carryover_shot = shot_after
-            ctx.carryover_phash = int(pb) if pb else 0
-            ctx.carryover_ts = _time.perf_counter()
+        ctx.carryover_shot = shot_after
+        ctx.carryover_phash = int(pb) if pb else 0
+        ctx.carryover_ts = _time.perf_counter()
 
-        # 防线 1+2: state_expectation 综合判定 (内部含 phash + 自定义 verifier)
-        # 包 to_thread: verify 内部可能跑模板匹配/OCR, 同步直接调会卡 main loop.
+        # popup_dismissed: 推迟 verify 到下一轮 perceive 用 YOLO 判
+        # (替代旧版同步 state_expectation.verify, 省 wait_for_change polling 100-300ms).
+        # 下一轮 p2_perception.perceive 跑完后, _apply_pending_verify 检查
+        # "上次 tap 的 (cx, cy) 处现在 YOLO 还检到 close_x 吗" → 决定 blacklist / memory.
+        if act.expectation == "popup_dismissed":
+            ctx.pending_verify = {
+                "kind": "popup_dismissed",
+                "xy": (cx, cy),
+                "label": act.label,
+                "shot_before": shot_before,
+            }
+            _total = (_time.perf_counter() - _t0) * 1000
+            logger.info(
+                f"[PERF/exec/inst{inst_idx}] tap_deferred_verify total={_total:.0f}ms "
+                f"tap={_perf['tap']:.0f} sleep={_perf['sleep']:.0f} "
+                f"phash={_perf['phash_set_verify']:.0f}"
+            )
+            return True
+
+        # 其他 expectation (popup_next/mode_selected/lobby_*) — 跑同步 verify, 旧路径
         _t = _time.perf_counter()
         try:
             from .state_expectation import verify as _verify
@@ -202,7 +196,6 @@ class ActionExecutor:
             return True
         _perf["exp_verify"] = (_time.perf_counter() - _t) * 1000
 
-        # PERF 总结
         _total = (_time.perf_counter() - _t0) * 1000
         logger.info(
             f"[PERF/exec/inst{inst_idx}] tap_full total={_total:.0f}ms "
@@ -212,10 +205,8 @@ class ActionExecutor:
         )
 
         if exp_r.matched:
-            # 成功 → 缓冲到 pending memory (P2 success 时 commit, 避免错坐标污染)
             if (ctx.memory is not None and act.label
                     and act.label != "memory_hit"):
-                # 去重: 已 buffer 同 method 同坐标 (距离<30) → 跳过
                 already = any(
                     m == act.label and abs(ax - cx) < 30 and abs(ay - cy) < 30
                     for (_f, (ax, ay), m) in ctx.pending_memory_writes
@@ -224,12 +215,7 @@ class ActionExecutor:
                     ctx.pending_memory_writes.append(
                         (shot_before, (cx, cy), act.label)
                     )
-                    logger.info(
-                        f"[executor] 🧠 Memory 缓冲 ({cx},{cy}) label={act.label} "
-                        f"(buffer={len(ctx.pending_memory_writes)})"
-                    )
         else:
-            # 失败 → 加会话黑名单 + Memory 衰减 (失败计数++)
             if not ctx.is_blacklisted(cx, cy):
                 ctx.blacklist_coords.append((cx, cy))
                 logger.warning(
@@ -246,6 +232,70 @@ class ActionExecutor:
                 except Exception:
                     pass
 
+        return True
+
+    @staticmethod
+    def apply_pending_verify(ctx: RunContext, perception) -> bool:
+        """下一轮 perceive 跑完后调. 用 perception (有 yolo_dets_raw) 判定上次 tap 是否生效.
+
+        替代旧版 _do_tap 中同步的 state_expectation.verify. 优势:
+          - 用 perception 已有的 YOLO 输出, 无额外推理开销
+          - 等下一轮才判 → 跳过 wait_for_change 100-300ms polling
+
+        返回 True = 处理过 pending_verify, False = ctx.pending_verify 为空."""
+        pv = ctx.pending_verify
+        if pv is None:
+            return False
+        ctx.pending_verify = None  # 消费一次
+
+        if pv.get("kind") != "popup_dismissed":
+            logger.debug(f"[executor] 未知 pending_verify kind={pv.get('kind')}, 丢弃")
+            return True
+
+        cx, cy = pv["xy"]
+        label = pv.get("label", "")
+        shot_before = pv.get("shot_before")
+
+        # 检查上次 tap 的位置 (radius 30) 周围 YOLO 还有没有 close_x
+        dets = getattr(perception, "yolo_dets_raw", []) or []
+        still_there = any(
+            getattr(d, "name", "") == "close_x"
+            and getattr(d, "conf", 0.0) >= 0.5
+            and abs(getattr(d, "cx", 0) - cx) < 30
+            and abs(getattr(d, "cy", 0) - cy) < 30
+            for d in dets
+        )
+
+        if not still_there:
+            # close_x 不在了 = tap 生效 = 弹窗关掉了 → 缓冲 memory
+            if ctx.memory is not None and label and label != "memory_hit":
+                already = any(
+                    m == label and abs(ax - cx) < 30 and abs(ay - cy) < 30
+                    for (_f, (ax, ay), m) in ctx.pending_memory_writes
+                )
+                if not already:
+                    ctx.pending_memory_writes.append((shot_before, (cx, cy), label))
+                    logger.info(
+                        f"[executor] 🧠 Memory 缓冲 ({cx},{cy}) label={label} "
+                        f"(deferred verify ok, buffer={len(ctx.pending_memory_writes)})"
+                    )
+        else:
+            # close_x 还在 = tap 没生效 → 加黑名单 + memory.remember(fail)
+            if not ctx.is_blacklisted(cx, cy):
+                ctx.blacklist_coords.append((cx, cy))
+                logger.warning(
+                    f"[executor] Deferred verify 失败 [popup_dismissed] @ "
+                    f"({cx},{cy}): close_x 仍在 → 加黑名单 "
+                    f"(size={len(ctx.blacklist_coords)})"
+                )
+            if ctx.memory is not None and label:
+                try:
+                    ctx.memory.remember(
+                        shot_before, target_name="dismiss_popups",
+                        action_xy=(cx, cy), success=False,
+                    )
+                except Exception:
+                    pass
         return True
 
     @staticmethod
