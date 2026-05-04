@@ -1,0 +1,20 @@
+{
+  "doc": "memory 没命中 → 退到 yolo close_x. 多个 close_x 时按 conf 降序选第一个不在黑名单的",
+  "perception": {
+    "memory_hit": null,
+    "yolo_close_xs": [
+      {"cx": 100, "cy": 100, "conf": 0.7, "name": "close_x", "x1": 90, "y1": 90, "x2": 110, "y2": 110},
+      {"cx": 200, "cy": 200, "conf": 0.95, "name": "close_x", "x1": 190, "y1": 190, "x2": 210, "y2": 210}
+    ]
+  },
+  "ctx": {
+    "blacklist_coords": []
+  },
+  "expected": {
+    "kind": "tap",
+    "x": 200,
+    "y": 200,
+    "label": "close_x",
+    "expectation": "popup_dismissed"
+  }
+}

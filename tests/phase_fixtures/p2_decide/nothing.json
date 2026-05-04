@@ -1,0 +1,14 @@
+{
+  "doc": "什么源都没命中 → decide 返 None, 上层守门接管 (lobby quad / login timeout)",
+  "perception": {
+    "memory_hit": null,
+    "yolo_close_xs": [],
+    "yolo_action_btns": [],
+    "template_close_x": null,
+    "template_dismiss_btn": null
+  },
+  "ctx": {
+    "blacklist_coords": []
+  },
+  "expected": null
+}

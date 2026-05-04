@@ -1,0 +1,18 @@
+{
+  "doc": "memory + yolo 都没 → 退到模板 close_x (YOLO 漏检兜底)",
+  "perception": {
+    "memory_hit": null,
+    "yolo_close_xs": [],
+    "yolo_action_btns": [],
+    "template_close_x": ["close_x_announce", {"cx": 1180, "cy": 80, "confidence": 0.92, "w": 40, "h": 40}]
+  },
+  "ctx": {
+    "blacklist_coords": []
+  },
+  "expected": {
+    "kind": "tap",
+    "x": 1180,
+    "y": 80,
+    "label": "template_close_x"
+  }
+}

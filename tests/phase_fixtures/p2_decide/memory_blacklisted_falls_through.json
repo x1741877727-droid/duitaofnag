@@ -1,0 +1,18 @@
+{
+  "doc": "memory_hit 命中但坐标在黑名单 (radius=30) → 跳过 memory, 退到 yolo close_x",
+  "perception": {
+    "memory_hit": {"cx": 480, "cy": 60, "note": "blacklisted"},
+    "yolo_close_xs": [
+      {"cx": 200, "cy": 200, "conf": 0.9, "name": "close_x", "x1": 190, "y1": 190, "x2": 210, "y2": 210}
+    ]
+  },
+  "ctx": {
+    "blacklist_coords": [[480, 60]]
+  },
+  "expected": {
+    "kind": "tap",
+    "x": 200,
+    "y": 200,
+    "label": "close_x"
+  }
+}

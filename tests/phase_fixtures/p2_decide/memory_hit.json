@@ -1,0 +1,19 @@
+{
+  "doc": "memory_hit 优先级最高 — 即使有 yolo_close_x, 也先点 memory 历史成功坐标",
+  "perception": {
+    "memory_hit": {"cx": 480, "cy": 60, "note": "test memory"},
+    "yolo_close_xs": [
+      {"cx": 100, "cy": 100, "conf": 0.9, "name": "close_x", "x1": 90, "y1": 90, "x2": 110, "y2": 110}
+    ]
+  },
+  "ctx": {
+    "blacklist_coords": []
+  },
+  "expected": {
+    "kind": "tap",
+    "x": 480,
+    "y": 60,
+    "label": "memory_hit",
+    "expectation": "popup_dismissed"
+  }
+}
