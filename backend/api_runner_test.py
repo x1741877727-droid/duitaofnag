@@ -280,8 +280,8 @@ async def cancel_test():
 
 
 def stop_test_controllers(svc) -> int:
-    """关闭所有 test_phase 注册的截图流 (dxhook / wgc / screenrecord).
-    在 backend 退出 (shutdown / SIGINT) 时调, 避免 hook DLL / SHM handle 残留.
+    """关闭所有 test_phase 注册的截图流 (screenrecord).
+    在 backend 退出 (shutdown / SIGINT) 时调, 避免子进程残留.
     返回关掉的实例数."""
     n = 0
     ctrls = getattr(svc, "_test_controllers", None) or {}
@@ -358,7 +358,7 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     serial = f"emulator-{5554 + instance_idx * 2}"
     adb = ADBController(serial, adb_path)
 
-    # 启 dxhook / wgc 截图流 — 包 to_thread 防 inject.exe subprocess wait 阻塞 asyncio
+    # 启 screenrecord 截图流 — 包 to_thread 防 subprocess wait 阻塞 asyncio
     try:
         ok = await _aio.to_thread(adb.setup_minicap)
         if ok:

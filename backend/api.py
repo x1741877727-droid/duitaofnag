@@ -329,22 +329,12 @@ def create_app(config: ConfigManager) -> FastAPI:
                 logger.warning(f"[api] OCR pre-warm 失败 (不影响功能): {e}")
         _asyncio.create_task(_ocr_prewarm())
 
-        # dxhook 自动预热 watchdog: 持续扫 adb devices, 看到新 online 实例立即异步
-        # setup_minicap. 用户什么时候点测试都是热的, 不再首测卡 4-7s.
-        try:
-            from .automation import dxhook_warmup
-            adb_path = (config.settings.adb_path
-                        or os.path.join(config.settings.ldplayer_path, "adb.exe"))
-            dxhook_warmup.start_watchdog(adb_path)
-        except Exception as e:
-            logger.warning(f"[api] dxhook watchdog 启动失败 (不影响功能): {e}")
-
     @app.on_event("shutdown")
     async def shutdown():
         ws_manager.stop_drain()
         if service.running:
             await service.stop_all()
-        # test_phase 走旁路构造的 controller 也要清理 dxhook / wgc 截图流
+        # test_phase 走旁路构造的 controller 也要清理截图流
         try:
             from .api_runner_test import stop_test_controllers
             n = stop_test_controllers(service)
@@ -352,12 +342,6 @@ def create_app(config: ConfigManager) -> FastAPI:
                 logger.info(f"[shutdown] 关 {n} 条 test 截图流")
         except Exception as e:
             logger.debug(f"[shutdown] stop test controllers 异常: {e}")
-        # 停 dxhook watchdog
-        try:
-            from .automation import dxhook_warmup
-            dxhook_warmup.stop_watchdog()
-        except Exception:
-            pass
 
     # ── 模拟器检测 ──
 
