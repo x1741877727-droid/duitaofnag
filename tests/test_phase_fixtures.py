@@ -108,6 +108,7 @@ def _run_screen_classify(fix: dict):
         yolo_dets=dets,
         lobby_login_template_hit=bool(inp.get("lobby_login_template_hit", False)),
         frame_brightness=float(inp.get("frame_brightness", 128)),
+        lobby_template_hit=bool(inp.get("lobby_template_hit", False)),
     )
 
 

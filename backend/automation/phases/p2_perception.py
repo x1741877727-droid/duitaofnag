@@ -99,6 +99,10 @@ class Perception:
     phash_now: int = 0
     yolo_dets_raw: list = field(default_factory=list)  # 原始 YOLO 输出 (供 verify ctx 用)
 
+    # P1.5 ScreenClassifier 输出 — 单帧分类 {LOBBY/POPUP/LOGIN/LOADING/UNKNOWN}.
+    # 当前仅 set 不读 (policy 未迁移, 仍按 5 字段优先级判). 留给后续 P2 简化用.
+    screen_kind: str = "UNKNOWN"
+
 
 async def perceive(ctx: RunContext) -> Perception:
     """跑一帧的所有识别源, 返回汇总 Perception.
@@ -203,6 +207,18 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
     p.phash_now = ph_now or 0
     _perf["memory"] = 0.0  # 已并发, 不单独算
     _perf["phash"] = 0.0
+
+    # P1.5 ScreenClassifier — 用已有信号合成 ScreenKind (不重跑 YOLO/模板).
+    try:
+        from ..screen_classifier import classify
+        p.screen_kind = classify(
+            yolo_dets=p.yolo_dets_raw,
+            lobby_login_template_hit=p.login_template_hit is not None,
+            frame_brightness=128.0,  # P2 跳过亮度 — LOADING 是 P1 关心的, P2 已脱离 loading
+            lobby_template_hit=p.lobby_template_hit is not None,
+        ).name
+    except Exception as e:
+        logger.debug(f"[perceive] classify err: {e}")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # quad 大厅判定 (依赖上面 dets, 不能并行)

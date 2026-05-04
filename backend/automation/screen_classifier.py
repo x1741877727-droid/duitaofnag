@@ -47,14 +47,17 @@ LOADING_BRIGHTNESS_MAX = 30
 
 def classify(
     yolo_dets: Iterable[Any],
-    lobby_login_template_hit: bool,
-    frame_brightness: float,
+    lobby_login_template_hit: bool = False,
+    frame_brightness: float = 128.0,
+    lobby_template_hit: bool = False,
 ) -> ScreenKind:
     """单帧分类. 纯函数.
 
     yolo_dets: 任何带 .name (str) 和 .conf (float) 属性的对象列表.
     lobby_login_template_hit: matcher.match_one(frame, "lobby_login_btn") 是否命中.
     frame_brightness: 帧亮度均值 (0-255). 通常 cv2 灰度 mean.
+    lobby_template_hit: matcher.is_at_lobby() 是否命中 (lobby_start_btn 系列).
+        YOLO lobby 类未训 / 漏检时的兜底信号.
     """
     has_popup = any(
         getattr(d, "name", "") in _POPUP_CLASSES
@@ -67,12 +70,12 @@ def classify(
     if lobby_login_template_hit:
         return ScreenKind.LOGIN
 
-    has_lobby = any(
+    has_lobby_yolo = any(
         getattr(d, "name", "") == _LOBBY_CLASS
         and getattr(d, "conf", 0.0) >= LOBBY_MIN_CONF
         for d in yolo_dets
     )
-    if has_lobby:
+    if has_lobby_yolo or lobby_template_hit:
         return ScreenKind.LOBBY
 
     if frame_brightness < LOADING_BRIGHTNESS_MAX:
@@ -89,7 +92,7 @@ async def classify_from_frame(frame, yolo, matcher) -> ScreenKind:
 
     frame: numpy ndarray (BGR).
     yolo: YoloDismisser instance (有 .is_available() / .detect()).
-    matcher: ScreenMatcher instance (有 .match_one_async()).
+    matcher: ScreenMatcher instance (有 .match_one_async() / .is_at_lobby_async()).
 
     任一识别失败回 UNKNOWN, 不抛异常 (上层守门接管).
     """
@@ -108,12 +111,18 @@ async def classify_from_frame(frame, yolo, matcher) -> ScreenKind:
         except Exception:
             dets = []
 
-    # login 模板 (没 matcher 就跳过, 等于 False)
+    # 模板兜底信号 (没 matcher 就跳过, 等于 False)
     login_hit = False
+    lobby_hit = False
     if matcher is not None:
         try:
-            h = await matcher.match_one_async(frame, "lobby_login_btn", threshold=0.8)
-            login_hit = h is not None
+            login_hit = (await matcher.match_one_async(
+                frame, "lobby_login_btn", threshold=0.8
+            )) is not None
+        except Exception:
+            pass
+        try:
+            lobby_hit = await matcher.is_at_lobby_async(frame)
         except Exception:
             pass
 
@@ -124,4 +133,9 @@ async def classify_from_frame(frame, yolo, matcher) -> ScreenKind:
     except Exception:
         brightness = 128.0  # 中性, 不触发 LOADING
 
-    return classify(dets, login_hit, brightness)
+    return classify(
+        yolo_dets=dets,
+        lobby_login_template_hit=login_hit,
+        frame_brightness=brightness,
+        lobby_template_hit=lobby_hit,
+    )

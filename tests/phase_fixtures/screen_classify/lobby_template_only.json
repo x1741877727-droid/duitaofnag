@@ -1,0 +1,10 @@
+{
+  "doc": "YOLO 没看到 lobby (漏检 / 没训), 但 lobby_start_btn 模板命中 → 仍判 LOBBY (兜底信号)",
+  "input": {
+    "yolo_dets": [],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 170,
+    "lobby_template_hit": true
+  },
+  "expected": "LOBBY"
+}

@@ -1,0 +1,12 @@
+{
+  "doc": "lobby_start_btn 模板命中 + close_x YOLO 同帧 → POPUP 优先 (跟 yolo lobby+close_x 一致行为)",
+  "input": {
+    "yolo_dets": [
+      {"name": "close_x", "conf": 0.85}
+    ],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 150,
+    "lobby_template_hit": true
+  },
+  "expected": "POPUP"
+}
