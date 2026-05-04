@@ -1645,23 +1645,24 @@ class SingleInstanceRunner:
                 await asyncio.sleep(0.3)
                 continue
 
-            # ② YOLO 兜底找 close_x
+            # ② YOLO 兜底找 close_x — 复用 runner.yolo_dismisser (per-instance session,
+            # 同主流程模型, 替代老 yolo_detector 模块)
             yolo_hit = None
             try:
-                from .yolo_detector import detect_buttons, is_available as _yolo_avail
-                if _yolo_avail():
-                    dets = detect_buttons(shot, names=["close_x"], conf_thr=0.4)
-                    if dets:
-                        yolo_hit = dets[0]
+                if self.yolo_dismisser.is_available():
+                    dets = self.yolo_dismisser.detect(shot)
+                    close_xs = [d for d in dets if d.name == "close_x" and d.conf >= 0.4]
+                    if close_xs:
+                        yolo_hit = close_xs[0]
             except Exception:
                 yolo_hit = None
             if yolo_hit is not None:
-                ycx, ycy = yolo_hit.center_px
-                last_method = f"YOLO·close_x ({yolo_hit.score:.2f})"
-                logger.info(f"[阶段4] 关闭(YOLO close_x) ({ycx},{ycy}) score={yolo_hit.score:.2f}")
+                ycx, ycy = yolo_hit.cx, yolo_hit.cy
+                last_method = f"YOLO·close_x ({yolo_hit.conf:.2f})"
+                logger.info(f"[阶段4] 关闭(YOLO close_x) ({ycx},{ycy}) score={yolo_hit.conf:.2f}")
                 if d5:
                     d5.set_tap(int(ycx), int(ycy), method="YOLO",
-                               target_class="close_x", target_conf=float(yolo_hit.score),
+                               target_class="close_x", target_conf=float(yolo_hit.conf),
                                screenshot=shot)
                 await self.adb.tap(ycx, ycy)
                 await asyncio.sleep(0.3)

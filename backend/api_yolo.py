@@ -1,7 +1,7 @@
 """
 /api/yolo/* — YOLO 推理 dryrun (中控台模版库 YOLO 测试用).
 
-不影响主 runner 的 YOLO session — 直接调 yolo_detector.detect_buttons (单例).
+不影响主 runner 的 YOLO session — 复用 YoloDismisser._shared() 单例.
 """
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ class YoloTestReq(BaseModel):
 
 @router.post("/api/yolo/test")
 async def yolo_test(req: YoloTestReq):
-    """dryrun: 选源 → 跑 detect_buttons → 返回 dets + 标注图."""
+    """dryrun: 选源 → 跑 YoloDismisser.detect → 返回 dets + 标注图."""
     shot: Optional[np.ndarray] = None
     src_kind = ""
     if req.image_b64:

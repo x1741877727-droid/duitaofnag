@@ -253,7 +253,7 @@ a = Analysis(
         'backend.automation.screen_matcher', 'backend.automation.ocr_dismisser',
         'backend.automation.metrics',
         'backend.automation.ocr_cache', 'backend.automation.roi_config',
-        'backend.automation.yolo_detector', 'backend.automation.ocr_pool',
+        'backend.automation.ocr_pool',
         'backend.automation.screenshot_collector',
         'backend.automation.memory_l1',
         'backend.automation.watchdogs', 'backend.automation.lobby_check',

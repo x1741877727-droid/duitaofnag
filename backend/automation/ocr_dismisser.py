@@ -79,7 +79,7 @@ class OcrDismisser:
         if cls._shared_ocr is not None:
             return
 
-        # 注意: yolo_detector 还是用 onnxruntime, 这个 patch 对 yolo 仍有保护意义.
+        # 注意: yolo_dismisser 还是用 onnxruntime, 这个 patch 对 yolo 仍有保护意义.
         # OCR 这边走 OpenVINO 后已经不踩这条路.
         try:
             from . import _onnxruntime_patch
