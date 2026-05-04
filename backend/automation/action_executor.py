@@ -278,17 +278,22 @@ class ActionExecutor:
         )
         screen_changed = phash_distance >= 10  # 高阈值过滤微动画
 
-        # 综合判定: 不同 label 不同主信号
+        # 综合判定: close_x 信号 + phash 兜底
+        # 历史 bug (P2 R26 案例): tap 关掉一个 popup, 游戏立刻在同位置弹下一个 popup,
+        # 旧逻辑只看 "close_x 还在不在 tap 点" → 永远 True → 失败 → 黑名单累积 →
+        # 半径 30 内所有 close_x 都被屏蔽 → R26 起 no_target 死循环.
+        # 修法: close_x 还在 + phash 也没大变 → 才算失败. close_x 还在但画面大变 →
+        # 弹窗换了一个, 算 success (黑名单不加, 让下一轮 perceive 继续点新弹窗).
         if label in ("close_x", "memory_hit", "template_close_x"):
-            # 主目标是 close_x — 看它还在不在
-            tap_failed = close_x_still_there
+            # close_x 类: 主信号 close_x_still_there, phash 兜底
+            tap_failed = close_x_still_there and (not screen_changed)
             verdict_reason = (
                 f"close_x_still_there={close_x_still_there} "
-                f"phash_dist={phash_distance}"
+                f"screen_changed={screen_changed} (phash_dist={phash_distance})"
             )
         else:
-            # template_dismiss_btn / 其他 — YOLO 不识别"确定"按钮, 看 phash 变化
-            # 二次保险: 如果 close_x 还在, 直接判失败 (这种情况很少, 但有就是 fail)
+            # template_dismiss_btn / 其他 — YOLO 不识别"确定"按钮, 主信号 phash
+            # 二次保险: 如果 close_x 还在 tap 点, 直接判失败
             tap_failed = (close_x_still_there) or (not screen_changed)
             verdict_reason = (
                 f"label={label} phash_dist={phash_distance} "

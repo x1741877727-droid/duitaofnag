@@ -217,6 +217,41 @@ def main():
         return "close_x_no_phash_signal_still_ok"
     cases.append(("close_x_phash_irrelevant", c10))
 
+    # case 12: close_x 类 — close_x 还在原位 + 画面大变 → success (popup1→popup2 swap)
+    # 修 P2 R26 bug: tap 关掉 popup1 立刻弹 popup2 同位置同 X, 旧版只看 close_x_still
+    # 永远 fail → 黑名单累积 → 死循环. 现在加 phash 兜底, 画面变了就算 success.
+    def c12():
+        pv = {"kind": "popup_dismissed", "xy": (920, 22),
+              "label": "close_x", "shot_before": "fake_shot",
+              "phash_before": 0xAAAAAAAAAAAAAAAA}
+        ctx = StubCtx(pv=pv)
+        # popup2 出现, 也有 close_x 在同位置, 但画面整体变了
+        dets = [fake_det("close_x", 925, 28, conf=0.9)]
+        ret = ActionExecutor.apply_pending_verify(
+            ctx, fake_perception(dets, phash_now=0x5555555555555555))  # 距离 64
+        assert ret is True
+        assert ctx.blacklist_coords == [], (
+            "popup1→popup2 同位置 X 但画面大变 → 不该 blacklist"
+        )
+        assert len(ctx.pending_memory_writes) == 1, "应缓冲 memory (success)"
+        return "close_x_swap_phash_changed_ok"
+    cases.append(("close_x_swap_phash_saves", c12))
+
+    # case 13: close_x 类 — close_x 还在原位 + 画面没变 → fail (真 tap 失败)
+    def c13():
+        pv = {"kind": "popup_dismissed", "xy": (920, 22),
+              "label": "close_x", "shot_before": "fake_shot",
+              "phash_before": 0xAAAAAAAAAAAAAAAA}
+        ctx = StubCtx(pv=pv)
+        dets = [fake_det("close_x", 925, 28, conf=0.9)]
+        # phash 几乎不变 (距离 1)
+        ret = ActionExecutor.apply_pending_verify(
+            ctx, fake_perception(dets, phash_now=0xAAAAAAAAAAAAAAAB))
+        assert ret is True
+        assert (920, 22) in ctx.blacklist_coords, "tap 真没起效, 应 blacklist"
+        return "close_x_real_fail"
+    cases.append(("close_x_real_fail", c13))
+
     # case 11: template_dismiss_btn 但 close_x 还在 → fail (双信号都说失败)
     def c11():
         pv = {"kind": "popup_dismissed", "xy": (640, 720),
