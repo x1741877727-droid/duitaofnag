@@ -533,25 +533,18 @@ class MultiRunnerService:
         except Exception as e:
             logger.warning(f"[实例{idx}] watchdog 启动失败 (非致命): {e}")
 
-        # v3 灰度开关: GAMEBOT_V3=1 (默认) → P0/P1/P2 走 v3 PhaseHandler
-        # GAMEBOT_V3=0 → 走 v2 旧 phase_X 方法
-        # P3a/P3b/P4 不论 V3/V2 都走 runner.phase_team_create/join/map_setup (v3 是薄壳)
-        v3_enabled = os.environ.get("GAMEBOT_V3", "1") == "1"
-
-        async def _run_phase_v3_or_v2(phase_name: str, v3_handler_cls):
-            """V3 时调 v3 handler, V2 时调 runner.phase_<name>. 统一异常翻译."""
+        # P0/P1/P2 走 v3 PhaseHandler (v2 phase_xxx 已删).
+        # P3a/P3b/P4 仍走 runner.phase_team_create/join/map_setup (v3 是薄壳, 等
+        # 第 7 项 single_runner 拆分时一起重写).
+        async def _run_v3(v3_handler_cls):
+            """跑 v3 handler, 翻译 V3GameRestartRequested → _GameCrashError."""
             from .automation.single_runner import V3GameRestartRequested
-            if v3_enabled:
-                try:
-                    handler = v3_handler_cls()
-                    ok = await runner._run_v3_phase(handler)
-                    return ok
-                except V3GameRestartRequested as e:
-                    logger.warning(f"[实例{idx}] v3 GAME_RESTART from {e.phase_name}")
-                    raise _GameCrashError()
-            # v2 旧路径
-            method = getattr(runner, f"phase_{phase_name}")
-            return await method()
+            try:
+                handler = v3_handler_cls()
+                return await runner._run_v3_phase(handler)
+            except V3GameRestartRequested as e:
+                logger.warning(f"[实例{idx}] v3 GAME_RESTART from {e.phase_name}")
+                raise _GameCrashError()
 
         try:
             while True:
@@ -560,7 +553,7 @@ class MultiRunnerService:
                     wd_state.current_phase = current_phase
                     if current_phase == "accelerator":
                         from .automation.phases.p0_accelerator import P0AcceleratorHandler
-                        ok = await _run_phase_v3_or_v2("accelerator", P0AcceleratorHandler)
+                        ok = await _run_v3(P0AcceleratorHandler)
                         if ok:
                             current_phase = "launch_game"
                             phase_retries = 0
@@ -569,7 +562,7 @@ class MultiRunnerService:
 
                     if current_phase == "launch_game":
                         from .automation.phases.p1_launch import P1LaunchHandler
-                        ok = await _run_phase_v3_or_v2("launch_game", P1LaunchHandler)
+                        ok = await _run_v3(P1LaunchHandler)
                         if ok:
                             current_phase = "dismiss_popups"
                             phase_retries = 0
@@ -578,7 +571,7 @@ class MultiRunnerService:
 
                     if current_phase == "dismiss_popups":
                         from .automation.phases.p2_dismiss import P2DismissHandler
-                        ok = await _run_phase_v3_or_v2("dismiss_popups", P2DismissHandler)
+                        ok = await _run_v3(P2DismissHandler)
                         if ok:
                             current_phase = "team" if runner.role else "done"
                             phase_retries = 0
