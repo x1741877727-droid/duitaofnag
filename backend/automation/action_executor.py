@@ -175,6 +175,7 @@ class ActionExecutor:
                 "xy": (cx, cy),
                 "label": act.label,
                 "shot_before": shot_before,
+                "phash_before": int(pa) if pa else 0,
             }
             _total = (_time.perf_counter() - _t0) * 1000
             logger.info(
@@ -255,10 +256,12 @@ class ActionExecutor:
         cx, cy = pv["xy"]
         label = pv.get("label", "")
         shot_before = pv.get("shot_before")
+        phash_before = int(pv.get("phash_before", 0))
 
-        # 检查上次 tap 的位置 (radius 30) 周围 YOLO 还有没有 close_x
         dets = getattr(perception, "yolo_dets_raw", []) or []
-        still_there = any(
+
+        # 信号 1: tap 点 (radius 30) 周围还有 close_x? — 主信号 (针对 close_x 类目标)
+        close_x_still_there = any(
             getattr(d, "name", "") == "close_x"
             and getattr(d, "conf", 0.0) >= 0.5
             and abs(getattr(d, "cx", 0) - cx) < 30
@@ -266,8 +269,34 @@ class ActionExecutor:
             for d in dets
         )
 
-        if not still_there:
-            # close_x 不在了 = tap 生效 = 弹窗关掉了 → 缓冲 memory
+        # 信号 2: 全屏 phash 距离 — 兜底 (针对"确定/同意"类弹窗, YOLO 看不见这类按钮)
+        # template_dismiss_btn label 主要靠这条 — 系统内存过低 / 二次确认 类弹窗.
+        phash_after = int(getattr(perception, "phash_now", 0) or 0)
+        phash_distance = (
+            bin(phash_before ^ phash_after).count("1")
+            if (phash_before and phash_after) else 0
+        )
+        screen_changed = phash_distance >= 10  # 高阈值过滤微动画
+
+        # 综合判定: 不同 label 不同主信号
+        if label in ("close_x", "memory_hit", "template_close_x"):
+            # 主目标是 close_x — 看它还在不在
+            tap_failed = close_x_still_there
+            verdict_reason = (
+                f"close_x_still_there={close_x_still_there} "
+                f"phash_dist={phash_distance}"
+            )
+        else:
+            # template_dismiss_btn / 其他 — YOLO 不识别"确定"按钮, 看 phash 变化
+            # 二次保险: 如果 close_x 还在, 直接判失败 (这种情况很少, 但有就是 fail)
+            tap_failed = (close_x_still_there) or (not screen_changed)
+            verdict_reason = (
+                f"label={label} phash_dist={phash_distance} "
+                f"changed={screen_changed} close_x_still={close_x_still_there}"
+            )
+
+        if not tap_failed:
+            # tap 生效 → 缓冲 memory
             if ctx.memory is not None and label and label != "memory_hit":
                 already = any(
                     m == label and abs(ax - cx) < 30 and abs(ay - cy) < 30
@@ -277,15 +306,15 @@ class ActionExecutor:
                     ctx.pending_memory_writes.append((shot_before, (cx, cy), label))
                     logger.info(
                         f"[executor] 🧠 Memory 缓冲 ({cx},{cy}) label={label} "
-                        f"(deferred verify ok, buffer={len(ctx.pending_memory_writes)})"
+                        f"(deferred verify ok, {verdict_reason})"
                     )
         else:
-            # close_x 还在 = tap 没生效 → 加黑名单 + memory.remember(fail)
+            # tap 失败 → 加黑名单 + memory.remember(fail)
             if not ctx.is_blacklisted(cx, cy):
                 ctx.blacklist_coords.append((cx, cy))
                 logger.warning(
                     f"[executor] Deferred verify 失败 [popup_dismissed] @ "
-                    f"({cx},{cy}): close_x 仍在 → 加黑名单 "
+                    f"({cx},{cy}): {verdict_reason} → 加黑名单 "
                     f"(size={len(ctx.blacklist_coords)})"
                 )
             if ctx.memory is not None and label:

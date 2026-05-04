@@ -60,9 +60,9 @@ def fake_det(name, cx, cy, conf=0.9):
                            cls=0, x1=cx-10, y1=cy-10, x2=cx+10, y2=cy+10)
 
 
-def fake_perception(yolo_dets):
-    """伪造 Perception (只关心 yolo_dets_raw)."""
-    return SimpleNamespace(yolo_dets_raw=yolo_dets)
+def fake_perception(yolo_dets, phash_now=0):
+    """伪造 Perception (yolo_dets_raw + phash_now)."""
+    return SimpleNamespace(yolo_dets_raw=yolo_dets, phash_now=phash_now)
 
 
 # ────── 测试 cases ──────
@@ -171,6 +171,66 @@ def main():
         assert ctx.pending_memory_writes == [], "memory_hit 不应自学"
         return "memory_hit_no_buffer"
     cases.append(("memory_hit_skip", c7))
+
+    # ── template_dismiss_btn 类 (确定/同意 按钮, YOLO 看不见) — 用 phash 信号 ──
+
+    # case 8: tap 确定 后画面大变化 (phash > 10) → success
+    def c8():
+        pv = {"kind": "popup_dismissed", "xy": (640, 720),
+              "label": "template_dismiss_btn", "shot_before": "fake_shot",
+              "phash_before": 0xAAAAAAAAAAAAAAAA}
+        ctx = StubCtx(pv=pv)
+        # phash distance = 64 (位全反) — 远 > 10
+        ret = ActionExecutor.apply_pending_verify(
+            ctx, fake_perception([], phash_now=0x5555555555555555))
+        assert ret is True
+        assert ctx.blacklist_coords == [], "画面变了不该 blacklist"
+        assert len(ctx.pending_memory_writes) == 1
+        return "queding_screen_changed_ok"
+    cases.append(("queding_changed", c8))
+
+    # case 9: tap 确定 后画面没变 (phash 距离 < 10) → fail (确定按钮没起作用)
+    def c9():
+        pv = {"kind": "popup_dismissed", "xy": (640, 720),
+              "label": "template_dismiss_btn", "shot_before": "fake_shot",
+              "phash_before": 0xAAAAAAAAAAAAAAAA}
+        ctx = StubCtx(pv=pv)
+        # phash distance = 1 — 几乎不变
+        ret = ActionExecutor.apply_pending_verify(
+            ctx, fake_perception([], phash_now=0xAAAAAAAAAAAAAAAB))
+        assert ret is True
+        assert (640, 720) in ctx.blacklist_coords, "应 blacklist"
+        return "queding_no_change_fail"
+    cases.append(("queding_no_change", c9))
+
+    # case 10: close_x 类 — 即使画面没变, 但 close_x 不在了 → success (主信号优先)
+    def c10():
+        pv = {"kind": "popup_dismissed", "xy": (480, 60),
+              "label": "close_x", "shot_before": "fake_shot",
+              "phash_before": 0xAAAAAAAAAAAAAAAA}
+        ctx = StubCtx(pv=pv)
+        ret = ActionExecutor.apply_pending_verify(
+            ctx, fake_perception([], phash_now=0xAAAAAAAAAAAAAAAB))
+        assert ret is True
+        assert ctx.blacklist_coords == []
+        assert len(ctx.pending_memory_writes) == 1
+        return "close_x_no_phash_signal_still_ok"
+    cases.append(("close_x_phash_irrelevant", c10))
+
+    # case 11: template_dismiss_btn 但 close_x 还在 → fail (双信号都说失败)
+    def c11():
+        pv = {"kind": "popup_dismissed", "xy": (640, 720),
+              "label": "template_dismiss_btn", "shot_before": "fake_shot",
+              "phash_before": 0xAAAAAAAAAAAAAAAA}
+        ctx = StubCtx(pv=pv)
+        # phash 大变 + close_x 还在 (异常情况) — 应判失败
+        dets = [fake_det("close_x", 645, 725, conf=0.9)]  # 在 tap 点附近
+        ret = ActionExecutor.apply_pending_verify(
+            ctx, fake_perception(dets, phash_now=0x5555555555555555))
+        assert ret is True
+        assert (640, 720) in ctx.blacklist_coords, "close_x 在原点 → 失败"
+        return "queding_close_x_still_at_tap_fail"
+    cases.append(("queding_close_x_still_there", c11))
 
     # 跑所有 case
     fail = 0
