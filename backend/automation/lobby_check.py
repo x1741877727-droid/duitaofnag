@@ -3,7 +3,7 @@
 
 判定:
     candidate = yolo_lobby >= 1 AND close_x == 0 AND dialog == 0
-    is_lobby  = streak >= lobby_streak_required (默认 2 帧, GAMEBOT_LOBBY_STREAK 可调)
+    is_lobby  = streak >= lobby_streak_required (默认 3 帧, GAMEBOT_LOBBY_STREAK 可调)
 
 设计取舍:
 - 旧版有 template / brightness / overlay / phash 四路兜底, 已删:
@@ -48,7 +48,10 @@ class LobbyQuadDetector:
     """
 
     def __init__(self):
-        self.lobby_streak_required: int = int(os.environ.get("GAMEBOT_LOBBY_STREAK", "2"))
+        # 3 帧而不是 2: 给延迟弹窗 (UE4 进大厅后 ~150-300ms 才弹的活动弹窗) 一次反应窗口.
+        # 如果 streak 内冒出弹窗, candidate=False 重置 streak, 避免 P2 提前退出.
+        # 慢机可调更高 (4-5), 快机不必调低 (3 帧 ~200ms 不算慢).
+        self.lobby_streak_required: int = int(os.environ.get("GAMEBOT_LOBBY_STREAK", "3"))
         self._lobby_streak: int = 0
         self._last_check_ts: float = 0.0
         # 跨长 gap 重置 (phase 切换间隔 >5s, 老 streak 不能跨用)

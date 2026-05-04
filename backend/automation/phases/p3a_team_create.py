@@ -38,18 +38,20 @@ class P3aTeamCreateHandler(PhaseHandler):
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
         from ..recorder_helpers import record_signal_tier
-        from ..screen_classifier import ScreenKind, wait_for_kind
+        from ..screen_classifier import ScreenKind
+        from ..popup_closer import PopupCloser
         decision = ctx.current_decision
 
-        # 入口守门: 必须在大厅才能开始组队流程. 否则 phase_team_create 在 popup
-        # 上 OCR "组队"按钮必失败, FAIL 信息不清楚. 这里先确认 LOBBY, 不在就给清晰诊断.
-        kind = await wait_for_kind(ctx, accept=(ScreenKind.LOBBY,),
-                                   max_attempts=5, interval_s=1.0)
+        # 入口守门: 必须在大厅才能开始组队流程. 看到 POPUP 内联清掉再重检.
+        # 替代旧版 wait_for_kind (只 sleep 不清弹窗) — UE4 延迟弹窗 (P2 退出后冒出)
+        # 必需就地处理, 否则甩 FAIL 后 P3a 重试还看到弹窗, 死循环.
+        kind = await PopupCloser.wait_for_lobby_clearing_popups(
+            ctx, max_attempts=8, interval_s=0.5)
         if kind != ScreenKind.LOBBY:
             record_signal_tier(decision, name="入口守门", hit=False, tier_idx=2,
                                note=f"P3a 入口非 LOBBY (kind={kind.name})")
             return PhaseStep(PhaseResult.FAIL,
-                             note=f"P3a 入口守门失败: 5s 内仍非大厅 (kind={kind.name})",
+                             note=f"P3a 入口守门失败: 4s 内 (含清弹窗) 仍非大厅 (kind={kind.name})",
                              outcome_hint=f"entry_not_lobby_{kind.value}")
         record_signal_tier(decision, name="入口守门", hit=True, tier_idx=2,
                            note=f"P3a 入口确认 LOBBY")

@@ -33,18 +33,19 @@ class P4MapSetupHandler(PhaseHandler):
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
         from ..recorder_helpers import record_signal_tier
-        from ..screen_classifier import ScreenKind, wait_for_kind
+        from ..screen_classifier import ScreenKind
+        from ..popup_closer import PopupCloser
         decision = ctx.current_decision
 
         # 入口守门: P4 要求当前在大厅 (P3a 关闭组队码面板后回大厅).
-        # 不在大厅就直接 FAIL 给清晰诊断, 不要让 OCR "团队竞技" tab 在错屏幕上瞎搜.
-        kind = await wait_for_kind(ctx, accept=(ScreenKind.LOBBY,),
-                                   max_attempts=5, interval_s=1.0)
+        # 看到 POPUP 内联清掉再重检.
+        kind = await PopupCloser.wait_for_lobby_clearing_popups(
+            ctx, max_attempts=8, interval_s=0.5)
         if kind != ScreenKind.LOBBY:
             record_signal_tier(decision, name="入口守门", hit=False, tier_idx=2,
                                note=f"P4 入口非 LOBBY (kind={kind.name})")
             return PhaseStep(PhaseResult.FAIL,
-                             note=f"P4 入口守门失败: 5s 内仍非大厅 (kind={kind.name})",
+                             note=f"P4 入口守门失败: 4s 内 (含清弹窗) 仍非大厅 (kind={kind.name})",
                              outcome_hint=f"entry_not_lobby_{kind.value}")
         record_signal_tier(decision, name="入口守门", hit=True, tier_idx=2,
                            note=f"P4 入口确认 LOBBY")

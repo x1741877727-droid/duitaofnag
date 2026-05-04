@@ -56,3 +56,57 @@ class PopupCloser:
             return None
 
         return decide(p, ctx)
+
+    @staticmethod
+    async def wait_for_lobby_clearing_popups(
+        ctx: RunContext,
+        max_attempts: int = 8,
+        interval_s: float = 0.5,
+    ) -> "ScreenKind":
+        """P3a/P3b/P4 入口守门替代 wait_for_kind: 看到 POPUP 不直接 FAIL,
+        用 PopupCloser 把它点掉再重 classify, 最多 max_attempts 次循环.
+
+        替代场景: P2 退出后 UE4 延迟弹窗 (周年庆 / 活动公告) 才冒出来,
+        P3a 撞上必需就地清, 不能甩回 P2 / 直接 FAIL.
+
+        max_attempts × interval_s = 总等待预算. 默认 8×0.5s = 4s.
+
+        返回最后一次 classify 的 ScreenKind. 调用方判 != LOBBY 决定 FAIL/RETRY.
+        """
+        import asyncio
+        from .screen_classifier import ScreenKind, classify_from_frame
+        from .action_executor import ActionExecutor
+
+        last = ScreenKind.UNKNOWN
+        for i in range(max_attempts):
+            try:
+                shot = await ctx.device.screenshot()
+            except Exception:
+                shot = None
+            if shot is not None:
+                ctx.current_shot = shot
+                last = await classify_from_frame(shot, ctx.yolo, ctx.matcher)
+                if last == ScreenKind.LOBBY:
+                    return last
+                if last == ScreenKind.POPUP:
+                    # 内联清弹窗: PopupCloser → ActionExecutor 走完整 verify 链路
+                    try:
+                        action = await PopupCloser.find_target(ctx)
+                    except Exception as e:
+                        logger.debug(f"[PopupCloser/wait] find_target err: {e}")
+                        action = None
+                    if action is not None:
+                        try:
+                            await ActionExecutor.apply(ctx, action)
+                        except Exception as e:
+                            logger.debug(f"[PopupCloser/wait] apply err: {e}")
+                        # tap 后下个 loop 直接重 classify, 不睡 (carryover_shot 已写)
+                        continue
+                    # 没找到 target — 当前帧 POPUP 但 closer 找不到点哪儿
+                    logger.warning(
+                        f"[PopupCloser/wait] kind=POPUP 但 PopupCloser 找不到 target, "
+                        f"attempt {i+1}/{max_attempts}"
+                    )
+            if i < max_attempts - 1:
+                await asyncio.sleep(interval_s)
+        return last
