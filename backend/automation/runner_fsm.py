@@ -153,37 +153,57 @@ class RunnerFSM:
         from .decision_log import get_recorder
         recorder = get_recorder()
 
+        # 帧复用: 上一轮 ActionExecutor._do_tap 写 carryover_shot/phash, 这里 200ms
+        # 时效内直接复用, 省一次 screencap (~80ms) + phash (~5ms). 超时 fallback 自拍.
+        CARRYOVER_MAX_AGE_S = 0.2
+
         for rnd in range(handler.max_rounds):
             self._ctx.phase_round = rnd + 1
             # 每轮开始计时, 末尾打印各步耗时
             _t0 = time.perf_counter()
             _perf = {"shot": 0.0, "phash": 0.0, "new_dec": 0.0,
-                     "handle": 0.0, "apply": 0.0, "finalize": 0.0, "sleep": 0.0}
+                     "handle": 0.0, "apply": 0.0, "finalize": 0.0, "sleep": 0.0,
+                     "carryover": 0}
 
-            # 截图 → ctx.current_shot
-            _t = time.perf_counter()
-            try:
-                shot = await self._ctx.device.screenshot()
-            except Exception as e:
-                logger.debug(f"[{handler.name}] 截图失败: {e}")
-                shot = None
-            _perf["shot"] = (time.perf_counter() - _t) * 1000
+            # 试图复用上一轮 tap 后的帧
+            shot = None
+            phash_int = 0
+            if (self._ctx.carryover_shot is not None
+                and (time.perf_counter() - self._ctx.carryover_ts) <= CARRYOVER_MAX_AGE_S):
+                shot = self._ctx.carryover_shot
+                phash_int = self._ctx.carryover_phash
+                _perf["carryover"] = 1
+                # 消费一次, 防下一轮再用 (避免 stale)
+                self._ctx.carryover_shot = None
+                self._ctx.carryover_phash = 0
+                self._ctx.carryover_ts = 0.0
+            else:
+                # carryover 没有 / 超时 → 自拍
+                _t = time.perf_counter()
+                try:
+                    shot = await self._ctx.device.screenshot()
+                except Exception as e:
+                    logger.debug(f"[{handler.name}] 截图失败: {e}")
+                    shot = None
+                _perf["shot"] = (time.perf_counter() - _t) * 1000
+
             self._ctx.current_shot = shot
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
 
-            # 开决策记录 (本轮)
+            # phash: carryover 已经带了; 否则自己算
             phash_str = ""
-            _t = time.perf_counter()
-            try:
-                from .adb_lite import phash as _phash
-                phash_int = _phash(shot)
-                phash_str = f"0x{int(phash_int):016x}" if phash_int else ""
-                self._ctx.current_phash = phash_str
-            except Exception:
-                pass
-            _perf["phash"] = (time.perf_counter() - _t) * 1000
+            if phash_int == 0:
+                _t = time.perf_counter()
+                try:
+                    from .adb_lite import phash as _phash
+                    phash_int = _phash(shot)
+                except Exception:
+                    pass
+                _perf["phash"] = (time.perf_counter() - _t) * 1000
+            phash_str = f"0x{int(phash_int):016x}" if phash_int else ""
+            self._ctx.current_phash = phash_str
             decision = None
             _t = time.perf_counter()
             try:
@@ -257,6 +277,7 @@ class RunnerFSM:
                 f"shot={_perf['shot']:.0f} phash={_perf['phash']:.0f} "
                 f"new_dec={_perf['new_dec']:.0f} handle={_perf['handle']:.0f} "
                 f"apply={_perf['apply']:.0f} finalize={_perf['finalize']:.0f}"
+                f"{' [carryover]' if _perf['carryover'] else ''}"
             )
 
             # 终态 → 立即返回

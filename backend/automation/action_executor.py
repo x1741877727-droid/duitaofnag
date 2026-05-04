@@ -132,6 +132,15 @@ class ActionExecutor:
         if not act.expectation:
             if ctx.memory is not None and act.label and act.label != "memory_hit":
                 ctx.pending_memory_writes.append((shot_before, (cx, cy), act.label))
+            # 帧复用: wait_for_change 路径已拿到 shot_after, 顺手写 carryover
+            if shot_after is not None:
+                ctx.carryover_shot = shot_after
+                try:
+                    from .adb_lite import phash as _phash
+                    ctx.carryover_phash = int(_phash(shot_after))
+                except Exception:
+                    ctx.carryover_phash = 0
+                ctx.carryover_ts = _time.perf_counter()
             _total = (_time.perf_counter() - _t0) * 1000
             logger.info(
                 f"[PERF/exec/inst{inst_idx}] tap_no_verify total={_total:.0f}ms "
@@ -151,13 +160,18 @@ class ActionExecutor:
         if shot_after is None:
             return True
 
-        # 写 decision.verify (phash before/after + distance)
+        # 写 decision.verify (phash before/after + distance) + 顺便给下一轮 carryover
         _t = _time.perf_counter()
+        pa = 0
+        pb = 0
+        try:
+            from .adb_lite import phash as _phash
+            pa = _phash(shot_before) if shot_before is not None else 0
+            pb = _phash(shot_after) if shot_after is not None else 0
+        except Exception as e:
+            logger.debug(f"[executor] phash err: {e}")
         if decision is not None:
             try:
-                from .adb_lite import phash as _phash
-                pa = _phash(shot_before)
-                pb = _phash(shot_after)
                 dist = bin(int(pa) ^ int(pb)).count("1") if (pa and pb) else 0
                 decision.set_verify(
                     before=f"0x{int(pa):016x}" if pa else "",
@@ -167,6 +181,13 @@ class ActionExecutor:
             except Exception as e:
                 logger.debug(f"[executor] set_verify err: {e}")
         _perf["phash_set_verify"] = (_time.perf_counter() - _t) * 1000
+
+        # 帧复用: 把 tap 后的 shot_after + 已算的 phash 写到 ctx, 下一轮 _loop_phase
+        # 在 200ms 时效内会直接拿来用, 省一次 screencap (~80ms).
+        if shot_after is not None:
+            ctx.carryover_shot = shot_after
+            ctx.carryover_phash = int(pb) if pb else 0
+            ctx.carryover_ts = _time.perf_counter()
 
         # 防线 1+2: state_expectation 综合判定 (内部含 phash + 自定义 verifier)
         # 包 to_thread: verify 内部可能跑模板匹配/OCR, 同步直接调会卡 main loop.

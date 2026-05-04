@@ -134,6 +134,13 @@ class RunContext:
     current_shot: Optional[np.ndarray] = None
     current_phash: str = ""
 
+    # 帧复用: ActionExecutor._do_tap 拿到 shot_after 后写这里, 下一轮
+    # _loop_phase 看时效内 (<200ms) 直接当作 current_shot 用, 省一次 screencap.
+    # P2 burst mode (wait_seconds=0) 收益最大. 超时 / 没设 fallback 自拍.
+    carryover_shot: Optional[np.ndarray] = None
+    carryover_phash: int = 0
+    carryover_ts: float = 0.0     # time.perf_counter() 写入时刻
+
     # 决策记录 (RunnerFSM._loop_phase 每轮 new_decision, finalize 时清; phase 中可 add_tier)
     current_decision: Optional[Any] = None
 
@@ -154,6 +161,9 @@ class RunContext:
         self.phase_round = 0
         self.current_shot = None
         self.current_phash = ""
+        self.carryover_shot = None
+        self.carryover_phash = 0
+        self.carryover_ts = 0.0
 
     def is_blacklisted(self, x: int, y: int, radius: int = 30) -> bool:
         """坐标是否在会话黑名单内 (距离 < radius)"""
