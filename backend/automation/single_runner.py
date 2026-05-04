@@ -16,8 +16,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .adb_lite import ADBController, phash, phash_distance
-from .screen_matcher import MatchHit, ScreenMatcher
+from .adb_lite import ADBController
+from .screen_matcher import ScreenMatcher
 from .ocr_dismisser import OcrDismisser
 from .debug_logger import DebugLogger
 from . import metrics
@@ -119,7 +119,6 @@ class SingleInstanceRunner:
         from .yolo_dismisser import YoloDismisser
         self.yolo_dismisser = YoloDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
-        self._last_phash: int = 0  # 帧差跳过：上一帧的 pHash
         self.dbg = DebugLogger(enabled=bool(log_dir), save_dir=log_dir or "logs")
 
         # v3 资源 (lazy 初始化)
@@ -340,16 +339,6 @@ class SingleInstanceRunner:
         await handler.exit(ctx, PhaseResult.FAIL)
         return False
 
-
-    def _frame_changed(self, shot: np.ndarray, threshold: int = 4) -> bool:
-        """pHash 帧差检测：画面没变返回 False，跳过 OCR"""
-        h = phash(shot)
-        dist = phash_distance(h, self._last_phash)
-        self._last_phash = h
-        if dist < threshold:
-            logger.debug(f"[帧差] 跳过 OCR (距离={dist})")
-            return False
-        return True
 
     @property
     def phase(self) -> Phase:
@@ -1712,40 +1701,6 @@ class SingleInstanceRunner:
     def _restore_guard(self):
         if hasattr(self.adb, 'guard_enabled'):
             self.adb.guard_enabled = True
-
-    async def _ocr_tap(self, ocr: OcrDismisser, keywords: list[str],
-                        template_fallback: str = "", step: str = "",
-                        retries: int = 3) -> bool:
-        """先模板（快~20ms），再OCR（慢~200ms），找到即点"""
-        for attempt in range(retries):
-            shot = await self.adb.screenshot()
-            if shot is None:
-                await asyncio.sleep(0.5)
-                continue
-
-            # ── 快速路径: 模板匹配 (~20ms) ──
-            if template_fallback:
-                tmpl_hit = await self.matcher.match_one_async(shot, template_fallback, threshold=0.65)
-                if tmpl_hit:
-                    logger.info(f"[{step}] 模板匹配 '{template_fallback}' → ({tmpl_hit.cx},{tmpl_hit.cy})")
-                    await self.adb.tap(tmpl_hit.cx, tmpl_hit.cy)
-                    return True
-
-            # ── 慢速路径: OCR (~200ms) ──
-            hits = await asyncio.to_thread(ocr._ocr_all, shot)
-            for kw in keywords:
-                for hit in hits:
-                    if kw in hit.text:
-                        logger.info(f"[{step}] OCR匹配 '{hit.text}' → ({hit.cx},{hit.cy})")
-                        await self.adb.tap(hit.cx, hit.cy)
-                        return True
-
-            if attempt < retries - 1:
-                logger.debug(f"[{step}] 第{attempt+1}次未找到，重试...")
-                await asyncio.sleep(0.8)
-
-        logger.warning(f"[{step}] {retries}次尝试均未找到目标")
-        return False
 
     # ================================================================
     # 阶段 5: 组队 — 队员加入
