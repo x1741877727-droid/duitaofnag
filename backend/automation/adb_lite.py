@@ -690,6 +690,12 @@ class ADBController:
         self.adb_path = adb_path
         self._proc_timeout = 10
         self._stream: Optional[ScreenrecordStream] = None
+        # Android display 尺寸 (来自 `wm size`). 用来把 dxhook 抓的 GL framebuffer
+        # (可能是 LDPlayer 渲染缩放后的 606x341) resize 回 Android 显示空间 (960x540).
+        # 否则下游用 shot 坐标 tap, ADB tap 期望的是 Android display 坐标 → tap 落错位置.
+        # lazy: 第一次 screenshot 时查并缓存.
+        self._device_w: Optional[int] = None
+        self._device_h: Optional[int] = None
 
     def setup_minicap(self) -> bool:
         """[向后兼容名] 初始化截图流。
@@ -772,62 +778,125 @@ class ADBController:
             logger.error(f"ADB命令失败: {cmd} -> {e}")
             return ""
 
+    def _ensure_device_size(self) -> tuple[int, int]:
+        """查 Android display 尺寸 (`wm size`) 并缓存. 返回 (w, h).
+        失败兜底 (960, 540) — LDPlayer 9 绝大多数实例就是这个."""
+        if self._device_w and self._device_h:
+            return self._device_w, self._device_h
+        try:
+            out = self._cmd("shell", "wm size") or ""
+            # "Physical size: 960x540" 或 "Override size: ..."
+            import re
+            m = re.search(r'(\d+)\s*x\s*(\d+)', out)
+            if m:
+                self._device_w = int(m.group(1))
+                self._device_h = int(m.group(2))
+                logger.info(f"[adb] {self.serial} device size = {self._device_w}x{self._device_h}")
+            else:
+                self._device_w, self._device_h = 960, 540
+                logger.warning(f"[adb] {self.serial} wm size 解析失败, fallback 960x540: {out[:80]!r}")
+        except Exception as e:
+            self._device_w, self._device_h = 960, 540
+            logger.warning(f"[adb] {self.serial} wm size 查询失败 ({e}), fallback 960x540")
+        return self._device_w, self._device_h
+
+    def _normalize_to_device(self, frame: np.ndarray) -> np.ndarray:
+        """如果 frame 尺寸 != Android display 尺寸, resize 到 device 尺寸.
+        修 dxhook 抓 GL framebuffer 比 Android display 小 (606x341 vs 960x540) 导致
+        下游坐标系跟 tap 期望的不一致的 bug."""
+        if frame is None:
+            return frame
+        dw, dh = self._ensure_device_size()
+        h, w = frame.shape[:2]
+        if w == dw and h == dh:
+            return frame
+        return cv2.resize(frame, (dw, dh))
+
     async def screenshot(self) -> Optional[np.ndarray]:
-        """截图 — stream 优先（WGC/screenrecord，~50ms），screencap 回退（信号量限流）"""
+        """截图 — 默认 raw screencap (UE4 兼容 + 跟窗口完全解耦, ~80ms).
+        dxhook / wgc / screenrecord 仅在显式 GAMEBOT_CAPTURE 开启时走 stream.
+        所有路径返回的 frame 都 normalize 到 Android display 尺寸 (`wm size`)."""
+        # dxhook / wgc 已知不抓 UE4 SurfaceView 硬件层 + 跟窗口大小绑定 (拖小就抓小).
+        # 默认走 raw screencap, 业界久经考验, 路径同测试 UI.
+        use_stream = (self._stream is not None
+                      and os.environ.get("GAMEBOT_CAPTURE", "").lower() in ("dxhook", "wgc", "screenrecord"))
+
         with metrics.timed("screenshot") as tags:
-            if self._stream is not None:
+            if use_stream:
                 frame = self._stream.get_frame()
-                # 根据 stream 类型记 backend tag
                 stream_name = type(self._stream).__name__.replace("Stream", "").lower()
                 if frame is not None:
-                    tags["backend"] = stream_name  # wgc / screenrecord
+                    tags["backend"] = stream_name
+                    frame = self._normalize_to_device(frame)
                     tags["h"], tags["w"] = frame.shape[:2]
                     return frame
-                # 帧为空（刚启动 / IDR 间隔长），短暂等待
                 await asyncio.sleep(0.2)
                 frame = self._stream.get_frame()
                 if frame is not None:
                     tags["backend"] = f"{stream_name}_retry"
+                    frame = self._normalize_to_device(frame)
                     tags["h"], tags["w"] = frame.shape[:2]
                     return frame
 
-            # screencap 回退（适用于 stream 未启动 / 永久死掉）
-            async with _get_semaphore():
-                loop = asyncio.get_event_loop()
-                try:
-                    frame = await loop.run_in_executor(None, self._screenshot_sync)
-                    tags["backend"] = "screencap"
-                    if frame is not None:
-                        tags["h"], tags["w"] = frame.shape[:2]
-                    return frame
-                except Exception as e:
-                    logger.error(f"截图失败: {e}")
-                    tags["backend"] = "error"
-                    return None
+            # 默认: raw screencap. 不再 _get_semaphore() 限流 — 6 实例真并发 OS 自己调度.
+            loop = asyncio.get_event_loop()
+            try:
+                frame = await loop.run_in_executor(None, self._screenshot_sync)
+                tags["backend"] = "screencap_raw"
+                if frame is not None:
+                    tags["h"], tags["w"] = frame.shape[:2]
+                return frame
+            except Exception as e:
+                logger.error(f"截图失败: {e}")
+                tags["backend"] = "error"
+                return None
 
     def _screenshot_sync(self) -> Optional[np.ndarray]:
-        """同步截图（screencap 回退）"""
+        """raw screencap: `adb exec-out screencap` (无 -p) 拿 12/16 字节 header + raw RGBA.
+        ~80ms (vs PNG screencap 300-500ms). UE4 兼容, 跟 LDPlayer 窗口大小完全无关."""
         t0 = time.perf_counter()
-        cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap", "-p"]
+        cmd = [self.adb_path, "-s", self.serial, "exec-out", "screencap"]
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=10,
                                     creationflags=_SUBPROCESS_FLAGS)
-            t1 = time.perf_counter()
-            if result.returncode != 0:
-                return None
-            png_data = result.stdout
-            if len(png_data) < 100:
-                return None
-            arr = np.frombuffer(png_data, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            t2 = time.perf_counter()
-            adb_ms = (t1 - t0) * 1000
-            decode_ms = (t2 - t1) * 1000
-            if adb_ms > 500:
-                logger.warning(f"[性能] 截图慢: ADB={adb_ms:.0f}ms decode={decode_ms:.0f}ms")
-            return img
-        except Exception:
+        except Exception as e:
+            logger.error(f"raw screencap 失败 {self.serial}: {e}")
             return None
+        if result.returncode != 0 or len(result.stdout) < 16:
+            return None
+        raw = result.stdout
+
+        # screencap raw header: Android 9+ 是 16 字节 (w/h/fmt/colorSpace), 老版本 12 字节.
+        # 像素 format=1 是 RGBA_8888 (4 字节/像素), w*h*4 + header_size 应 = 总长度.
+        try:
+            w16, h16, fmt16, _cs = struct.unpack("<IIII", raw[:16])
+            if fmt16 == 1 and len(raw) - 16 == w16 * h16 * 4:
+                w, h, pixel_off = w16, h16, 16
+            else:
+                w12, h12, fmt12 = struct.unpack("<III", raw[:12])
+                if fmt12 != 1 or len(raw) - 12 != w12 * h12 * 4:
+                    logger.warning(
+                        f"raw screencap 头部不识别 {self.serial}: "
+                        f"16B(w={w16} h={h16} fmt={fmt16}) "
+                        f"12B(w={w12} h={h12} fmt={fmt12}) bytes={len(raw)}"
+                    )
+                    return None
+                w, h, pixel_off = w12, h12, 12
+        except Exception as e:
+            logger.error(f"raw screencap 头部解析失败 {self.serial}: {e}")
+            return None
+
+        try:
+            arr = np.frombuffer(raw, dtype=np.uint8, offset=pixel_off).reshape((h, w, 4))
+            img = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        except Exception as e:
+            logger.error(f"raw screencap 像素解析失败 {self.serial}: w={w} h={h} bytes={len(raw)} err={e}")
+            return None
+
+        elapsed = (time.perf_counter() - t0) * 1000
+        if elapsed > 200:
+            logger.warning(f"[性能] raw screencap 慢: {elapsed:.0f}ms ({w}×{h})")
+        return img
 
     async def tap(self, x: int, y: int):
         """点击（带随机抖动）"""

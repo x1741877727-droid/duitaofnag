@@ -1,0 +1,17 @@
+{
+  "P1": {
+    "title": "P1 · launch_game",
+    "badge": "PHASE · 启动游戏",
+    "text": "Activity Monitor 你确定能使用在游戏里吗？"
+  },
+  "P3a": {
+    "title": "P3a · team_create（队长）",
+    "badge": "PHASE · 队长建队",
+    "text": "BACK按键是点了就会弹出游戏退出信息框，所以不可取。这些失败回退我觉得后续都要确认当前是什么状态而不是一直都kill+重启/"
+  },
+  "P4": {
+    "title": "P4 · map_setup",
+    "badge": "PHASE · 选地图",
+    "text": "首先你想用YOLO代替OCR有时候就是UI会变你YOLO咋用这些情况你需要解决。"
+  }
+}

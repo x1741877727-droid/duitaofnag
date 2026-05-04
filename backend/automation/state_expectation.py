@@ -71,13 +71,19 @@ def _verify_popup_dismissed(before, after, ctx) -> bool:
 
     若仍判失败, 调用方应把那坐标加黑名单, 下轮换目标 (这是防线 2 的设计目的).
     """
-    yb = ctx.get("yolo_before", []) or []
-    ya = ctx.get("yolo_after", []) or []
-    pop_b = sum(1 for d in yb if getattr(d, "cls", "") in ("close_x", "action_btn"))
-    pop_a = sum(1 for d in ya if getattr(d, "cls", "") in ("close_x", "action_btn"))
-    if pop_a < pop_b:
-        return True
+    # Detection.cls 是 int (class_id), Detection.name 才是 "close_x"/"action_btn" 字符串.
+    # 之前用 cls 是 typo, 永远不匹配 → pop_a/pop_b 全 0 → fallthrough phash.
+    yb = ctx.get("yolo_before", None)
+    ya = ctx.get("yolo_after", None)
+    if yb is not None and ya is not None:
+        pop_b = sum(1 for d in yb if getattr(d, "name", "") in ("close_x", "action_btn"))
+        pop_a = sum(1 for d in ya if getattr(d, "name", "") in ("close_x", "action_btn"))
+        if pop_a < pop_b:
+            return True
     # 高阈值 phash fallback: 只有画面 *大变* 才算成功 (避免微动画 / 状态栏闪烁)
+    # 注: 没 yolo_after 时, 计数检查跳过 (无法判 count 减少), 全靠 phash.
+    # 之前 yolo_after 默认 [] 而 cls typo 让 pop_b=0 → 0<0=False, 走 phash 路径
+    # 即使如此, label="popup_dismissed" 没注册导致 verify 直接 matched=True 跳过这里, 见 verify().
     from .adb_lite import phash, phash_distance
     try:
         return phash_distance(phash(before), phash(after)) > 15
@@ -161,7 +167,23 @@ class ExpectationRegistry:
 
 
 def _register_defaults() -> None:
-    """启动时调一次. 注册 v1 默认预期."""
+    """启动时调一次. 注册 v1 默认预期.
+
+    v3 注: action_executor 调 verify(act.expectation) 而非 verify(act.label).
+    p2_policy 把 expectation 都设为 'popup_dismissed', 必须显式注册, 否则
+    Registry 找不到 → matched=True (无脑成功) → 黑名单永远不填 → P2 死循环
+    点同一个 phantom 坐标. 这是导致 35-round 重复 (486,49) 的根因.
+    """
+    # v3 expectation kind 名 (popup_dismissed) 也注册一份, 共享 close_x verifier
+    ExpectationRegistry.register(
+        "popup_dismissed",
+        Expectation(
+            kind=ExpectKind.POPUP_DISMISSED,
+            description="弹窗应该消失或被关闭按钮替换",
+            verifier=_verify_popup_dismissed,
+            on_fail_hint="坐标不响应或 YOLO 误识, 加黑名单后重选",
+        ),
+    )
     ExpectationRegistry.register(
         "close_x",
         Expectation(
@@ -216,9 +238,16 @@ def verify(
     """检查 tap label 后画面是否符合预期.
 
     没注册的 label → matched=True, 视为"无预期 = 不卡"
+    (踩过坑: 这个 silent-pass 让 'popup_dismissed' 这种没注册的 label 永远 matched
+    导致 P2 黑名单永远不填. 现在所有 v3 用到的 label 已显式注册, 这条分支理论
+    不该再走到. 万一走到, 打 warning 让人立刻发现.)
     """
     exp = ExpectationRegistry.get(label)
     if exp is None:
+        logger.warning(
+            f"[expect] 未注册 label={label!r} → 默认 matched=True (历史兼容). "
+            f"如这是 v3 主流程的 expectation, 必须在 _register_defaults 加注册."
+        )
         return ExpectationResult(
             matched=True,
             kind=ExpectKind.POPUP_NEXT,

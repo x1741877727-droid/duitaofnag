@@ -33,9 +33,12 @@ const ROLE_PHASES = new Set(['P3a', 'P3b', 'P4'])
 
 
 /**
- * 提交 test_phase 后台任务并轮询直到完成.
- * 后端 POST 立即返 task_id (< 100ms), 前端每 1s GET status 直到 done.
- * 解决 trycloudflare 隧道单 HTTP ~30s 超时, 长 phase 被 502 截断.
+ * 提交 test_phase 并拿结果.
+ *
+ * 兼容两种 backend 形态:
+ *   - 同步: POST 直接返 {ok, phase_name, duration_ms, ...} (当前线上)
+ *   - 异步队列: POST 返 {task_id, status:"running"} → 前端轮询 GET (旧设计)
+ * 通过响应里有没有 duration_ms 来分流, 不再硬要求 task_id.
  */
 async function runPhaseAsync(body: {
   instance: number; phase: string; role: 'captain' | 'member'; scheme?: string;
@@ -43,7 +46,7 @@ async function runPhaseAsync(body: {
   const phaseName0 = body.phase
   const t0 = performance.now()
   // 1) 提交
-  let taskId = ''
+  let data: any = null
   try {
     const r = await fetch('/api/runner/test_phase', {
       method: 'POST',
@@ -51,18 +54,31 @@ async function runPhaseAsync(body: {
       body: JSON.stringify(body),
     })
     const text = await r.text()
-    let data: any = null
     try { data = text ? JSON.parse(text) : null } catch {}
-    if (!r.ok || !data || !data.task_id) {
+    if (!r.ok || !data) {
       const errMsg = data?.detail || data?.error || `HTTP ${r.status}: ${text.slice(0, 80)}`
       return { ok: false, phaseName: phaseName0, duration: performance.now() - t0, error: errMsg, scheme: '' }
     }
-    taskId = data.task_id
   } catch (e) {
     return { ok: false, phaseName: phaseName0, duration: performance.now() - t0, error: `提交异常: ${e}`, scheme: '' }
   }
 
-  // 2) 轮询 (每 1s, 最多 10 分钟兜底)
+  // 2a) 同步模式: backend 已直接跑完, 响应就是完整结果
+  if (data.duration_ms !== undefined) {
+    return {
+      ok: !!data.ok,
+      phaseName: data.phase_name || phaseName0,
+      duration: data.duration_ms,
+      error: data.error || '',
+      scheme: data.game_scheme_url || '',
+    }
+  }
+
+  // 2b) 异步队列模式 (兼容): 拿 task_id 轮询
+  const taskId: string = data.task_id || ''
+  if (!taskId) {
+    return { ok: false, phaseName: phaseName0, duration: performance.now() - t0, error: `响应无 task_id 也无 duration_ms: ${JSON.stringify(data).slice(0, 120)}`, scheme: '' }
+  }
   const POLL_MS = 1000
   const MAX_WAIT_MS = 10 * 60 * 1000
   const pollT0 = performance.now()
@@ -71,18 +87,17 @@ async function runPhaseAsync(body: {
     try {
       const r = await fetch(`/api/runner/test_phase/${encodeURIComponent(taskId)}`)
       const text = await r.text()
-      let data: any = null
-      try { data = text ? JSON.parse(text) : null } catch {}
-      if (!data) continue                  // 网络毛刺, 下次再轮
-      if (data.status === 'running') continue
-      // done
-      const duration = data.duration_ms ?? (performance.now() - t0)
+      let pd: any = null
+      try { pd = text ? JSON.parse(text) : null } catch {}
+      if (!pd) continue
+      if (pd.status === 'running') continue
+      const duration = pd.duration_ms ?? (performance.now() - t0)
       return {
-        ok: !!data.ok,
-        phaseName: data.phase_name || phaseName0,
+        ok: !!pd.ok,
+        phaseName: pd.phase_name || phaseName0,
         duration,
-        error: data.error || '',
-        scheme: data.game_scheme_url || '',
+        error: pd.error || '',
+        scheme: pd.game_scheme_url || '',
       }
     } catch {
       continue

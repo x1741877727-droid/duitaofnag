@@ -1,0 +1,4 @@
+curl: optcurl: option --pyinstaller: is unknown
+curl: try 'curl --help' or 'curl --manual' for more information
+ion --pyinstaller: is unknown
+curl: try 'curl --help' or 'curl --manual' for more information

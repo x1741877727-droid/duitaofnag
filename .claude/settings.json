@@ -1,7 +1,4 @@
 {
-  "skills": [
-    ".claude/skills/security-research"
-  ],
   "permissions": {
     "allow": [
       "Bash(python*:*)",

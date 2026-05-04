@@ -234,14 +234,17 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         return p
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 模板 close_x_* 兜底 (YOLO 漏检时)
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 模板 close_x_* — 总跑, 不依赖 YOLO 状态.
+    # 之前有 `not p.yolo_close_xs` 守卫: YOLO 一报 close_x (哪怕误识 486,49),
+    # 模板完全不算 → policy 落 yolo, blacklist 后无法回退到 template (因为
+    # template_close_x 一直 None). 现在改成无条件跑, ROI 限定后 ~10ms 可控成本.
+    # 阈值 0.70 (跟 find_close_button 一致). close_x_return 在公告右上 0.78 命中, 0.80 太紧.
     _t = _time.perf_counter()
-    if matcher is not None and not p.yolo_close_xs:
+    if matcher is not None:
         def _run_close_x():
             for tn in CLOSE_X_TEMPLATE_NAMES:
                 try:
-                    h = matcher.match_one(shot, tn, threshold=0.80, roi=CLOSE_X_ROI)
+                    h = matcher.match_one(shot, tn, threshold=0.70, roi=CLOSE_X_ROI)
                 except Exception:
                     h = None
                 if h is not None:

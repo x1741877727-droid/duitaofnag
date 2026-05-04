@@ -71,33 +71,29 @@ class P2SubFSM:
         else:
             logger.info(f"[P2/R{rnd}] dets=0 (画面无 close_x/action_btn)")
 
-        # 2. 大厅守门 — 贝叶斯早退 (替代死板 2-frame confirm).
-        #    单帧高 conf (>0.92 后验) 立即退, 慢机 / 边界帧自然多看一眼,
-        #    比 quad-2-frame 平均快 ~600ms.
+        # 2. 大厅守门 — 简单连续 N 帧确认.
+        # 之前贝叶斯有 bug: 前面 N round 不命中把 posterior 拉到 ~10^-N, 之后即使 16 次连续命中
+        # 也涨不回 0.92 阈值, P2 永远 FAIL. 简单的"连续 N 帧命中"反而稳.
         if p.quad_lobby_confirmed:
-            # 命中: 用 template_conf 作单帧 P(在大厅), 没值用 0.85 默认
-            p_frame = p.quad_template_conf if p.quad_template_conf > 0.5 else 0.85
-            ctx.lobby_posterior = _bayes_update(ctx.lobby_posterior, p_frame)
-            ctx.lobby_confirm_count += 1   # legacy 计数仍维护, 兼容老 commit_pending 逻辑
-            if ctx.lobby_posterior >= LOBBY_POST_THRESHOLD:
+            ctx.lobby_confirm_count += 1
+            if ctx.lobby_confirm_count >= LOBBY_CONFIRM_NEEDED:
                 n = ActionExecutor.commit_pending_memory(ctx)
                 if n:
                     logger.info(f"[P2/R{rnd}] Memory commit {n} 条 (P2 success)")
                 return PhaseStep(
                     PhaseResult.NEXT,
-                    note=f"大厅确认 (贝叶斯 post={ctx.lobby_posterior:.3f}, 累计 {ctx.lobby_confirm_count} 帧), "
+                    note=f"大厅确认 (连续 {ctx.lobby_confirm_count} 帧 quad 命中), "
                          f"关闭 {ctx.popups_closed} 弹窗 · {p.quad_note}",
                     outcome_hint="lobby_confirmed_quad",
                 )
             return PhaseStep(
                 PhaseResult.WAIT,
                 wait_seconds=0.1,
-                note=f"大厅 pending post={ctx.lobby_posterior:.3f}/{LOBBY_POST_THRESHOLD} ({p.quad_note})",
-                outcome_hint=f"lobby_pending_{ctx.lobby_posterior:.2f}",
+                note=f"大厅 pending {ctx.lobby_confirm_count}/{LOBBY_CONFIRM_NEEDED} ({p.quad_note})",
+                outcome_hint=f"lobby_pending_{ctx.lobby_confirm_count}",
             )
         else:
-            # 不命中: 用低 P 值更新 — 不直接归零, 给瞬态过渡帧容错
-            ctx.lobby_posterior = _bayes_update(ctx.lobby_posterior, LOBBY_FALSE_POS_RATE)
+            # 不命中: 累计清零 (转瞬即逝的过渡帧容错可以靠 N=2 的需求自然过滤)
             ctx.lobby_confirm_count = 0
 
         # 3. 登录页守门 (60s 超时 → game_restart)
