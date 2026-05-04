@@ -22,10 +22,12 @@ from typing import Any, Optional
 
 
 # perceive 内部 5 个 to_thread 并发, 6 inst × 5 = 30 concurrent native calls.
-# cv2.matchTemplate / ONNX / OpenVINO 在 30+ 并发下偶发 native crash (无 Python
-# traceback, backend 直接 silent 死掉). 加 semaphore 限制全局同时 perceive 的
-# 实例数 — 默认 3, 仍能并发但不至于把 native lib 撑爆.
-_PERCEIVE_CONCURRENCY = int(os.environ.get("GAMEBOT_PERCEIVE_CONCURRENCY", "3"))
+# 历史: 默认 3 是为防 cv2/ONNX/OpenVINO native crash. YoloDismisser 已加
+# intra_op_num_threads=2 + inter=1 + ORT_SEQUENTIAL (yolo_dismisser.py:181-185),
+# 6 实例 × intra=2 = 12 ORT 线程, 12-core 机器正好吃满不爆. cv2.matchTemplate
+# 本身线程安全, OcrDismisser 有 _inference_lock 锁 OpenVINO 单线程.
+# 现在默认放开到 6 (跟实例数对齐), 保留 env 兜底. 命中 native crash 调回 3.
+_PERCEIVE_CONCURRENCY = int(os.environ.get("GAMEBOT_PERCEIVE_CONCURRENCY", "6"))
 _perceive_sem: Optional[asyncio.Semaphore] = None
 
 
