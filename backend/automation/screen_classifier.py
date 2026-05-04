@@ -139,3 +139,39 @@ async def classify_from_frame(frame, yolo, matcher) -> ScreenKind:
         frame_brightness=brightness,
         lobby_template_hit=lobby_hit,
     )
+
+
+# ─────────────── Phase 入口守门 helper ───────────────
+
+
+async def wait_for_kind(
+    ctx,
+    accept: tuple = (ScreenKind.LOBBY,),
+    max_attempts: int = 5,
+    interval_s: float = 1.0,
+) -> ScreenKind:
+    """Phase 入口守门: 反复 screenshot + classify, 直到 ScreenKind ∈ accept 或耗光.
+
+    用法 (P3a/P3b/P4 handle_frame 开头):
+        kind = await wait_for_kind(ctx)
+        if kind != ScreenKind.LOBBY:
+            return PhaseStep(FAIL, note=f"入口非大厅 ({kind.name})")
+        # ... 正常流程
+
+    返回最后一次看到的 kind. 调用方决定 FAIL / RETRY / proceed.
+    """
+    import asyncio
+
+    last = ScreenKind.UNKNOWN
+    for i in range(max_attempts):
+        try:
+            shot = await ctx.device.screenshot()
+        except Exception:
+            shot = None
+        if shot is not None:
+            last = await classify_from_frame(shot, ctx.yolo, ctx.matcher)
+            if last in accept:
+                return last
+        if i < max_attempts - 1:
+            await asyncio.sleep(interval_s)
+    return last

@@ -38,7 +38,22 @@ class P3aTeamCreateHandler(PhaseHandler):
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
         from ..recorder_helpers import record_signal_tier
+        from ..screen_classifier import ScreenKind, wait_for_kind
         decision = ctx.current_decision
+
+        # 入口守门: 必须在大厅才能开始组队流程. 否则 phase_team_create 在 popup
+        # 上 OCR "组队"按钮必失败, FAIL 信息不清楚. 这里先确认 LOBBY, 不在就给清晰诊断.
+        kind = await wait_for_kind(ctx, accept=(ScreenKind.LOBBY,),
+                                   max_attempts=5, interval_s=1.0)
+        if kind != ScreenKind.LOBBY:
+            record_signal_tier(decision, name="入口守门", hit=False, tier_idx=2,
+                               note=f"P3a 入口非 LOBBY (kind={kind.name})")
+            return PhaseStep(PhaseResult.FAIL,
+                             note=f"P3a 入口守门失败: 5s 内仍非大厅 (kind={kind.name})",
+                             outcome_hint=f"entry_not_lobby_{kind.value}")
+        record_signal_tier(decision, name="入口守门", hit=True, tier_idx=2,
+                           note=f"P3a 入口确认 LOBBY")
+
         try:
             scheme = await runner.phase_team_create()
         except Exception as e:

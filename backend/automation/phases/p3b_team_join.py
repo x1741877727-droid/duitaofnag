@@ -33,6 +33,7 @@ class P3bTeamJoinHandler(PhaseHandler):
             return PhaseStep(PhaseResult.FAIL, note="ctx.runner 未注入")
 
         from ..recorder_helpers import record_signal_tier
+        from ..screen_classifier import ScreenKind, wait_for_kind
         decision = ctx.current_decision
         scheme = ctx.game_scheme_url
         if not scheme:
@@ -43,6 +44,18 @@ class P3bTeamJoinHandler(PhaseHandler):
                 note="game_scheme_url 为空 (队长还没创建队伍 / runner_service 没注入)",
                 outcome_hint="team_join_no_scheme",
             )
+
+        # 入口守门: am start scheme:// 只能从大厅触发. 不在大厅就 FAIL.
+        kind = await wait_for_kind(ctx, accept=(ScreenKind.LOBBY,),
+                                   max_attempts=5, interval_s=1.0)
+        if kind != ScreenKind.LOBBY:
+            record_signal_tier(decision, name="入口守门", hit=False, tier_idx=2,
+                               note=f"P3b 入口非 LOBBY (kind={kind.name})")
+            return PhaseStep(PhaseResult.FAIL,
+                             note=f"P3b 入口守门失败: 5s 内仍非大厅 (kind={kind.name})",
+                             outcome_hint=f"entry_not_lobby_{kind.value}")
+        record_signal_tier(decision, name="入口守门", hit=True, tier_idx=2,
+                           note=f"P3b 入口确认 LOBBY")
 
         try:
             ok = await runner.phase_team_join(scheme)
