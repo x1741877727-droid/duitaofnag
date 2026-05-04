@@ -1,0 +1,9 @@
+{
+  "doc": "全黑帧 (loading): YOLO 啥都没, 模板没, brightness < 30 → LOADING",
+  "input": {
+    "yolo_dets": [],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 15
+  },
+  "expected": "LOADING"
+}

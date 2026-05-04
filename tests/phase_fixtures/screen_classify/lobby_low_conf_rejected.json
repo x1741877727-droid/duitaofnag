@@ -1,0 +1,11 @@
+{
+  "doc": "lobby 检到但 conf < 0.5 (不可信) → 不算 LOBBY → UNKNOWN",
+  "input": {
+    "yolo_dets": [
+      {"name": "lobby", "conf": 0.35}
+    ],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 140
+  },
+  "expected": "UNKNOWN"
+}

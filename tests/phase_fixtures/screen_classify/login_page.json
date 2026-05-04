@@ -1,0 +1,9 @@
+{
+  "doc": "登录页: 模板命中 lobby_login_btn, 没 popup → LOGIN",
+  "input": {
+    "yolo_dets": [],
+    "lobby_login_template_hit": true,
+    "frame_brightness": 160
+  },
+  "expected": "LOGIN"
+}

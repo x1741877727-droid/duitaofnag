@@ -1,0 +1,11 @@
+{
+  "doc": "登录页 + 弹窗 (e.g. 公告) → POPUP 优先 (先关弹窗才能登录)",
+  "input": {
+    "yolo_dets": [
+      {"name": "close_x", "conf": 0.9}
+    ],
+    "lobby_login_template_hit": true,
+    "frame_brightness": 150
+  },
+  "expected": "POPUP"
+}

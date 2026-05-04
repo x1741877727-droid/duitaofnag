@@ -1,0 +1,11 @@
+{
+  "doc": "干净大厅: 检到 lobby 类, 无 close_x/dialog, 无 login 模板 → LOBBY",
+  "input": {
+    "yolo_dets": [
+      {"name": "lobby", "conf": 0.91}
+    ],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 180
+  },
+  "expected": "LOBBY"
+}

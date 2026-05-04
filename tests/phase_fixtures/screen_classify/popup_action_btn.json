@@ -1,0 +1,11 @@
+{
+  "doc": "action_btn (确认/同意 类按钮) 单独出现也算 POPUP — 这类无 X 但要点确认的弹窗",
+  "input": {
+    "yolo_dets": [
+      {"name": "action_btn", "conf": 0.7}
+    ],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 140
+  },
+  "expected": "POPUP"
+}

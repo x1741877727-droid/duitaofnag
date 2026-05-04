@@ -1,0 +1,9 @@
+{
+  "doc": "啥都没识别到, 但帧不黑 — 既不是大厅也不是登录也不是 loading → UNKNOWN",
+  "input": {
+    "yolo_dets": [],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 130
+  },
+  "expected": "UNKNOWN"
+}

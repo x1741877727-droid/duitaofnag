@@ -1,0 +1,11 @@
+{
+  "doc": "只检到 dialog, 没 lobby → POPUP",
+  "input": {
+    "yolo_dets": [
+      {"name": "dialog", "conf": 0.82}
+    ],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 100
+  },
+  "expected": "POPUP"
+}

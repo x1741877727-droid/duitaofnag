@@ -1,0 +1,12 @@
+{
+  "doc": "弹窗盖在大厅上 (lobby + close_x 同帧) → POPUP 优先, 不能误判 LOBBY",
+  "input": {
+    "yolo_dets": [
+      {"name": "lobby", "conf": 0.85},
+      {"name": "close_x", "conf": 0.78}
+    ],
+    "lobby_login_template_hit": false,
+    "frame_brightness": 150
+  },
+  "expected": "POPUP"
+}

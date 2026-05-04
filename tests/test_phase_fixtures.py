@@ -95,12 +95,35 @@ def _run_p2_decide(fix: dict):
     return decide(p, ctx)
 
 
+# ─────────────────── adapter: screen_classify ───────────────────
+
+
+def _run_screen_classify(fix: dict):
+    """跑 screen_classifier.classify(yolo_dets, login_hit, brightness)."""
+    from backend.automation.screen_classifier import classify
+
+    inp = fix["input"]
+    dets = [_to_obj(d) for d in inp.get("yolo_dets", [])]
+    return classify(
+        yolo_dets=dets,
+        lobby_login_template_hit=bool(inp.get("lobby_login_template_hit", False)),
+        frame_brightness=float(inp.get("frame_brightness", 128)),
+    )
+
+
+def _assert_screen_kind(actual, expected):
+    """expected 是字符串 ('LOBBY' / 'POPUP' / ...), actual 是 ScreenKind enum."""
+    assert actual is not None, "classify 不应该返 None"
+    assert actual.name == expected, f"期望 {expected}, 实际 {actual.name}"
+
+
 # ─────────────────── 注册表 ───────────────────
 
 
 # fixture 目录 → (运行函数, 断言函数)
 _ADAPTERS = {
     "p2_decide": (_run_p2_decide, _assert_action),
+    "screen_classify": (_run_screen_classify, _assert_screen_kind),
 }
 
 
