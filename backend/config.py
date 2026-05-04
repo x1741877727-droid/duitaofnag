@@ -62,8 +62,6 @@ class Settings:
     state_timeout: int = 30                        # 通用状态超时（秒）
     screenshot_interval: float = 1.0               # 截图间隔（秒）
     normalize_resolution: list = field(default_factory=lambda: [1280, 720])  # 归一化分辨率
-    dev_mock: bool = False                         # 开发模式（macOS mock）
-    mock_screenshots_dir: str = ""                 # mock 模式截图目录
 
 
 class ConfigManager:
@@ -93,8 +91,6 @@ class ConfigManager:
             "state_timeout": self.settings.state_timeout,
             "screenshot_interval": self.settings.screenshot_interval,
             "normalize_resolution": self.settings.normalize_resolution,
-            "dev_mock": self.settings.dev_mock,
-            "mock_screenshots_dir": self.settings.mock_screenshots_dir,
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
