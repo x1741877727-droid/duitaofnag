@@ -80,9 +80,8 @@ class Perception:
     """一帧多源识别融合结果."""
     # 大厅信号
     lobby_template_hit: Optional[Any] = None    # MatchHit, lobby_start_btn 模板命中
-    quad_lobby_confirmed: bool = False          # 四元融合判大厅 (含 phash 稳定 1s)
-    quad_note: str = ""                          # 四元判定细节 (失败原因)
-    quad_template_conf: float = 0.0             # 大厅模板单帧 conf, 用于贝叶斯早退
+    quad_lobby_confirmed: bool = False          # YOLO lobby + streak 判大厅
+    quad_note: str = ""                          # 判定细节 (失败原因)
 
     # 弹窗信号 (按优先级排序)
     yolo_close_xs: list = field(default_factory=list)     # [Detection], conf>0.5
@@ -216,7 +215,6 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
             )
             p.quad_lobby_confirmed = quad_r.is_lobby
             p.quad_note = quad_r.note
-            p.quad_template_conf = float(getattr(quad_r, "template_conf", 0.0) or 0.0)
         except Exception as e:
             logger.debug(f"[perceive] lobby_quad err: {e}")
     _perf["quad"] = (_time.perf_counter() - _t) * 1000

@@ -25,15 +25,34 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 
 from .adb_lite import phash, phash_distance
-from .recognizer import Hit, Tier
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Hit:
+    """Memory query 命中. 字段为消费者 (p2_policy / single_runner) 实际读的子集.
+    历史上 from .recognizer import Hit (5-tier 通用), recognizer 已删."""
+    tier: int        # 保留兼容: 老 callers 偶尔读, 这里恒为 1 (MEMORY)
+    label: str
+    confidence: float
+    cx: int
+    cy: int
+    w: int = 0
+    h: int = 0
+    note: str = ""
+
+
+# 老代码用 Tier.MEMORY, 这里给个最小常量保持兼容
+class Tier:
+    MEMORY = 1
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -333,12 +333,10 @@ class ADBController:
 
     async def screenshot(self) -> Optional[np.ndarray]:
         """截图 — 默认 raw screencap (UE4 兼容 + 跟窗口完全解耦, ~80ms).
-        dxhook / wgc / screenrecord 仅在显式 GAMEBOT_CAPTURE 开启时走 stream.
+        screenrecord 仅在显式 GAMEBOT_CAPTURE=screenrecord 时走 stream.
         所有路径返回的 frame 都 normalize 到 Android display 尺寸 (`wm size`)."""
-        # dxhook / wgc 已知不抓 UE4 SurfaceView 硬件层 + 跟窗口大小绑定 (拖小就抓小).
-        # 默认走 raw screencap, 业界久经考验, 路径同测试 UI.
         use_stream = (self._stream is not None
-                      and os.environ.get("GAMEBOT_CAPTURE", "").lower() in ("dxhook", "wgc", "screenrecord"))
+                      and os.environ.get("GAMEBOT_CAPTURE", "").lower() == "screenrecord")
 
         with metrics.timed("screenshot") as tags:
             if use_stream:

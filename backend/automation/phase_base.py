@@ -81,7 +81,7 @@ class RunContext:
     """跨 phase 共享的可变状态. 每实例 1 个.
 
     字段分组 + ownership:
-      [注入资源 / 不可变] device, matcher, recognizer, yolo, memory, ...
+      [注入资源 / 不可变] device, matcher, yolo, memory, ...
       [配置 / 不可变]    instance_idx, account, settings
       [跨 phase 共享]    role, game_scheme_url
       [P2 owned]         blacklist_coords, pending_memory_writes,
@@ -97,7 +97,6 @@ class RunContext:
     # 注入资源 (RunnerFSM 构造时设, 之后只读)
     device: Any                           # ADBController
     matcher: Any                          # ScreenMatcher
-    recognizer: Any                       # Recognizer (5 层 early-exit)
     runner: Any = None                    # SingleInstanceRunner (helper 方法调用源)
     yolo: Optional[Any] = None            # YoloDismisser (per-instance session, v2-9)
     memory: Optional[Any] = None          # FrameMemory

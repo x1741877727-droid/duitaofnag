@@ -18,7 +18,6 @@ import numpy as np
 
 from .adb_lite import ADBController, phash, phash_distance
 from .screen_matcher import MatchHit, ScreenMatcher
-from .popup_dismisser import PopupDismisser
 from .ocr_dismisser import OcrDismisser
 from .debug_logger import DebugLogger
 from . import metrics
@@ -115,10 +114,8 @@ class SingleInstanceRunner:
         self.target_map = target_map
         self._phase = Phase.INIT
         self._on_phase_change = on_phase_change
-        self.popup_dismisser = PopupDismisser(matcher)
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
-        # YOLO 视觉识别（替代 OCR/模板/形状的层叠链）
-        # 模型不存在时 dismiss_all 自动 fallback 到 OcrDismisser
+        # YOLO 视觉识别 (only used as detect()/is_available() provider for v3 perception).
         from .yolo_dismisser import YoloDismisser
         self.yolo_dismisser = YoloDismisser(max_rounds=25)
         self._team_code: str = ""  # 队长生成的口令码
@@ -129,7 +126,6 @@ class SingleInstanceRunner:
         self._v3_ctx = None  # backend.automation.phase_base.RunContext
         self._v3_memory = None
         self._v3_lobby_detector = None
-        self._v3_recognizer = None
 
         # phase 中间步骤日志 (每个 phase 跑前清空, 跑完 P4Handler 等读出来塞 decision.note)
         self._stage_log: list[str] = []
@@ -139,7 +135,6 @@ class SingleInstanceRunner:
         if self._v3_ctx is not None:
             return self._v3_ctx
         from .phase_base import RunContext
-        from .recognizer import Recognizer
         from .lobby_check import LobbyQuadDetector
         from .memory_l1 import FrameMemory
         from .user_paths import user_data_dir
@@ -156,20 +151,11 @@ class SingleInstanceRunner:
                 self._v3_memory = None
 
         if self._v3_lobby_detector is None:
-            self._v3_lobby_detector = LobbyQuadDetector(stable_frames_required=2)
-
-        if self._v3_recognizer is None:
-            self._v3_recognizer = Recognizer(
-                matcher=self.matcher,
-                yolo_detect_fn=(self.yolo_dismisser.detect
-                                if self.yolo_dismisser.is_available() else None),
-                memory=self._v3_memory,
-            )
+            self._v3_lobby_detector = LobbyQuadDetector()
 
         self._v3_ctx = RunContext(
             device=self.adb,
             matcher=self.matcher,
-            recognizer=self._v3_recognizer,
             runner=self,
             yolo=self.yolo_dismisser,
             memory=self._v3_memory,

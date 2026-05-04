@@ -19,7 +19,6 @@ import cv2
 import numpy as np
 
 from .automation.adb_lite import ADBController
-from .automation.guarded_adb import GuardedADB
 from .automation.screen_matcher import ScreenMatcher
 from .automation.single_runner import SingleInstanceRunner, Phase
 from .automation.watchdogs import WatchState, WatchdogManager
@@ -299,16 +298,11 @@ class MultiRunnerService:
 
         # Pass 3: 装配每实例的 dismisser / runner / handler / task
         for account, idx, raw_adb in prepared:
-            # v2-4: GuardedADB 已被 PopupWatchdog 取代 (后台 task + phase 感知).
-            # 设 GAMEBOT_ENABLE_GUARDED_ADB=1 可临时回退老路径.
+            # GuardedADB 已删 (legacy, v2 PopupWatchdog 替代之).
+            # OcrDismisser 仍创建给 dismisser 引擎引用 (虽然不再 dismiss_all, 但 OCR 接口要保留).
             from .automation.ocr_dismisser import OcrDismisser
             dismisser = OcrDismisser(max_rounds=25)
-            if os.environ.get("GAMEBOT_ENABLE_GUARDED_ADB") == "1":
-                guarded_adb = GuardedADB(raw_adb, dismisser, matcher)
-                logger.info(f"[实例{idx}] GuardedADB 启用 (legacy)")
-            else:
-                guarded_adb = raw_adb
-                logger.info(f"[实例{idx}] GuardedADB 禁用 (v2 PopupWatchdog 接管)")
+            guarded_adb = raw_adb
 
             # phase 变化回调
             def make_phase_cb(instance_idx):
