@@ -184,13 +184,62 @@ def _patch_torch_save_retry():
         pass
 
 
-def train(yaml_path: Path, epochs: int, imgsz: int, batch: int) -> Path:
-    """跑训练。返回 best.pt 路径"""
+def _checkpoint_dir() -> Path:
+    """fine-tune checkpoints 存放目录 (跨训练共享 last.pt)."""
+    if os.name == "nt":
+        try:
+            here = Path(__file__).resolve().parent.parent
+            if str(here) not in sys.path:
+                sys.path.insert(0, str(here))
+            from backend.automation.user_paths import user_yolo_dir
+            d = user_yolo_dir() / "checkpoints"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except Exception:
+            pass
+    # 非 Windows / fallback: tmp 目录 (Mac 等远端训练用)
+    d = Path.home() / ".cache" / "gamebot_yolo_checkpoints"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _resolve_base_model(args) -> str:
+    """决定从哪个 .pt 起步训练.
+    优先级:
+      1. --from-scratch         → 强制 yolov8n.pt (通用预训练)
+      2. --base <path>          → 显式指定路径
+      3. checkpoints/last.pt    → 自动 fine-tune (新增类自动 reshape head)
+      4. yolov8n.pt             → 第一次训练时
+    """
+    if getattr(args, "from_scratch", False):
+        print("     [base] --from-scratch → yolov8n.pt (从空白模型起步)")
+        return "yolov8n.pt"
+    if getattr(args, "base", None):
+        p = Path(args.base)
+        if p.is_file():
+            print(f"     [base] --base 指定 → {p} (fine-tune)")
+            return str(p)
+        else:
+            print(f"     [base] --base {p} 不存在, fallback 到 last.pt 检查")
+    last = _checkpoint_dir() / "last.pt"
+    if last.is_file():
+        size_mb = last.stat().st_size / 1024 / 1024
+        mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(last.stat().st_mtime))
+        print(f"     [base] 自动 fine-tune from {last} ({size_mb:.1f} MB, 上次训于 {mt})")
+        print(f"            → 老类知识保留 + 新增类自动 reshape head")
+        return str(last)
+    print("     [base] 第一次训练 → 用 yolov8n.pt (COCO 预训练)")
+    return "yolov8n.pt"
+
+
+def train(yaml_path: Path, epochs: int, imgsz: int, batch: int, base_model: str) -> Path:
+    """跑训练. base_model 决定从哪起步 (yolov8n.pt 或上次的 last.pt)."""
     _patch_torch_save_retry()
     from ultralytics import YOLO
 
-    print(f"[4/6] 训练 yolov8n.pt epochs={epochs} imgsz={imgsz} batch={batch}")
-    model = YOLO("yolov8n.pt")
+    print(f"[4/6] 训练 epochs={epochs} imgsz={imgsz} batch={batch}")
+    print(f"     base model: {base_model}")
+    model = YOLO(base_model)
 
     # 自动选最快的 device
     device = "cpu"
@@ -285,13 +334,35 @@ def upload_model(onnx_path: Path):
     print(f"     {r.json()}")
 
 
+def _save_checkpoint(best_pt: Path) -> Path:
+    """训完保留 best.pt 到 checkpoints/last.pt 供下次 fine-tune 用.
+    同时保存时间戳版本防被覆盖时丢失."""
+    try:
+        ckpt_dir = _checkpoint_dir()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        named = ckpt_dir / f"best_{ts}.pt"
+        last = ckpt_dir / "last.pt"
+        shutil.copy(best_pt, named)
+        shutil.copy(best_pt, last)
+        print(f"     [checkpoint] 保存 best.pt 到 {last} (用于下次 fine-tune)")
+        print(f"                  历史副本: {named}")
+        return last
+    except Exception as e:
+        print(f"     [checkpoint] 保存失败 (不影响 ONNX 部署): {e}")
+        return best_pt
+
+
 def main():
-    ap = argparse.ArgumentParser(description="YOLO 弹窗识别一键训练")
-    ap.add_argument("--epochs", type=int, default=80, help="训练 epoch 数 (默认 80)")
+    ap = argparse.ArgumentParser(description="YOLO 一键训练 + fine-tune workflow")
+    ap.add_argument("--epochs", type=int, default=80, help="训练 epoch 数 (默认 80; fine-tune 时建议 30-50)")
     ap.add_argument("--imgsz", type=int, default=640, help="输入分辨率 (默认 640)")
     ap.add_argument("--batch", type=int, default=16, help="batch size (默认 16, Mac M1/M2 可设 8)")
     ap.add_argument("--no-upload", action="store_true", help="只训练不上传")
     ap.add_argument("--keep-tmp", action="store_true", help="保留 /tmp 目录便于检查")
+    ap.add_argument("--from-scratch", action="store_true",
+                    help="忽略 last.pt, 强制从 yolov8n.pt 起步 (谨慎: 会丢老类知识)")
+    ap.add_argument("--base", default=None,
+                    help="显式指定起步 .pt (覆盖 last.pt 自动检测)")
     args = ap.parse_args()
 
     # 1. 下载
@@ -306,8 +377,13 @@ def main():
     # 3. data.yaml
     yaml_path = write_data_yaml(work, classes)
 
-    # 4. 训练
-    best_pt = train(yaml_path, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch)
+    # 4. 训练 (fine-tune from last.pt 如果存在)
+    base_model = _resolve_base_model(args)
+    best_pt = train(yaml_path, epochs=args.epochs, imgsz=args.imgsz,
+                    batch=args.batch, base_model=base_model)
+
+    # 4.5 保存 checkpoint (供下次 fine-tune)
+    _save_checkpoint(best_pt)
 
     # 5. ONNX
     onnx_path = export_onnx(best_pt, imgsz=args.imgsz)
