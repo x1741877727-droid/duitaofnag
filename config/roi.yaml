@@ -62,38 +62,37 @@ team_ready_btn:
   desc: 队员加入队伍后左上角"取消准备"按钮区 (P3b-2-verify, 检测加入成功)
   used_in: single_runner.py:phase_team_join
   preprocessing: []
-team_slot_1_nickname:
-  rect: [0.15, 0.7, 0.3, 0.85]
-  scale: 2
-  desc: P5 slot1 昵称栏 字数变化检测 占位待拖
+# ───────────────────── P5 等待玩家 (2026-05-05 重构 v2) ─────────────────────
+# 设计变更: 抛弃 4 个 team_slot_N_nickname OCR 方案 (受 OCR 漂移 / 昵称隐藏 /
+# 模仿 ID 影响). 改用模板匹配 slot 旁的展开/退出按钮 (UI 元素稳定, 永远显示).
+# baseline = N 个按钮位置, 真人加入 = 多出 1 个新位置.
+team_lobby_area:
+  rect: [0.05, 0.45, 0.95, 0.80]
+  scale: 1
+  desc: 'P5 大厅 4 角色昵称区域 模板匹配搜索范围 占位待拖'
   used_in: phases/p5_wait_players.py
-team_slot_2_nickname:
-  rect: [0.3, 0.7, 0.45, 0.85]
+player_card_info_btn:
+  rect: [0.30, 0.85, 0.55, 1.00]
   scale: 2
-  desc: P5 slot2 昵称栏 占位待拖
-  used_in: phases/p5_wait_players.py
-team_slot_3_nickname:
-  rect: [0.45, 0.7, 0.6, 0.85]
-  scale: 2
-  desc: P5 slot3 昵称栏 占位待拖
-  used_in: phases/p5_wait_players.py
-team_slot_4_nickname:
-  rect: [0.6, 0.7, 0.75, 0.85]
-  scale: 2
-  desc: P5 slot4 昵称栏 蓝框区域 真人通常先填这 占位待拖
+  desc: 'P5 小卡片 信息 按钮 tap 后进详细面板 占位待拖'
   used_in: phases/p5_wait_players.py
 player_card_id:
   rect: [0.45, 0.25, 0.75, 0.35]
   scale: 3
-  desc: P5 玩家卡片编号区 10 位数字 核心 ROI 占位待拖
+  desc: 'P5 详细面板 编号 10 位数字区域 核心 OCR 占位待拖'
+  used_in: phases/p5_wait_players.py
+player_card_close_btn:
+  rect: [0.92, 0.05, 1.00, 0.15]
+  scale: 2
+  desc: 'P5 详细面板右上角 X 关闭按钮 不用 back 防误触退出游戏弹窗 占位待拖'
+  used_in: phases/p5_wait_players.py
+player_card_kick_area:
+  rect: [0.55, 0.40, 1.00, 1.00]
+  scale: 2
+  desc: 'P5 大区域盖小卡片底部按钮条+右侧弹出菜单 OCR 找 移出队伍 文字 占位待拖'
   used_in: phases/p5_wait_players.py
 player_card_more_btn:
-  rect: [0.85, 0.85, 1.0, 1.0]
+  rect: [0.85, 0.85, 1.00, 1.00]
   scale: 2
-  desc: P5 卡片底部 更多 按钮 踢人入口 占位待拖
-  used_in: phases/p5_wait_players.py
-kick_menu_kick_btn:
-  rect: [0.5, 0.45, 0.75, 0.55]
-  scale: 2
-  desc: P5 更多 弹出菜单的 移出队伍 按钮 占位待拖
+  desc: 'P5 小卡片底部 更多 按钮 非好友才显示 好友直接看到移出队伍 占位待拖'
   used_in: phases/p5_wait_players.py
