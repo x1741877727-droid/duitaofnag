@@ -1,46 +1,99 @@
-# ROI 配置 — Task 0.4 (MASTER_PLAN 阶段 0)
-#
-# 归一化坐标（0-1 浮点），运行时乘以截图宽高得真实像素裁剪框。
-# 调整这里 = 调整识别区域，不需要碰 .py 代码。
-#
-# 字段：
-#   rect:   [x1, y1, x2, y2]  归一化矩形（左上角→右下角）
-#   scale:  OCR 放大倍数（小文字必须放大才识别准）
-#   desc:   描述（仅供阅读）
-#   used_in: 哪些代码引用（grep 用）
-#
-# 加新 ROI 后，代码里直接 `roi_config.get("name")` 拿 (x1,y1,x2,y2,scale) 元组。
-
-# ───────────────────── 大厅左侧栏 ─────────────────────
 team_btn_left:
   rect: [0.0, 0.4, 0.1, 0.8]
   scale: 3
   desc: 大厅左侧栏的"组队"按钮
   used_in: single_runner.py:phase_team_create
-
+  preprocessing: [binarize, invert]
 qr_team_btn_left:
-  rect: [0.0, 0.3, 0.25, 0.9]
+  rect: [0.11875, 0.700925925925926, 0.20208333333333334, 0.8416666666666667]
   scale: 2
   desc: 组队菜单的"二维码组队"按钮（左侧栏）
   used_in: single_runner.py:phase_team_join
-
-# ───────────────────── 弹窗 / 中部 ─────────────────────
+  preprocessing: [invert]
 team_code_popup_mid:
   rect: [0.2, 0.45, 0.8, 0.7]
   scale: 2
   desc: 中部"使用组队码加入"弹窗检测区
   used_in: single_runner.py:phase_team_create
-
-# ───────────────────── 底部 tab 栏 ─────────────────────
 team_code_tab_bottom:
-  rect: [0.2, 0.9, 0.5, 1.0]
+  rect: [0.21355794270833334, 0.9361111111111111, 0.348974609375, 0.9935185185185185]
   scale: 2
   desc: 底部"组队码"tab 切换按钮
   used_in: single_runner.py:phase_team_create
-
-# ───────────────────── QR 解码裁剪 ─────────────────────
+  preprocessing: [grayscale]
 qr_decode_crop:
-  rect: [0.15, 0.15, 0.8, 0.85]
-  scale: 3
+  rect: [0.42916666666666664, 0.432421875, 0.59375, 0.6546440972222223]
+  scale: 4
   desc: 房主屏幕中央 QR 码解码裁剪区（cv2.QRCodeDetector）
   used_in: single_runner.py:phase_team_create
+  preprocessing: [grayscale]
+map_panel_left_tabs:
+  rect: [0.019807942708333335, 0.5027777777777778, 0.20939127604166666, 0.8027777777777778]
+  scale: 3
+  desc: P4 选地图 - 左侧栏模式 tab (团队竞技 / 海岛 / 跑跑)
+  used_in: single_runner.py:phase_map_setup
+  preprocessing: [grayscale]
+map_panel_list_center:
+  rect: [0.5010416666666667, 0.0787181712962963, 0.99375, 0.5564959490740741]
+  scale: 1
+  desc: P4 选地图 - 中间地图列表 (狙击/经典/军备等模糊匹配)
+  used_in: single_runner.py:phase_map_setup
+  preprocessing: [clahe, invert]
+map_panel_btn_fill:
+  rect: [0.6666829427083333, 0.017592592592592594, 0.7718912760416666, 0.2064814814814815]
+  scale: 3
+  desc: P4 选地图 - 右上角补位按钮 (检查勾选状态用)
+  used_in: single_runner.py:phase_map_setup
+  preprocessing: [clahe, grayscale]
+map_panel_btn_confirm:
+  rect: [0.78, 0.7, 1.0, 1.0]
+  scale: 2
+  desc: P4 选地图 - 右下角确定按钮
+  used_in: single_runner.py:phase_map_setup
+map_panel_fill_checkbox:
+  rect: [0.6635416666666667, 0.025, 0.690625, 0.06574074074074074]
+  scale: 2
+  desc: P4 补位勾选框 (颜色检测专用 ROI, 脱离 OCR)
+  used_in: single_runner.py:phase_map_setup
+  preprocessing: []
+team_ready_btn:
+  rect: [0.0, 0.0, 0.25, 0.2]
+  scale: 2
+  desc: 队员加入队伍后左上角"取消准备"按钮区 (P3b-2-verify, 检测加入成功)
+  used_in: single_runner.py:phase_team_join
+  preprocessing: []
+team_slot_1_nickname:
+  rect: [0.15, 0.7, 0.3, 0.85]
+  scale: 2
+  desc: P5 slot1 昵称栏 字数变化检测 占位待拖
+  used_in: phases/p5_wait_players.py
+team_slot_2_nickname:
+  rect: [0.3, 0.7, 0.45, 0.85]
+  scale: 2
+  desc: P5 slot2 昵称栏 占位待拖
+  used_in: phases/p5_wait_players.py
+team_slot_3_nickname:
+  rect: [0.45, 0.7, 0.6, 0.85]
+  scale: 2
+  desc: P5 slot3 昵称栏 占位待拖
+  used_in: phases/p5_wait_players.py
+team_slot_4_nickname:
+  rect: [0.6, 0.7, 0.75, 0.85]
+  scale: 2
+  desc: P5 slot4 昵称栏 蓝框区域 真人通常先填这 占位待拖
+  used_in: phases/p5_wait_players.py
+player_card_id:
+  rect: [0.45, 0.25, 0.75, 0.35]
+  scale: 3
+  desc: P5 玩家卡片编号区 10 位数字 核心 ROI 占位待拖
+  used_in: phases/p5_wait_players.py
+player_card_more_btn:
+  rect: [0.85, 0.85, 1.0, 1.0]
+  scale: 2
+  desc: P5 卡片底部 更多 按钮 踢人入口 占位待拖
+  used_in: phases/p5_wait_players.py
+kick_menu_kick_btn:
+  rect: [0.5, 0.45, 0.75, 0.55]
+  scale: 2
+  desc: P5 更多 弹出菜单的 移出队伍 按钮 占位待拖
+  used_in: phases/p5_wait_players.py
