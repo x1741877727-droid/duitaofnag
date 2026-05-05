@@ -61,6 +61,11 @@ logger = logging.getLogger(__name__)
 # 模板名 (用户用 templates 调试页采集 + 保存到 fixtures/templates/)
 SLOT_BTN_TEMPLATES = ["team_slot_btn_collapse", "team_slot_btn_exit"]
 
+# YOLO 类别名 (训练时类别名要跟这俩一致, 用 YoloLabeler 标注时选这俩 label).
+# 跟模板名一致, 避免混淆.
+SLOT_BTN_YOLO_CLASSES = {"team_slot_btn_collapse", "team_slot_btn_exit"}
+YOLO_CONF_THRESHOLD = 0.5  # YOLO conf 阈值 (训练后实测调)
+
 # ROI 名 (用户用 OCR 调试页拖 + 保存到 config/roi.yaml)
 ROI_LOBBY_AREA = "team_lobby_area"
 ROI_INFO_BTN = "player_card_info_btn"
@@ -80,8 +85,8 @@ TAP_KICK_WAIT_MS = 800           # tap 移出队伍后等关闭
 EXPECTED_ID_LEN = 10
 ID_PATTERN = re.compile(r"\d{10}")
 
-# 模板匹配
-TEMPLATE_THRESHOLD = 0.7
+# 模板匹配 (YOLO 模型未训练时的 fallback)
+TEMPLATE_THRESHOLD = 0.6         # 0.6 兼顾召回 + 误命中, 低于 ScreenMatcher 默认 0.75
 NMS_DISTANCE_PX = 30             # 同一模板多命中去重距离
 NEW_POSITION_MIN_DIST_PX = 50    # 新位置距 baseline 任何位置最小距离, 才算"新"
 BASELINE_SAMPLES = 3             # baseline 取多帧
@@ -291,13 +296,77 @@ class P5WaitPlayersHandler(PhaseHandler):
                 await asyncio.sleep(BASELINE_INTERVAL_S)
         return best if best else None
 
+    async def _yolo_detect_slot_buttons(self, ctx: RunContext,
+                                         shot) -> Optional[list[tuple[int, int]]]:
+        """YOLO 推理找 slot 按钮. 模型未训练 / 不含目标类别 → 返 None (调用方走模板兜底).
+
+        过滤规则:
+          - cls.name ∈ SLOT_BTN_YOLO_CLASSES
+          - conf ≥ YOLO_CONF_THRESHOLD
+          - 中心点在 team_lobby_area ROI 内 (如果 ROI 配了; 没配就不限)
+        """
+        runner = ctx.runner
+        yolo = getattr(runner, "yolo_dismisser", None)
+        if yolo is None or not yolo.is_available():
+            return None  # 模型没加载, fallback 模板
+
+        try:
+            dets = await asyncio.to_thread(yolo.detect, shot)
+        except Exception as e:
+            logger.warning(f"[P5] YOLO detect 失败: {e}, fallback 模板")
+            return None
+
+        # 过滤目标类别 + conf
+        slot_dets = [d for d in dets
+                     if d.name in SLOT_BTN_YOLO_CLASSES and d.conf >= YOLO_CONF_THRESHOLD]
+        if not slot_dets:
+            # 模型加载了但本帧没识别到任何 slot_btn (可能模型还没学这俩类别) → 走模板兜底
+            # 注意: 真的"无队员"也会 0 命中, 但 baseline 阶段 P3a/P3b 之后至少 1 个 slot
+            # 总会被识别. 持续 0 命中说明 YOLO 模型没训这俩类别 → 应当 fallback.
+            logger.debug(f"[P5] YOLO 0 slot_btn 命中 (模型可能没训这俩类别), fallback 模板")
+            return None
+
+        # 用 ROI 限制 (如果配了 team_lobby_area)
+        from ..roi_config import get as _roi_get, all_names as _all_roi
+        bx1 = by1 = 0
+        bx2 = shot.shape[1]
+        by2 = shot.shape[0]
+        if ROI_LOBBY_AREA in set(_all_roi()):
+            try:
+                x1, y1, x2, y2, _ = _roi_get(ROI_LOBBY_AREA)
+                h, w = shot.shape[:2]
+                bx1 = int(w * x1); by1 = int(h * y1)
+                bx2 = int(w * x2); by2 = int(h * y2)
+            except Exception:
+                pass
+
+        positions: list[tuple[int, int]] = []
+        for d in slot_dets:
+            if bx1 <= d.cx <= bx2 and by1 <= d.cy <= by2:
+                positions.append((d.cx, d.cy))
+
+        # 去重 (NMS)
+        positions = _dedup_positions(positions, NMS_DISTANCE_PX)
+        logger.info(f"[P5] YOLO 命中 {len(positions)} 个 slot_btn 位置: {positions}")
+        return positions
+
     async def _match_slot_buttons(self, ctx: RunContext) -> Optional[list[tuple[int, int]]]:
-        """模板匹配 slot 按钮在 team_lobby_area 内, 返回去重后位置 list."""
+        """找 team_lobby_area 内所有 slot 按钮位置 (去重后).
+
+        优先级 1: YOLO 推理 (训练后准确率最高)
+        优先级 2: 模板匹配 (YOLO 未训练 / 不可用时兜底, threshold 0.6)
+        """
         runner = ctx.runner
         shot = await runner.adb.screenshot()
         if shot is None:
             return None
 
+        # ─── 优先 YOLO ───
+        yolo_hits = await self._yolo_detect_slot_buttons(ctx, shot)
+        if yolo_hits is not None:
+            return yolo_hits
+
+        # ─── 兜底: 模板匹配 ───
         from ..roi_config import get as _roi_get
         try:
             x1, y1, x2, y2, _ = _roi_get(ROI_LOBBY_AREA)
