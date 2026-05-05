@@ -8,7 +8,7 @@ YOLO 训练脚本 — Mac 一键训 + 导出 ONNX + 上传回 Windows
     python tools/train_yolo.py --epochs 100 --imgsz 640 --batch 16 --no-upload
 
 工作流程:
-    1. 从 http://192.168.0.102:8901/api/labeler/export.zip 下载训练集
+    1. 从 http://192.168.0.102:8900/api/labeler/export.zip 下载训练集
     2. 解压到 /tmp/yolo_train_<ts>/
     3. 80/20 划分 train / val
     4. 写 data.yaml
@@ -30,7 +30,12 @@ import time
 import zipfile
 from pathlib import Path
 
-DEBUG_SERVER = os.environ.get("GAMEBOT_DEBUG_SERVER", "http://192.168.0.102:8901")
+# 主 backend (8900) 而不是 debug_server (8901):
+# 8901 上的 labeler 路由是早期遗留版本 (data 路径独立, classes.txt 卡在 2 类),
+# 用户在前端 :8900/ui 标的全部数据 (包括 dialog/lobby/P5 类别) 都在 8900 这边.
+# 历史教训 (2026-05-05): 之前默认 8901 导致训出 nc=2 模型, 覆盖 latest.onnx 后
+# 老类别 (close_x/action_btn/dialog/lobby) 全废. 改默认到 8900.
+DEBUG_SERVER = os.environ.get("GAMEBOT_DEBUG_SERVER", "http://192.168.0.102:8900")
 
 
 def download_dataset(out_dir: Path) -> dict:
@@ -86,7 +91,31 @@ def split_train_val(data_dir: Path, val_ratio: float = 0.2, seed: int = 42) -> t
 
 
 def write_data_yaml(data_dir: Path, classes: list[str]):
-    """写 ultralytics 要的 data.yaml"""
+    """写 ultralytics 要的 data.yaml + sanity check (防 nc 跟 label cid 不匹配)."""
+    # Sanity check: 扫所有 label .txt, 看实际出现的 cid 范围
+    from collections import Counter
+    cid_count = Counter()
+    for split in ("train", "val"):
+        lbl_split = data_dir / "labels" / split
+        if not lbl_split.is_dir():
+            continue
+        for f in lbl_split.glob("*.txt"):
+            for line in f.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split()
+                if parts and parts[0].isdigit():
+                    cid_count[int(parts[0])] += 1
+    if cid_count:
+        max_cid = max(cid_count.keys())
+        if max_cid >= len(classes):
+            raise ValueError(
+                f"Sanity check 失败: label 文件里出现 cid={max_cid} 但 classes 只有"
+                f" {len(classes)} 个 ({classes}). 数据集 / classes.txt 不一致, 中止训练."
+            )
+        print(f"     label cid 分布: {dict(sorted(cid_count.items()))}, max_cid={max_cid}")
+        print(f"     classes 长度: {len(classes)}, names: {classes}")
+    else:
+        print(f"     [警告] 找不到任何 label box, 训练肯定挂")
+
     yaml_path = data_dir / "data.yaml"
     lines = [
         f"path: {data_dir.absolute()}",
@@ -98,7 +127,7 @@ def write_data_yaml(data_dir: Path, classes: list[str]):
     for i, name in enumerate(classes):
         lines.append(f"  {i}: {name}")
     yaml_path.write_text("\n".join(lines) + "\n")
-    print(f"[3/6] data.yaml -> {yaml_path}")
+    print(f"[3/6] data.yaml -> {yaml_path} (nc={len(classes)})")
     return yaml_path
 
 
