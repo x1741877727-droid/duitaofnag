@@ -43,6 +43,7 @@ class FsmState(Enum):
     P3A_TEAM_CREATE = auto()      # leader only
     P3B_TEAM_JOIN = auto()        # follower only
     P4_MAP_SETUP = auto()         # leader only, after P3A
+    P5_WAIT_PLAYERS = auto()      # 等真人入队 (测试页可单独跑; 主 loop _TRANSITIONS 暂不接, 走 API 推 expected_id 后再开)
     DONE = auto()
     ERROR = auto()
 

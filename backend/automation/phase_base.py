@@ -112,6 +112,11 @@ class RunContext:
     role: Literal["leader", "follower", "unknown"] = "unknown"
     game_scheme_url: Optional[str] = None  # P3a 写, P3b 读
 
+    # P5 owned (等待玩家阶段, 测试页 / 后续主 loop API 注入)
+    expected_id: Optional[str] = None              # 10 位 player ID, P5 入口前由调用方注入
+    team_slot_baseline: list = field(default_factory=list)  # P5 入口时 4 slot OCR 字数 [c1,c2,c3,c4]
+    kicked_ids: set = field(default_factory=set)   # 已踢出的捣乱者 ID, 防重复 tap 同一人
+
     # P2 owned 会话状态 (每 phase enter 重置)
     blacklist_coords: list = field(default_factory=list)        # [(x, y)]
     pending_memory_writes: list = field(default_factory=list)   # [(frame, (x,y), label)]

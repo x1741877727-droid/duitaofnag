@@ -43,14 +43,16 @@ _HANDLER_MAP = {
     "P3a": ("P3aTeamCreateHandler", "队长创建"),
     "P3b": ("P3bTeamJoinHandler", "队员加入"),
     "P4": ("P4MapSetupHandler", "选地图开打"),
+    "P5": ("P5WaitPlayersHandler", "等待玩家"),
 }
 
 
 class TestPhaseReq(BaseModel):
     instance: int
-    phase: str               # P0 / P1 / P2 / P3a / P3b / P4
+    phase: str               # P0 / P1 / P2 / P3a / P3b / P4 / P5
     role: str = "captain"    # captain / member (P3a 用 captain, P3b 用 member)
     scheme: Optional[str] = None  # P3b 用: 队长 P3a 跑完吐出来的 scheme URL, 队员加入用
+    expected_id: Optional[str] = None  # P5 用: 10 位数字玩家编号 (强校验, 见 _execute_test_phase)
 
 
 @router.get("/api/runner/phases")
@@ -149,12 +151,30 @@ async def _execute_test_phase(req: TestPhaseReq) -> dict:
     handler = handler_cls()
     CANCEL_FLAG["v"] = False
 
+    # P5 强校验: expected_id 必须 10 位数字
+    if phase == "P5":
+        eid = (req.expected_id or "").strip()
+        if not (len(eid) == 10 and eid.isdigit()):
+            return {
+                "ok": False, "phase": phase,
+                "error": f"P5 必须提供 expected_id (10 位数字), 收到 {req.expected_id!r}",
+            }
+
     if req.scheme:
         try:
             ctx = runner._build_v3_ctx()
             ctx.game_scheme_url = req.scheme
         except Exception as e:
             logger.debug(f"[test_phase] 注入 scheme 失败: {e}")
+
+    # P5 注入 expected_id 到 ctx (校验过的)
+    if phase == "P5" and req.expected_id:
+        try:
+            ctx = runner._build_v3_ctx()
+            ctx.expected_id = req.expected_id.strip()
+        except Exception as e:
+            logger.warning(f"[test_phase] 注入 expected_id 失败: {e}")
+            return {"ok": False, "phase": phase, "error": f"注入 expected_id 失败: {e}"}
 
     t0 = time.perf_counter()
     error: Optional[str] = None
