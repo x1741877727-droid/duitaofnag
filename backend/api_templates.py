@@ -674,6 +674,10 @@ async def template_save_meta(req: SaveMatchMetaReq):
         if bad:
             raise HTTPException(400, f"未知预处理: {bad}, 合法: {VALID_PREPROC}")
     _write_match_meta(name, preprocessing=pp, threshold=req.threshold)
+    # 清 list cache: yaml 写在 templates_meta/, list cache key 只看 templates/
+    # 不主动清 → list API 永远返旧值 → 前端 dirty 永不消除 (2026-05-05 修)
+    global _LIST_CACHE
+    _LIST_CACHE = None
     # 让生产 matcher 重载 (下次 match_one 用新配置)
     _reload_test_matcher()
     try:
