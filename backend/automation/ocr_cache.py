@@ -151,6 +151,38 @@ def cached_full(fn):
     return wrap
 
 
+def lookup_full(screenshot: np.ndarray):
+    """全屏 OCR cache lookup. 给 async 路径用 (sync 路径走 @cached_full 装饰器).
+    返回 (result, fp, now) 三元组:
+      - cache hit  → (result, fp, now)  调用方用 result
+      - cache miss → (None, fp, now)    调用方拿 fp/now 跑 OCR 后 store_full
+      - 不可缓存   → (None, None, None) 调用方跳过 cache
+    保持与 cached_full 完全相同的 key/phash/TTL 语义.
+    """
+    global _HITS
+    if _DISABLED or screenshot is None or screenshot.size == 0:
+        return (None, None, None)
+    fp = _fingerprint_phash(screenshot)
+    now = time.time()
+    hit = _lookup("__full__", fp, now)
+    if hit is not None:
+        result, ts = hit
+        _HITS += 1
+        metrics.record("ocr_full_cache_hit",
+                       age_ms=round((now - ts) * 1000, 1))
+        return (result, fp, now)
+    return (None, fp, now)
+
+
+def store_full(fp: int, now: float, result) -> None:
+    """配合 lookup_full 写回 cache. fp/now 必须来自同一次 lookup_full 返回值."""
+    global _MISSES
+    if _DISABLED or fp is None:
+        return
+    _store("__full__", fp, now, result)
+    _MISSES += 1
+
+
 def stats() -> dict:
     """命中统计（暴露给 /api/health 用）"""
     total = _HITS + _MISSES

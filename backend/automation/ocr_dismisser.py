@@ -261,22 +261,45 @@ class OcrDismisser:
             return hits
 
     async def _ocr_all_async(self, screenshot: np.ndarray) -> list:
-        """全屏 OCR 的异步版本 — 路由到多进程 pool 让 N 实例真正并发。
+        """全屏 OCR 的异步版本 — 路由到多进程 pool 让 N 实例真正并发.
 
-        Pool 启用 → 跑 worker 进程，主进程不卡（最理想）
-        Pool 失败 → 自动降级到默认 ThreadPool（asyncio loop 仍非阻塞）
+        路径优先级:
+          1. cache hit → 0ms 返回 (与 _ocr_all 共享同一 key 空间)
+          2. OcrPool 启用 → worker 进程并行跑, 主进程不卡 (核心目的)
+          3. fallback → ThreadPool 跑同步 _ocr_all (持 _inference_lock 串行)
+
+        修过的坑:
+          旧版 `if hits_raw:` 把"OCR 真没识别到文字 (空 list)"当成"pool 故障"
+          错误 fallback 到 ThreadPool, 6 实例并发时反而把锁打满. 现在用
+          OcrPool.is_enabled() 状态区分: pool 故障会自动设 _enabled=False,
+          调用前后对比即可判断.
         """
+        # 0. 边界
+        if screenshot is None or screenshot.size == 0:
+            return []
+
+        # 1. cache lookup (与 sync 路径共享 key 空间)
+        from .ocr_cache import lookup_full, store_full
+        cached, fp, now = lookup_full(screenshot)
+        if cached is not None:
+            return cached
+
+        # 2. pool 路径 (主路: N 实例真并发)
         if OcrPool.is_enabled() and OcrPool._executor is not None:
             with metrics.timed("ocr_full_pool") as tags:
                 hits_raw = await OcrPool.ocr_async(screenshot)
-                if hits_raw:  # pool 正常返回
-                    tags["n_texts"] = len(hits_raw)
-                    return [
+                if OcrPool.is_enabled():
+                    # pool 正常返回 (空 list 也算正常 — OCR 真没识别到)
+                    result = [
                         self.TextHit(text=h.text, cx=h.cx, cy=h.cy)
                         for h in hits_raw
                     ]
-                # pool 返回空（已自动禁用） → fall through 到下面 ThreadPool
-        # fallback：默认 ThreadPool 跑同步 _ocr_all（不阻塞 loop）
+                    tags["n_texts"] = len(result)
+                    store_full(fp, now, result)
+                    return result
+                # pool 刚刚故障被 disable → 落 fallback
+
+        # 3. fallback: ThreadPool 跑同步 _ocr_all (自带 cache)
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._ocr_all, screenshot)
 
