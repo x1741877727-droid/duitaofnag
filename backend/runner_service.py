@@ -847,7 +847,10 @@ class MultiRunnerService:
             new_h = int(shot.shape[0] * scale)
             shot = cv2.resize(shot, (max_width, new_h), interpolation=cv2.INTER_AREA)
 
-        _, buf = cv2.imencode(".jpg", shot, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        # 缩略图 (UI 用) 走 q=50 省带宽; 全尺寸 (训练数据采集 / YOLO 测试) q=90
+        # Why: q=50 JPEG 块状伪影会污染 training data, slot collapse btn 等小特征学不稳
+        quality = 50 if max_width > 0 else 90
+        _, buf = cv2.imencode(".jpg", shot, [cv2.IMWRITE_JPEG_QUALITY, quality])
         jpg = buf.tobytes()
 
         self._screenshot_cache[cache_key] = (time.time(), jpg)
