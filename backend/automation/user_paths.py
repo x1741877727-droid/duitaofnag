@@ -61,6 +61,13 @@ def user_yolo_dir() -> Path:
     return p
 
 
+def user_state_dir() -> Path:
+    """Stage 2 持久化状态目录 (instance_state / squad_state) — rebuild 不动."""
+    p = user_data_dir() / "state"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 # 兼容别名
 user_yolo_root = user_yolo_dir
 

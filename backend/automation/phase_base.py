@@ -154,6 +154,11 @@ class RunContext:
     # 决策记录 (RunnerFSM._loop_phase 每轮 new_decision, finalize 时清; phase 中可 add_tier)
     current_decision: Optional[Any] = None
 
+    # Stage 2 持久化状态 (PhaseHandler.enter 自动 load + 挂这里, exit 自动 save).
+    # phase 业务可直接改 ctx.persistent_state.<field> + ctx.persistent_state.save_atomic()
+    # 在关键事件触发时立即落盘 (事件驱动, 不靠 timer).
+    persistent_state: Optional[Any] = None
+
     def reset_phase_state(self) -> None:
         """每 PhaseHandler.enter() 必调. 清 P2/计时/帧缓存, 跨 phase 数据不动."""
         self.blacklist_coords.clear()
@@ -206,8 +211,31 @@ class PhaseHandler(ABC):
     round_interval_s: float = 0.5          # 每帧间隔 (RETRY 时)
 
     async def enter(self, ctx: RunContext) -> None:
-        """进入 phase. 默认重置 phase-owned 状态."""
+        """进入 phase. 默认重置 phase-owned 状态 + load 持久化状态.
+
+        Stage 2 钩子: 自动 load InstanceState (闪退恢复用), 挂 ctx.persistent_state.
+        子类可以覆盖 enter, 但要 super().enter(ctx) 让 ctx.persistent_state 就位.
+        """
         ctx.reset_phase_state()
+        # Stage 2: load 持久化状态, 挂到 ctx (子类 phase 写自己的字段)
+        try:
+            from .instance_state import InstanceState
+            state = InstanceState.load(ctx.instance_idx)
+            if state is None:
+                state = InstanceState.fresh(ctx.instance_idx)
+            # 写当前 phase 信息
+            state.phase = self.name
+            import time as _time
+            state.phase_started_at = _time.time()
+            state.phase_round = 0
+            # role / squad_id 跨 phase 沿用 (phase 自己写覆盖)
+            ctx.persistent_state = state
+            state.save_atomic()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(
+                f"[{self.name}] persistent_state init err: {e}")
+            ctx.persistent_state = None
 
     @abstractmethod
     async def handle_frame(self, ctx: RunContext) -> PhaseStep:
@@ -218,8 +246,19 @@ class PhaseHandler(ABC):
         """
 
     async def exit(self, ctx: RunContext, result: PhaseResult) -> None:
-        """退出 phase 时调. 可在此 commit 缓冲 (如 P2 大厅时 commit pending_memory)."""
-        pass
+        """退出 phase 时调. 可在此 commit 缓冲 (如 P2 大厅时 commit pending_memory).
+
+        Stage 2 钩子: 自动 save 持久化状态 (最终值落盘, 闪退恢复读这个).
+        """
+        # Stage 2: 持久化最终状态
+        state = getattr(ctx, "persistent_state", None)
+        if state is not None:
+            try:
+                state.save_atomic()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).debug(
+                    f"[{self.name}] persistent_state save_atomic err: {e}")
 
     async def on_failure(self, ctx: RunContext, exc: Exception) -> PhaseResult:
         """handle_frame 抛异常时调. 默认 → FAIL."""

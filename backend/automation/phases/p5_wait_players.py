@@ -137,6 +137,17 @@ class P5WaitPlayersHandler(PhaseHandler):
     max_rounds = 1                 # handler 一次性跑完整轮询循环
     round_interval_s = 1.0
 
+    async def exit(self, ctx: RunContext, result: PhaseResult) -> None:
+        """P5 退出 (DONE/FAIL/取消) → 清 known_slot_ids, 让下次 P5 进入是 fresh start.
+        闪退场景: exit 不会被调 → known_slot_ids 残留 → 下次 enter 检测到 = resume.
+        """
+        state = getattr(ctx, "persistent_state", None)
+        if state is not None:
+            state.known_slot_ids = []
+            state.kicked_ids = []
+            # 不清 expected_id (跨 phase 沿用) / role / squad_id
+        await super().exit(ctx, result)  # 触发 base 的 save_atomic
+
     async def handle_frame(self, ctx: RunContext) -> PhaseStep:
         runner = ctx.runner
         if runner is None:
@@ -171,6 +182,11 @@ class P5WaitPlayersHandler(PhaseHandler):
         record_signal_tier(decision, name="参数校验", hit=True, tier_idx=2,
                            note=f"expected_id={eid}")
 
+        # ─── Stage 2: 持久化 expected_id (闪退恢复后能续这个目标) ───
+        if ctx.persistent_state is not None:
+            ctx.persistent_state.expected_id = eid
+            ctx.persistent_state.save_atomic()
+
         # ─── 必需 ROI / 模板检查 (启动前防卡死) ───
         missing = self._check_required_resources(runner)
         if missing:
@@ -188,14 +204,36 @@ class P5WaitPlayersHandler(PhaseHandler):
             return PhaseStep(PhaseResult.FAIL,
                              note="baseline 模板 0 命中 (检查模板采集 + ROI 拖框)",
                              outcome_hint="baseline_empty")
-        ctx.team_slot_baseline = list(baseline)  # 复用现有字段存位置 list
-        logger.info(f"[P5 inst{ctx.instance_idx}] baseline {len(baseline)} 个 slot 位置: {baseline}")
-        # 拿 baseline 那帧的截图给标注图用 (主决策的 input_image 已是当时帧)
+        # ─── Stage 2: 检测是否 resume (上次 P5 没干净退出, known_slot_ids 还在) ───
         baseline_shot = ctx.current_shot
-        record_signal_tier(decision, name="baseline", hit=True, tier_idx=3,
-                           note=f"baseline {len(baseline)} 位置: {baseline}",
-                           yolo_dets=baseline_yolo_dets,
-                           screenshot=baseline_shot)
+        is_resume = (ctx.persistent_state is not None
+                     and bool(ctx.persistent_state.known_slot_ids))
+        if is_resume:
+            # RESUME: 加载历史 known_slot_ids 当 baseline, 当前帧多出来的 cx = 新真人
+            resume_known = [(k.cx, k.cy)
+                            for k in ctx.persistent_state.known_slot_ids]
+            ctx.team_slot_baseline = resume_known
+            baseline = resume_known
+            logger.info(
+                f"[P5 inst{ctx.instance_idx}] RESUME: 加载 {len(resume_known)} 已知 slot, "
+                f"当前帧 {len(baseline_yolo_dets)} dets")
+            record_signal_tier(
+                decision, name="P5 resume", hit=True, tier_idx=3,
+                note=f"resume: 加载 {len(resume_known)} 已知 slot (来自上次未干净退出的 state)",
+                yolo_dets=baseline_yolo_dets,
+                screenshot=baseline_shot)
+        else:
+            # FRESH: 用当前帧 baseline + 写盘
+            ctx.team_slot_baseline = list(baseline)
+            logger.info(
+                f"[P5 inst{ctx.instance_idx}] baseline {len(baseline)} 个 slot 位置: {baseline}")
+            record_signal_tier(decision, name="baseline", hit=True, tier_idx=3,
+                               note=f"baseline {len(baseline)} 位置: {baseline}",
+                               yolo_dets=baseline_yolo_dets,
+                               screenshot=baseline_shot)
+            if ctx.persistent_state is not None:
+                ctx.persistent_state.add_baseline_slots(baseline)
+                ctx.persistent_state.save_atomic()
 
         # ─── Polling Loop (自适应间隔: idle / active) ───
         start_ts = time.perf_counter()
@@ -382,6 +420,12 @@ class P5WaitPlayersHandler(PhaseHandler):
                 confirm_streak.clear()
                 continue
 
+            # ─── Stage 2: verify 成功记录 known_slot_ids (无论是否目标) ───
+            # got_id is None 不会到这里 (已 continue), 这里 got_id 一定是 10 位数字
+            if ctx.persistent_state is not None:
+                ctx.persistent_state.record_verified_slot(lobby_cx, lobby_cy, got_id)
+                ctx.persistent_state.save_atomic()
+
             if got_id == eid:
                 record_signal_tier(decision, name=f"Verify·R{loop_round}", hit=True, tier_idx=4,
                                    note=f"lobby=({lobby_cx},{lobby_cy}) ID={got_id} ✓ 匹配 expected={eid}")
@@ -393,6 +437,11 @@ class P5WaitPlayersHandler(PhaseHandler):
             logger.warning(f"[P5 inst{ctx.instance_idx}] R{loop_round} lobby=({lobby_cx},{lobby_cy}) "
                            f"ID={got_id} ≠ expected={eid}, 踢出")
             ctx.kicked_ids.add(got_id)
+            # Stage 2: 持久化 kicked_id (闪退恢复后避免重复处理同一人)
+            if ctx.persistent_state is not None:
+                ctx.persistent_state.record_kick(got_id)
+                ctx.persistent_state.remove_slot_near(lobby_cx, lobby_cy)
+                ctx.persistent_state.save_atomic()
             kicked = await self._kick_player(ctx, tap_x, tap_y,
                                               loop_round=loop_round)
             record_signal_tier(decision, name=f"Kick·R{loop_round}", hit=kicked, tier_idx=5,
