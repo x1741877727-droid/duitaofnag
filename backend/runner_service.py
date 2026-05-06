@@ -381,7 +381,20 @@ class MultiRunnerService:
         group = inst.group
         phase_retries = 0       # 当前阶段重试计数
         game_restarts = 0       # 游戏重启计数
-        current_phase = "accelerator"  # 当前要执行的阶段
+
+        # Stage 3: 检测上次有没有持久化状态 (backend 重启 / 闪退 → 此时 state.json 残留),
+        # 决定起跑 phase. 没 state → fresh "accelerator"; 有 state → 按规则 resume.
+        try:
+            from .automation.instance_state import InstanceState
+            from .automation.recovery import decide_initial_phase
+            _saved_state = InstanceState.load(idx)
+            current_phase = decide_initial_phase(_saved_state)
+            if _saved_state is not None and _saved_state.phase:
+                logger.info(f"[实例{idx}] Stage 3 resume: state.phase={_saved_state.phase} "
+                            f"→ 起跑 phase='{current_phase}'")
+        except Exception as e:
+            logger.warning(f"[实例{idx}] decide_initial_phase 失败 (走 fresh): {e}")
+            current_phase = "accelerator"
 
         # ── v2 横切 Watchdog: per-instance 后台任务 ──
         # 只观察 + 写状态, 不主动打断 phase (打断逻辑留到第 4 刀做)
