@@ -58,13 +58,19 @@ logger = logging.getLogger(__name__)
 
 # ─────────── 配置常量 ───────────
 
-# 模板名 (用户用 templates 调试页采集 + 保存到 fixtures/templates/)
+# 模板名 (旧路径模板, 仅 fallback 保留 - 主路径已切到 YOLO)
 SLOT_BTN_TEMPLATES = ["team_slot_btn_collapse", "team_slot_btn_exit"]
 
-# YOLO 类别名 (训练时类别名要跟这俩一致, 用 YoloLabeler 标注时选这俩 label).
-# 跟模板名一致, 避免混淆.
-SLOT_BTN_YOLO_CLASSES = {"team_slot_btn_collapse", "team_slot_btn_exit"}
-YOLO_CONF_THRESHOLD = 0.5  # YOLO conf 阈值 (训练后实测调)
+# YOLO 类别配置 (v3 双信号架构):
+#   lobby:          slot 占用真相源 (score 0.85+ 极稳, 计数 / baseline / 新位置)
+#   slot_nameplate: tap target 主信号 (准但偶漏, 配 fallback 保险)
+#   collapse/exit:  tap target fallback 来源 (在 nameplate 漏识时推算位置)
+LOBBY_YOLO_CLASS = "lobby"
+NAMEPLATE_YOLO_CLASS = "slot_nameplate"
+BTN_YOLO_CLASSES = {"team_slot_btn_collapse", "team_slot_btn_exit"}
+LOBBY_CONF_THRESHOLD = 0.7       # lobby 普遍 0.85-0.95, 0.7 留余量
+NAMEPLATE_CONF_THRESHOLD = 0.4   # nameplate 0.5-0.8, 0.4 容忍边缘 case
+BTN_CONF_THRESHOLD = 0.3         # btn 仅作 fallback, 给低阈宽容
 
 # ROI 名 (用户用 OCR 调试页拖 + 保存到 config/roi.yaml)
 ROI_LOBBY_AREA = "team_lobby_area"
@@ -74,24 +80,30 @@ ROI_CLOSE_BTN = "player_card_close_btn"
 ROI_KICK_AREA = "player_card_kick_area"
 ROI_MORE_BTN = "player_card_more_btn"
 
-POLL_INTERVAL_S = 1.5
+# 自适应轮询: idle 模式省 CPU, active 模式 (有候选) 抢确认
+POLL_INTERVAL_IDLE_S = 1.5       # 默认空闲间隔
+POLL_INTERVAL_ACTIVE_S = 0.5     # 检测到新位置后切到这个抢确认
 TIMEOUT_S = 240.0
-TAP_CARD_WAIT_MS = 800           # tap slot 后等小卡片动画
-TAP_INFO_WAIT_MS = 800           # tap 信息按钮后等详细面板
-TAP_CLOSE_WAIT_MS = 500          # tap 关闭按钮后等回退
-TAP_MORE_WAIT_MS = 500           # tap 更多后等弹菜单
-TAP_KICK_WAIT_MS = 800           # tap 移出队伍后等关闭
+
+# 帧差自适应等待 (替代固定 sleep): 截图后 phash 比对前帧, 连续 N 帧"画面稳定"立即继续
+STABLE_PHASH_DIST = 4            # 汉明距离 < 此值 = "画面稳定"
+STABLE_FRAMES = 2                # 要求连续 N 帧稳定
+STABLE_POLL_MS = 100             # 每 100ms 检测一次
+WAIT_TIMEOUT_CARD_MS = 800       # tap slot 后等卡片动画上限 (实测多 300-500ms 完成)
+WAIT_TIMEOUT_PANEL_MS = 800      # tap info 后等详细面板上限
+WAIT_TIMEOUT_CLOSE_MS = 500      # tap close 后等回退上限
+WAIT_TIMEOUT_MENU_MS = 500       # tap more 后等菜单上限
 
 EXPECTED_ID_LEN = 10
 ID_PATTERN = re.compile(r"\d{10}")
 
-# 模板匹配 (YOLO 模型未训练时的 fallback)
-TEMPLATE_THRESHOLD = 0.6         # 0.6 兼顾召回 + 误命中, 低于 ScreenMatcher 默认 0.75
-NMS_DISTANCE_PX = 30             # 同一模板多命中去重距离
-NEW_POSITION_MIN_DIST_PX = 50    # 新位置距 baseline 任何位置最小距离, 才算"新"
-BASELINE_SAMPLES = 3             # baseline 取多帧
-BASELINE_INTERVAL_S = 0.4
-CONFIRM_FRAMES = 2               # 连续 N 帧出现新位置才触发
+# 模板匹配 (YOLO 不可用时的最终 fallback)
+TEMPLATE_THRESHOLD = 0.6
+NMS_DISTANCE_PX = 30
+NEW_POSITION_MIN_DIST_PX = 50    # 新 lobby cx 距 baseline 最小距离, 才算"新"
+BASELINE_SAMPLES = 2             # 优化: 3→2 帧 (lobby 稳, 单帧已够)
+BASELINE_INTERVAL_S = 0.3        # 优化: 0.4→0.3s
+CONFIRM_FRAMES = 2               # 连续 N 帧确认新位置 (防误触发)
 
 # OCR
 ENTRY_GATE_MAX_ATTEMPTS = 8
@@ -181,10 +193,11 @@ class P5WaitPlayersHandler(PhaseHandler):
         record_signal_tier(decision, name="baseline", hit=True, tier_idx=3,
                            note=f"baseline {len(baseline)} 位置: {baseline}")
 
-        # ─── Polling Loop ───
+        # ─── Polling Loop (自适应间隔: idle / active) ───
         start_ts = time.perf_counter()
         confirm_streak: dict[tuple, int] = {}  # (cx, cy) → 连续命中帧数
         loop_round = 0
+        poll_interval = POLL_INTERVAL_IDLE_S  # 默认空闲间隔, 有候选时切到 active
 
         while True:
             elapsed = time.perf_counter() - start_ts
@@ -195,11 +208,25 @@ class P5WaitPlayersHandler(PhaseHandler):
                                  note=f"等待超时 {TIMEOUT_S}s",
                                  outcome_hint="wait_timeout")
 
-            await asyncio.sleep(POLL_INTERVAL_S)
+            await asyncio.sleep(poll_interval)
             loop_round += 1
-            current = await self._match_slot_buttons(ctx)
-            if current is None:
+
+            # 单次截图 + 单次 YOLO → 同时拿 lobby + nameplate + btn (省 2 次推理)
+            shot = await runner.adb.screenshot()
+            if shot is None:
                 logger.warning(f"[P5 inst{ctx.instance_idx}] R{loop_round} 截图失败, 跳过")
+                continue
+            yolo_result = await self._yolo_detect_all(ctx, shot)
+            if yolo_result is None:
+                # 模型不可用, 走 _match_slot_buttons (含模板兜底)
+                current = await self._match_slot_buttons(ctx)
+                np_dets, btn_dets = [], []
+            else:
+                lobby_dets, np_dets, btn_dets = yolo_result
+                current = _dedup_positions(
+                    [(d.cx, d.cy) for d in lobby_dets], NMS_DISTANCE_PX)
+
+            if current is None:
                 continue
 
             # 队员退队: current 数 < baseline → 更新 baseline 防误触发
@@ -209,6 +236,7 @@ class P5WaitPlayersHandler(PhaseHandler):
                 baseline = current
                 ctx.team_slot_baseline = list(baseline)
                 confirm_streak.clear()
+                poll_interval = POLL_INTERVAL_IDLE_S  # 退队 → 回 idle 模式
                 continue
 
             # 找新位置: 距 baseline 任何位置 > 阈值
@@ -218,7 +246,11 @@ class P5WaitPlayersHandler(PhaseHandler):
             ]
             if not new_positions:
                 confirm_streak.clear()
+                poll_interval = POLL_INTERVAL_IDLE_S  # 没候选 → idle
                 continue
+
+            # 有候选 → 切到 active 模式抢确认
+            poll_interval = POLL_INTERVAL_ACTIVE_S
 
             # 多帧确认
             np_pos = new_positions[0]  # 取第一个 (通常只有一个)
@@ -228,47 +260,53 @@ class P5WaitPlayersHandler(PhaseHandler):
                              f"streak {confirm_streak[np_pos]}/{CONFIRM_FRAMES}")
                 continue
 
-            cx, cy = np_pos
-            logger.info(f"[P5 inst{ctx.instance_idx}] R{loop_round} 真人入队位置 ({cx},{cy})")
+            lobby_cx, lobby_cy = np_pos
+            # 解析 tap target (nameplate 优先 → btn 反推 → lobby 几何兜底)
+            tap_x, tap_y = self._resolve_tap_target(lobby_cx, lobby_cy, np_dets, btn_dets)
+            logger.info(f"[P5 inst{ctx.instance_idx}] R{loop_round} 真人入队 lobby=({lobby_cx},{lobby_cy}) "
+                        f"tap_target=({tap_x},{tap_y})")
 
             # ─── Verify (tap → 信息按钮 → OCR 编号 → 关闭) ───
-            got_id = await self._verify_player_id(ctx, cx, cy)
+            got_id = await self._verify_player_id(ctx, tap_x, tap_y)
             if got_id is None:
                 record_signal_tier(decision, name=f"Verify·R{loop_round}", hit=False, tier_idx=4,
-                                   note=f"({cx},{cy}) OCR 找不到 10 位编号 → 视为干扰")
-                # 把这个位置加 baseline 防反复触发
-                baseline = baseline + [(cx, cy)]
+                                   note=f"lobby=({lobby_cx},{lobby_cy}) OCR 找不到 10 位编号 → 视为干扰")
+                # 把这个 lobby 位置加 baseline 防反复触发
+                baseline = baseline + [(lobby_cx, lobby_cy)]
                 ctx.team_slot_baseline = list(baseline)
                 confirm_streak.clear()
                 continue
 
             if got_id == eid:
                 record_signal_tier(decision, name=f"Verify·R{loop_round}", hit=True, tier_idx=4,
-                                   note=f"({cx},{cy}) ID={got_id} ✓ 匹配 expected={eid}")
+                                   note=f"lobby=({lobby_cx},{lobby_cy}) ID={got_id} ✓ 匹配 expected={eid}")
                 return PhaseStep(PhaseResult.DONE,
-                                 note=f"目标玩家入队 ID={got_id} 位置=({cx},{cy}) 耗时 {elapsed:.1f}s",
+                                 note=f"目标玩家入队 ID={got_id} 位置=({lobby_cx},{lobby_cy}) 耗时 {elapsed:.1f}s",
                                  outcome_hint="match_target")
 
             # ─── Kick (got_id ≠ expected, 视为捣乱者) ───
-            logger.warning(f"[P5 inst{ctx.instance_idx}] R{loop_round} ({cx},{cy}) "
+            logger.warning(f"[P5 inst{ctx.instance_idx}] R{loop_round} lobby=({lobby_cx},{lobby_cy}) "
                            f"ID={got_id} ≠ expected={eid}, 踢出")
             ctx.kicked_ids.add(got_id)
-            kicked = await self._kick_player(ctx, cx, cy)
+            kicked = await self._kick_player(ctx, tap_x, tap_y)
             record_signal_tier(decision, name=f"Kick·R{loop_round}", hit=kicked, tier_idx=5,
-                               note=f"({cx},{cy}) got_id={got_id} expected={eid} kicked={kicked}")
+                               note=f"lobby=({lobby_cx},{lobby_cy}) got_id={got_id} "
+                                    f"expected={eid} kicked={kicked}")
 
             # 重建 baseline (踢成功后队伍少 1 人, baseline 变少)
-            await asyncio.sleep(1.0)
+            # 等队伍 UI 刷新, 用帧差 polling 替代固定 1s sleep
+            await self._wait_for_screen_stable(runner, timeout_ms=1500)
             new_baseline = await self._match_slot_buttons(ctx) or list(baseline)
             baseline = new_baseline
             ctx.team_slot_baseline = list(baseline)
             confirm_streak.clear()
+            poll_interval = POLL_INTERVAL_IDLE_S  # kick 后回 idle 等下一个真人
 
     # ─────────── helpers ───────────
 
     @staticmethod
     def _check_required_resources(runner) -> list[str]:
-        """检查 ROI / 模板都配齐了. 返回缺失列表."""
+        """检查必需资源 (主路径只要 ROI + YOLO 模型, 不再依赖 slot_btn 模板)."""
         missing = []
         try:
             from ..roi_config import all_names as _all_roi
@@ -279,14 +317,14 @@ class P5WaitPlayersHandler(PhaseHandler):
         except Exception as e:
             missing.append(f"ROI 加载异常:{e}")
 
-        avail_tmpl = set(getattr(runner.matcher, "template_names", []) or [])
-        for need in SLOT_BTN_TEMPLATES:
-            if need not in avail_tmpl:
-                missing.append(f"模板:{need}")
+        # YOLO 模型必须可用 (主路径). 不再 fail on slot_btn 模板缺失.
+        yolo = getattr(runner, "yolo_dismisser", None)
+        if yolo is None or not yolo.is_available():
+            missing.append("YOLO:模型未加载")
         return missing
 
     async def _build_baseline(self, ctx: RunContext) -> Optional[list[tuple[int, int]]]:
-        """多帧采样, 取命中数最多的那帧位置. 容忍单帧漏识."""
+        """多帧采样建 baseline (lobby 框中心点 list). 取命中数最多那帧."""
         best: list[tuple[int, int]] = []
         for i in range(BASELINE_SAMPLES):
             current = await self._match_slot_buttons(ctx)
@@ -296,37 +334,55 @@ class P5WaitPlayersHandler(PhaseHandler):
                 await asyncio.sleep(BASELINE_INTERVAL_S)
         return best if best else None
 
-    async def _yolo_detect_slot_buttons(self, ctx: RunContext,
-                                         shot) -> Optional[list[tuple[int, int]]]:
-        """YOLO 推理找 slot 按钮. 模型未训练 / 不含目标类别 → 返 None (调用方走模板兜底).
+    @staticmethod
+    async def _wait_for_screen_stable(runner, timeout_ms: int = 800,
+                                       stable_frames: int = STABLE_FRAMES,
+                                       poll_ms: int = STABLE_POLL_MS) -> bool:
+        """帧差检测画面"稳定下来" (替代固定 sleep).
 
-        过滤规则:
-          - cls.name ∈ SLOT_BTN_YOLO_CLASSES
-          - conf ≥ YOLO_CONF_THRESHOLD
-          - 中心点在 team_lobby_area ROI 内 (如果 ROI 配了; 没配就不限)
+        每 poll_ms 截图 phash 比上一帧, 连续 stable_frames 帧距离 < STABLE_PHASH_DIST
+        即视为画面稳定, 立即返回 True. timeout_ms 上限保底, 超时返回 False.
+
+        典型用法: tap UI 元素后等动画完成, 实测可省 300-500ms (动画通常 300-500ms,
+        固定 sleep 800ms 多余 300-500ms).
+        """
+        from ..adb_lite import phash, phash_distance
+        elapsed_ms = 0
+        last_h: Optional[int] = None
+        consec_stable = 0
+        while elapsed_ms < timeout_ms:
+            shot = await runner.adb.screenshot()
+            if shot is not None:
+                h = phash(shot)
+                if last_h is not None and phash_distance(h, last_h) < STABLE_PHASH_DIST:
+                    consec_stable += 1
+                    if consec_stable >= stable_frames:
+                        return True
+                else:
+                    consec_stable = 0
+                last_h = h
+            await asyncio.sleep(poll_ms / 1000.0)
+            elapsed_ms += poll_ms
+        return False  # 超时降级为 caller 自行处理 (一般没事, 反正最坏退化到 sleep 等价)
+
+    async def _yolo_detect_all(self, ctx: RunContext, shot):
+        """单次 YOLO 推理 → 返回 (lobby_dets, nameplate_dets, btn_dets) 三类过滤后 list.
+
+        各类已按对应 conf 阈值过滤 + ROI 内点过滤 (如 team_lobby_area 配了).
+        模型不可用返回 None (caller 走模板兜底).
         """
         runner = ctx.runner
         yolo = getattr(runner, "yolo_dismisser", None)
         if yolo is None or not yolo.is_available():
-            return None  # 模型没加载, fallback 模板
+            return None
 
         try:
             dets = await asyncio.to_thread(yolo.detect, shot)
         except Exception as e:
-            logger.warning(f"[P5] YOLO detect 失败: {e}, fallback 模板")
+            logger.warning(f"[P5] YOLO detect 失败: {e}")
             return None
 
-        # 过滤目标类别 + conf
-        slot_dets = [d for d in dets
-                     if d.name in SLOT_BTN_YOLO_CLASSES and d.conf >= YOLO_CONF_THRESHOLD]
-        if not slot_dets:
-            # 模型加载了但本帧没识别到任何 slot_btn (可能模型还没学这俩类别) → 走模板兜底
-            # 注意: 真的"无队员"也会 0 命中, 但 baseline 阶段 P3a/P3b 之后至少 1 个 slot
-            # 总会被识别. 持续 0 命中说明 YOLO 模型没训这俩类别 → 应当 fallback.
-            logger.debug(f"[P5] YOLO 0 slot_btn 命中 (模型可能没训这俩类别), fallback 模板")
-            return None
-
-        # 用 ROI 限制 (如果配了 team_lobby_area)
+        # ROI 限制 (如配了 team_lobby_area, 只保留中心点在 ROI 内的)
         from ..roi_config import get as _roi_get, all_names as _all_roi
         bx1 = by1 = 0
         bx2 = shot.shape[1]
@@ -340,14 +396,67 @@ class P5WaitPlayersHandler(PhaseHandler):
             except Exception:
                 pass
 
-        positions: list[tuple[int, int]] = []
-        for d in slot_dets:
-            if bx1 <= d.cx <= bx2 and by1 <= d.cy <= by2:
-                positions.append((d.cx, d.cy))
+        def _in_roi(d) -> bool:
+            return bx1 <= d.cx <= bx2 and by1 <= d.cy <= by2
 
-        # 去重 (NMS)
+        lobby_dets = [d for d in dets
+                      if d.name == LOBBY_YOLO_CLASS and d.conf >= LOBBY_CONF_THRESHOLD
+                      and _in_roi(d)]
+        np_dets = [d for d in dets
+                   if d.name == NAMEPLATE_YOLO_CLASS and d.conf >= NAMEPLATE_CONF_THRESHOLD
+                   and _in_roi(d)]
+        btn_dets = [d for d in dets
+                    if d.name in BTN_YOLO_CLASSES and d.conf >= BTN_CONF_THRESHOLD
+                    and _in_roi(d)]
+        return lobby_dets, np_dets, btn_dets
+
+    @staticmethod
+    def _resolve_tap_target(lobby_cx: int, lobby_cy: int,
+                             nameplate_dets, btn_dets) -> tuple[int, int]:
+        """给定一个 lobby slot 的中心点, 算 tap target (永远不返回 None, 双轨兜底):
+
+        优先级:
+          1. 找 cx 距 lobby < 50 的 nameplate → 用 nameplate (cx, cy) (UI 交互区中心)
+          2. nameplate 漏识 → 找 cx 距 lobby < 50 的 btn → tap (btn.cx - 50, btn.cy)
+             (nameplate 永远在 btn 左侧 ~50px, 反推过去落在昵称文字)
+          3. 都没 → 用 lobby 几何兜底 (cx, cy + h*0.15) (大致落在 nameplate 区域)
+
+        永远不让 nameplate 漏识阻塞业务流.
+        """
+        # 优先级 1: nameplate
+        for d in nameplate_dets:
+            if abs(d.cx - lobby_cx) < 50:
+                return (d.cx, d.cy)
+
+        # 优先级 2: btn 反推
+        for d in btn_dets:
+            if abs(d.cx - lobby_cx) < 50:
+                return (d.cx - 50, d.cy)
+
+        # 优先级 3: lobby 几何兜底 (cx 不变, cy 往下 15% 落在 nameplate 大致区)
+        return (lobby_cx, lobby_cy)  # caller 会传 lobby_cy, 上层可加 offset
+
+    async def _yolo_detect_slot_buttons(self, ctx: RunContext,
+                                         shot) -> Optional[list[tuple[int, int]]]:
+        """[兼容旧 API] 用 lobby 类作为 slot 占用真相源, 返回 lobby 中心点 list.
+
+        v3 双信号: lobby 计数 (稳) → caller 用 cx 区分 baseline / 新位置.
+        Tap target 由 _resolve_tap_target 单独算 (在 verify/kick 入口).
+        """
+        result = await self._yolo_detect_all(ctx, shot)
+        if result is None:
+            return None  # 模型不可用, fallback 模板
+
+        lobby_dets, _, _ = result
+        if not lobby_dets:
+            # 模型可用但本帧没 lobby 命中. 仍 return [] 而不是 None — None 会触发模板 fallback,
+            # 但模板 fallback 现在没意义 (主路径就是 lobby). 直接返回空 list 让上层判定"队伍空".
+            logger.debug(f"[P5] YOLO 0 lobby 命中 (队伍空 / 不在大厅?)")
+            return []
+
+        positions = [(d.cx, d.cy) for d in lobby_dets]
         positions = _dedup_positions(positions, NMS_DISTANCE_PX)
-        logger.info(f"[P5] YOLO 命中 {len(positions)} 个 slot_btn 位置: {positions}")
+        logger.info(f"[P5] YOLO 命中 {len(positions)} 个 lobby slot: {positions}")
         return positions
 
     async def _match_slot_buttons(self, ctx: RunContext) -> Optional[list[tuple[int, int]]]:
@@ -404,20 +513,22 @@ class P5WaitPlayersHandler(PhaseHandler):
     async def _verify_player_id(self, ctx: RunContext, cx: int, cy: int) -> Optional[str]:
         """tap (cx, cy) → 小卡片 → tap 信息按钮 → 详细面板 → OCR 编号 → 关面板.
         返回 10 位 ID (str) 或 None.
+
+        优化: 全部固定 sleep 换成帧差 polling, 实测节省 ~1.2s 单次 verify.
         """
         runner = ctx.runner
-        # tap slot
+        # tap slot, 用帧差等小卡片动画完成 (替代固定 800ms)
         await runner.adb.tap(cx, cy)
-        await asyncio.sleep(TAP_CARD_WAIT_MS / 1000.0)
+        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CARD_MS)
 
-        # tap "信息" 按钮
+        # tap "信息" 按钮, 帧差等详细面板出现 (替代固定 800ms)
         info_xy = await self._roi_center_xy(ctx, ROI_INFO_BTN)
         if info_xy is None:
             return None
         await runner.adb.tap(*info_xy)
-        await asyncio.sleep(TAP_INFO_WAIT_MS / 1000.0)
+        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_PANEL_MS)
 
-        # OCR 编号 (retry)
+        # OCR 编号 (retry, retry 间隔 300ms 等弹出文字渲染稳定)
         ocr = runner.ocr_dismisser
         got_id: Optional[str] = None
         for attempt in range(VERIFY_OCR_RETRY + 1):
@@ -436,26 +547,26 @@ class P5WaitPlayersHandler(PhaseHandler):
             if attempt < VERIFY_OCR_RETRY:
                 await asyncio.sleep(0.3)
 
-        # 关详细面板 (永远不用 back)
+        # 关详细面板 (永远不用 back, 防误退游戏)
         close_xy = await self._roi_center_xy(ctx, ROI_CLOSE_BTN)
         if close_xy is not None:
             await runner.adb.tap(*close_xy)
-            await asyncio.sleep(TAP_CLOSE_WAIT_MS / 1000.0)
         else:
-            # 兜底: tap 屏幕左上角空白处
-            await runner.adb.tap(20, 20)
-            await asyncio.sleep(TAP_CLOSE_WAIT_MS / 1000.0)
+            await runner.adb.tap(20, 20)  # 兜底
+        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CLOSE_MS)
 
         return got_id
 
     async def _kick_player(self, ctx: RunContext, cx: int, cy: int) -> bool:
         """踢人. tap (cx, cy) 重新弹小卡片 → OCR 找 '移出队伍' → 找不到先 tap 更多 → tap 移出.
         返回是否成功执行 tap '移出队伍'.
+
+        优化: 全部固定 sleep 换成帧差 polling.
         """
         runner = ctx.runner
         # tap slot 再次弹小卡片
         await runner.adb.tap(cx, cy)
-        await asyncio.sleep(TAP_CARD_WAIT_MS / 1000.0)
+        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CARD_MS)
 
         kick_xy = await self._find_kick_button(ctx)
         if kick_xy is None:
@@ -466,7 +577,7 @@ class P5WaitPlayersHandler(PhaseHandler):
                 await self._close_card(ctx)
                 return False
             await runner.adb.tap(*more_xy)
-            await asyncio.sleep(TAP_MORE_WAIT_MS / 1000.0)
+            await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_MENU_MS)
             kick_xy = await self._find_kick_button(ctx)
             if kick_xy is None:
                 logger.warning(f"[P5] tap '更多' 后仍没找到 '移出队伍', 放弃 kick")
@@ -474,7 +585,8 @@ class P5WaitPlayersHandler(PhaseHandler):
                 return False
 
         await runner.adb.tap(*kick_xy)
-        await asyncio.sleep(TAP_KICK_WAIT_MS / 1000.0)
+        # tap '移出' 后界面会自动关闭, 帧差等 UI 稳定
+        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CARD_MS)
         return True
 
     async def _find_kick_button(self, ctx: RunContext) -> Optional[tuple[int, int]]:
@@ -499,14 +611,14 @@ class P5WaitPlayersHandler(PhaseHandler):
         return None
 
     async def _close_card(self, ctx: RunContext) -> None:
-        """关任何卡片. 优先 close_btn ROI, 兜底 tap 左上角."""
+        """关任何卡片. 优先 close_btn ROI, 兜底 tap 左上角. 帧差等关闭动画完成."""
         runner = ctx.runner
         close_xy = await self._roi_center_xy(ctx, ROI_CLOSE_BTN)
         if close_xy is not None:
             await runner.adb.tap(*close_xy)
         else:
             await runner.adb.tap(20, 20)
-        await asyncio.sleep(TAP_CLOSE_WAIT_MS / 1000.0)
+        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CLOSE_MS)
 
     @staticmethod
     async def _roi_center_xy(ctx: RunContext, roi_name: str) -> Optional[tuple[int, int]]:
