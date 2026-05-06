@@ -181,7 +181,7 @@ class P5WaitPlayersHandler(PhaseHandler):
                              outcome_hint="resource_missing")
 
         # ─── Baseline (多帧最大命中数) ───
-        baseline = await self._build_baseline(ctx)
+        baseline, baseline_yolo_dets = await self._build_baseline_with_dets(ctx)
         if baseline is None or len(baseline) == 0:
             record_signal_tier(decision, name="baseline", hit=False, tier_idx=3,
                                note="baseline 模板匹配 0 命中")
@@ -190,8 +190,12 @@ class P5WaitPlayersHandler(PhaseHandler):
                              outcome_hint="baseline_empty")
         ctx.team_slot_baseline = list(baseline)  # 复用现有字段存位置 list
         logger.info(f"[P5 inst{ctx.instance_idx}] baseline {len(baseline)} 个 slot 位置: {baseline}")
+        # 拿 baseline 那帧的截图给标注图用 (主决策的 input_image 已是当时帧)
+        baseline_shot = ctx.current_shot
         record_signal_tier(decision, name="baseline", hit=True, tier_idx=3,
-                           note=f"baseline {len(baseline)} 位置: {baseline}")
+                           note=f"baseline {len(baseline)} 位置: {baseline}",
+                           yolo_dets=baseline_yolo_dets,
+                           screenshot=baseline_shot)
 
         # ─── Polling Loop (自适应间隔: idle / active) ───
         start_ts = time.perf_counter()
@@ -199,7 +203,31 @@ class P5WaitPlayersHandler(PhaseHandler):
         loop_round = 0
         poll_interval = POLL_INTERVAL_IDLE_S  # 默认空闲间隔, 有候选时切到 active
 
+        # 取消令牌 (前端"停止测试" → POST /api/runner/cancel → CANCEL_FLAG["v"]=True)
+        # P5 max_rounds=1 不在 _run_v3_phase 的 round loop 里检查, 所以要这里查.
+        try:
+            from ...api_runner_test import CANCEL_FLAG
+        except Exception:
+            CANCEL_FLAG = None
+
+        def _cancelled() -> bool:
+            return CANCEL_FLAG is not None and bool(CANCEL_FLAG.get("v"))
+
+        # 实时决策: 每轮轮询都写一条独立的 decision (跟主决策并列, 用 phash 当 round_idx 区分),
+        # 用户能在档案里实时看到每次检测到了什么 / 是否新位置 / 何时 tap.
+        from ..decision_log import get_recorder
+        from ..adb_lite import phash as _phash
+        from ..popup_dismiss import dismiss_known_popups
+        from ..popup_specs import PopupFatalEscalation
+        recorder = get_recorder()
+
         while True:
+            if _cancelled():
+                record_signal_tier(decision, name="取消", hit=False, tier_idx=4,
+                                   note="收到取消信号, 主动中止 P5")
+                return PhaseStep(PhaseResult.FAIL,
+                                 note="P5 被用户取消",
+                                 outcome_hint="cancelled")
             elapsed = time.perf_counter() - start_ts
             if elapsed >= TIMEOUT_S:
                 record_signal_tier(decision, name="超时", hit=False, tier_idx=4,
@@ -208,7 +236,16 @@ class P5WaitPlayersHandler(PhaseHandler):
                                  note=f"等待超时 {TIMEOUT_S}s",
                                  outcome_hint="wait_timeout")
 
-            await asyncio.sleep(poll_interval)
+            # 分段 sleep, 每 200ms 检查 cancel (避免在长睡眠里卡死)
+            slept = 0.0
+            while slept < poll_interval:
+                if _cancelled():
+                    break
+                chunk = min(0.2, poll_interval - slept)
+                await asyncio.sleep(chunk)
+                slept += chunk
+            if _cancelled():
+                continue  # 顶层 while 会再判断 _cancelled() 然后退出
             loop_round += 1
 
             # 单次截图 + 单次 YOLO → 同时拿 lobby + nameplate + btn (省 2 次推理)
@@ -216,11 +253,40 @@ class P5WaitPlayersHandler(PhaseHandler):
             if shot is None:
                 logger.warning(f"[P5 inst{ctx.instance_idx}] R{loop_round} 截图失败, 跳过")
                 continue
+
+            # ─── Stage 1 弹窗清理 (跨 phase 通用, 优先级最高) ───
+            # YOLO 全类一次推理, 拿全部 dets 给弹窗清理复用 (省一次推理)
+            yolo = getattr(runner, "yolo_dismisser", None)
+            all_dets = []
+            if yolo is not None and yolo.is_available():
+                try:
+                    all_dets = await asyncio.to_thread(yolo.detect, shot) or []
+                except Exception as e:
+                    logger.debug(f"[P5] YOLO detect 失败: {e}")
+                    all_dets = []
+            try:
+                dismissed = await dismiss_known_popups(
+                    ctx, yolo_dets=all_dets, pre_shot=shot,
+                    current_phase="P5",
+                )
+                if dismissed:
+                    logger.info(f"[P5 inst{ctx.instance_idx}] R{loop_round} 弹窗清理: {dismissed}, 跳过本轮 baseline")
+                    continue
+            except PopupFatalEscalation as e:
+                # 致命弹窗 (network 60s/5次 或 account_squeezed 1次)
+                # Stage 1: 直接 FAIL phase, outcome 标 popup_fatal_*
+                # Stage 3 后: 接 recovery 入口 (退游戏 / 重启 / re-login)
+                logger.warning(f"[P5 inst{ctx.instance_idx}] FATAL popup: {e}")
+                return PhaseStep(PhaseResult.FAIL,
+                                 note=f"P5 致命弹窗 {e.spec_name} (触发 {e.count} 次)",
+                                 outcome_hint=f"popup_fatal_{e.spec_name}")
+
+            # 弹窗清理用 all_dets, 业务 filter 走 _yolo_detect_all (按各类阈值过滤)
             yolo_result = await self._yolo_detect_all(ctx, shot)
             if yolo_result is None:
-                # 模型不可用, 走 _match_slot_buttons (含模板兜底)
                 current = await self._match_slot_buttons(ctx)
                 np_dets, btn_dets = [], []
+                lobby_dets = []
             else:
                 lobby_dets, np_dets, btn_dets = yolo_result
                 current = _dedup_positions(
@@ -229,10 +295,27 @@ class P5WaitPlayersHandler(PhaseHandler):
             if current is None:
                 continue
 
+            # ─── 写实时轮询决策 (1 帧 = 1 决策, 立即可见) ───
+            # round_idx 用 1000+loop_round, 跟主决策 (round=1) 区分
+            poll_dec = await asyncio.to_thread(
+                recorder.new_decision, ctx.instance_idx, "P5", 1000 + loop_round)
+            try:
+                ph = _phash(shot)
+                ph_str = f"0x{int(ph):016x}" if ph else ""
+                poll_dec.set_input(shot, ph_str, q=70)
+            except Exception:
+                pass
+
             # 队员退队: current 数 < baseline → 更新 baseline 防误触发
             if len(current) < len(baseline):
                 logger.info(f"[P5 inst{ctx.instance_idx}] R{loop_round} 检测到 slot 减少 "
                             f"{len(baseline)} → {len(current)}, 更新 baseline")
+                record_signal_tier(poll_dec, name=f"R{loop_round} 退队", hit=False, tier_idx=3,
+                                   note=f"slot 减少 {len(baseline)} → {len(current)}, 重建 baseline",
+                                   yolo_dets=list(lobby_dets) + list(np_dets) + list(btn_dets),
+                                   screenshot=shot)
+                await asyncio.to_thread(poll_dec.finalize, "member_left",
+                                        f"slot {len(baseline)}→{len(current)}")
                 baseline = current
                 ctx.team_slot_baseline = list(baseline)
                 confirm_streak.clear()
@@ -245,8 +328,15 @@ class P5WaitPlayersHandler(PhaseHandler):
                 if all(_dist((cx, cy), bp) > NEW_POSITION_MIN_DIST_PX for bp in baseline)
             ]
             if not new_positions:
+                # 无变化 — 写一条 "no_change" 决策让用户能看到 phase 在跑
                 confirm_streak.clear()
                 poll_interval = POLL_INTERVAL_IDLE_S  # 没候选 → idle
+                record_signal_tier(poll_dec, name=f"R{loop_round} 轮询", hit=False, tier_idx=3,
+                                   note=f"slot {len(current)} 占用, 无新人 (elapsed {elapsed:.0f}s)",
+                                   yolo_dets=list(lobby_dets) + list(np_dets) + list(btn_dets),
+                                   screenshot=shot)
+                await asyncio.to_thread(poll_dec.finalize, "no_change",
+                                        f"R{loop_round} {len(current)} slot")
                 continue
 
             # 有候选 → 切到 active 模式抢确认
@@ -258,7 +348,21 @@ class P5WaitPlayersHandler(PhaseHandler):
             if confirm_streak[np_pos] < CONFIRM_FRAMES:
                 logger.debug(f"[P5 inst{ctx.instance_idx}] R{loop_round} 新位置 {np_pos} "
                              f"streak {confirm_streak[np_pos]}/{CONFIRM_FRAMES}")
+                record_signal_tier(poll_dec, name=f"R{loop_round} 新位置(待确认)", hit=False, tier_idx=3,
+                                   note=f"候选 {np_pos} streak {confirm_streak[np_pos]}/{CONFIRM_FRAMES}",
+                                   yolo_dets=list(lobby_dets) + list(np_dets) + list(btn_dets),
+                                   screenshot=shot)
+                await asyncio.to_thread(poll_dec.finalize, "candidate_pending",
+                                        f"streak {confirm_streak[np_pos]}/{CONFIRM_FRAMES}")
                 continue
+
+            # 候选确认 — 这条 poll_dec 记录确认事件 (后续 verify/kick 会再写自己的决策)
+            record_signal_tier(poll_dec, name=f"R{loop_round} 新位置(确认)", hit=True, tier_idx=4,
+                               note=f"候选 {np_pos} 连续 {CONFIRM_FRAMES} 帧, 进 verify",
+                               yolo_dets=list(lobby_dets) + list(np_dets) + list(btn_dets),
+                               screenshot=shot)
+            await asyncio.to_thread(poll_dec.finalize, "candidate_confirmed",
+                                    f"new pos {np_pos}")
 
             lobby_cx, lobby_cy = np_pos
             # 解析 tap target (nameplate 优先 → btn 反推 → lobby 几何兜底)
@@ -267,7 +371,8 @@ class P5WaitPlayersHandler(PhaseHandler):
                         f"tap_target=({tap_x},{tap_y})")
 
             # ─── Verify (tap → 信息按钮 → OCR 编号 → 关闭) ───
-            got_id = await self._verify_player_id(ctx, tap_x, tap_y)
+            got_id = await self._verify_player_id(ctx, tap_x, tap_y,
+                                                   loop_round=loop_round)
             if got_id is None:
                 record_signal_tier(decision, name=f"Verify·R{loop_round}", hit=False, tier_idx=4,
                                    note=f"lobby=({lobby_cx},{lobby_cy}) OCR 找不到 10 位编号 → 视为干扰")
@@ -288,7 +393,8 @@ class P5WaitPlayersHandler(PhaseHandler):
             logger.warning(f"[P5 inst{ctx.instance_idx}] R{loop_round} lobby=({lobby_cx},{lobby_cy}) "
                            f"ID={got_id} ≠ expected={eid}, 踢出")
             ctx.kicked_ids.add(got_id)
-            kicked = await self._kick_player(ctx, tap_x, tap_y)
+            kicked = await self._kick_player(ctx, tap_x, tap_y,
+                                              loop_round=loop_round)
             record_signal_tier(decision, name=f"Kick·R{loop_round}", hit=kicked, tier_idx=5,
                                note=f"lobby=({lobby_cx},{lobby_cy}) got_id={got_id} "
                                     f"expected={eid} kicked={kicked}")
@@ -333,6 +439,34 @@ class P5WaitPlayersHandler(PhaseHandler):
             if i < BASELINE_SAMPLES - 1:
                 await asyncio.sleep(BASELINE_INTERVAL_S)
         return best if best else None
+
+    async def _build_baseline_with_dets(self, ctx: RunContext):
+        """多帧采样 baseline, 同时保留命中那帧的 YOLO Detection list (供决策档案标注用).
+
+        返回 (positions list, yolo_dets list).
+        """
+        runner = ctx.runner
+        best_positions: list[tuple[int, int]] = []
+        best_dets: list = []  # YOLO Detection list (lobby + nameplate + btn 三类合并, 给前端画框)
+        for i in range(BASELINE_SAMPLES):
+            shot = await runner.adb.screenshot()
+            if shot is not None:
+                yolo_result = await self._yolo_detect_all(ctx, shot)
+                if yolo_result is not None:
+                    lobby_dets, np_dets, btn_dets = yolo_result
+                    positions = _dedup_positions(
+                        [(d.cx, d.cy) for d in lobby_dets], NMS_DISTANCE_PX)
+                    if len(positions) > len(best_positions):
+                        best_positions = positions
+                        best_dets = list(lobby_dets) + list(np_dets) + list(btn_dets)
+                else:
+                    # YOLO 不可用, fallback 模板
+                    positions = await self._match_slot_buttons(ctx)
+                    if positions and len(positions) > len(best_positions):
+                        best_positions = positions
+            if i < BASELINE_SAMPLES - 1:
+                await asyncio.sleep(BASELINE_INTERVAL_S)
+        return (best_positions if best_positions else None), best_dets
 
     @staticmethod
     async def _wait_for_screen_stable(runner, timeout_ms: int = 800,
@@ -510,33 +644,142 @@ class P5WaitPlayersHandler(PhaseHandler):
         # 跨模板去重 (展开/退出按钮可能尺寸接近, 同一 slot 别两个模板都命中)
         return _dedup_positions(all_hits, NMS_DISTANCE_PX)
 
-    async def _verify_player_id(self, ctx: RunContext, cx: int, cy: int) -> Optional[str]:
-        """tap (cx, cy) → 小卡片 → tap 信息按钮 → 详细面板 → OCR 编号 → 关面板.
-        返回 10 位 ID (str) 或 None.
+    async def _run_verify_step(self, ctx: RunContext, round_idx: int,
+                                step_name: str, note: str, *,
+                                tap_xy: Optional[tuple] = None,
+                                ocr_roi_name: Optional[str] = None,
+                                wait_timeout_ms: int = WAIT_TIMEOUT_CARD_MS,
+                                outcome: Optional[str] = None,
+                                hit: bool = True,
+                                pre_shot=None) -> None:
+        """通用子步骤执行器 — 把"截 pre-tap 图 → 写决策 → tap → 等画面稳定"4 步封装.
 
-        优化: 全部固定 sleep 换成帧差 polling, 实测节省 ~1.2s 单次 verify.
+        标准用法 (verify/kick/未来其他需要分步决策的 phase):
+            await self._run_verify_step(
+                ctx, base_round+N, "Step·名字", "说明文字",
+                tap_xy=(x, y),                # 给了就 tap, 没给就只写决策不动作
+                ocr_roi_name="player_card_X", # 给了就在标注图画 ROI 黄框
+                wait_timeout_ms=800,          # tap 后帧差等待上限
+            )
+
+        强类型保护 — 内部不用 `arr or fallback` (避免 numpy ndarray truthy 陷阱),
+        所有 None check 显式 `is not None`.
         """
         runner = ctx.runner
-        # tap slot, 用帧差等小卡片动画完成 (替代固定 800ms)
-        await runner.adb.tap(cx, cy)
-        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CARD_MS)
+        # 1) Pre-action 截图 (caller 没传就现拍)
+        if pre_shot is None:
+            pre_shot = await runner.adb.screenshot()
+        # 2) ROI 比例坐标 (从 ROI 名字解析, 给标注图画黄框用)
+        ocr_roi_pct = None
+        if ocr_roi_name:
+            try:
+                from ..roi_config import get as _roi_get, all_names as _all_roi
+                if ocr_roi_name in set(_all_roi()):
+                    x1, y1, x2, y2, _ = _roi_get(ocr_roi_name)
+                    ocr_roi_pct = [x1, y1, x2, y2]
+            except Exception:
+                pass
+        # 3) Outcome 自动名 (给了 tap 就 _planned, 没给就 _checked)
+        if outcome is None:
+            slug = step_name.lower().replace("·", "_").replace(" ", "_")
+            outcome = f"{slug}_planned" if tap_xy is not None else f"{slug}_checked"
+        # 4) 写决策 (调既有 _record_step_decision, 它已 handle ndarray None check)
+        await self._record_step_decision(
+            ctx, round_idx, step_name, note, outcome=outcome,
+            screenshot=pre_shot, hit=hit,
+            ocr_roi_pct=ocr_roi_pct, tap_xy=tap_xy)
+        # 5) 执行 tap + 等画面稳定 (如果给了 tap_xy)
+        if tap_xy is not None:
+            await runner.adb.tap(int(tap_xy[0]), int(tap_xy[1]))
+            await self._wait_for_screen_stable(runner, timeout_ms=wait_timeout_ms)
 
-        # tap "信息" 按钮, 帧差等详细面板出现 (替代固定 800ms)
-        info_xy = await self._roi_center_xy(ctx, ROI_INFO_BTN)
+    async def _record_step_decision(self, ctx: RunContext, round_idx: int,
+                                     step_name: str, note: str, outcome: str,
+                                     screenshot=None, hit: bool = True,
+                                     ocr_roi_pct: Optional[list] = None,
+                                     tap_xy: Optional[tuple] = None) -> None:
+        """写一条独立 step 决策 (verify/kick 内部子步骤用, 让用户实时看到每步结果).
+
+        ocr_roi_pct: 比例坐标 [x1,y1,x2,y2] (0-1), 给了就在 OCR ROI 标注图画 ROI 矩形
+        tap_xy: (x, y) 像素坐标, 给了就在标注图上画红圈 + tap 标签 (前端"标注"面板显示)
+        """
+        from ..decision_log import get_recorder
+        from ..adb_lite import phash as _phash
+        from ..recorder_helpers import record_signal_tier
+        recorder = get_recorder()
+        dec = await asyncio.to_thread(
+            recorder.new_decision, ctx.instance_idx, "P5", round_idx)
+        if screenshot is not None:
+            try:
+                ph = _phash(screenshot)
+                ph_str = f"0x{int(ph):016x}" if ph else ""
+                dec.set_input(screenshot, ph_str, q=70)
+            except Exception:
+                pass
+        record_signal_tier(dec, name=step_name, hit=hit, tier_idx=4, note=note)
+        # 画 OCR ROI 矩形 (如果给了) → ocr_annot.jpg → 前端 "OCR ROI" 面板显示
+        if ocr_roi_pct is not None and screenshot is not None and dec.tiers:
+            try:
+                h, w = screenshot.shape[:2]
+                roi_pix = [int(w*ocr_roi_pct[0]), int(h*ocr_roi_pct[1]),
+                           int(w*ocr_roi_pct[2]), int(h*ocr_roi_pct[3])]
+                dec.save_ocr_roi(dec.tiers[-1], screenshot, roi=roi_pix, hits=[])
+            except Exception as e:
+                logger.debug(f"[P5] save_ocr_roi err: {e}")
+        # 画 tap 圆圈 (如果给了 tap_xy) → tap_annot.jpg → 前端"标注"面板显示
+        if tap_xy is not None and screenshot is not None:
+            try:
+                tx, ty = int(tap_xy[0]), int(tap_xy[1])
+                dec.set_tap(tx, ty, method=step_name, screenshot=screenshot)
+            except Exception as e:
+                logger.debug(f"[P5] set_tap err: {e}")
+        await asyncio.to_thread(dec.finalize, outcome, note[:80])
+
+    async def _verify_player_id(self, ctx: RunContext, cx: int, cy: int,
+                                 loop_round: int = 0) -> Optional[str]:
+        """tap (cx, cy) → 小卡片 → OCR 找信息按钮 → tap 信息 → 详细面板 →
+           OCR 编号 → 关面板. 返回 10 位 ID (str) 或 None.
+
+        4 个 step 全用 `_run_verify_step` helper, 不再手写 "截图+决策+tap+等"
+        4 步重复代码. 每个决策 input.jpg = **tap 之前画面** + 红圈/黄框.
+        """
+        runner = ctx.runner
+        base_round = 2000 + loop_round * 10
+
+        # ─── Step 1: tap slot ───
+        await self._run_verify_step(
+            ctx, base_round + 1, "VerifyStep1·tap_slot",
+            f"R{loop_round} 准备 tap slot ({cx},{cy}) → 期望弹小卡片",
+            tap_xy=(cx, cy), wait_timeout_ms=WAIT_TIMEOUT_CARD_MS)
+
+        # ─── Step 2: OCR 找 "信息" 按钮 + tap ───
+        info_xy = await self._find_info_button(ctx)
         if info_xy is None:
+            await self._run_verify_step(
+                ctx, base_round + 2, "VerifyStep2·tap_info",
+                f"R{loop_round} OCR 在 ROI {ROI_INFO_BTN} 没找到 '信息' 文字 → 放弃",
+                ocr_roi_name=ROI_INFO_BTN, hit=False,
+                outcome="info_btn_not_found")
             return None
-        await runner.adb.tap(*info_xy)
-        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_PANEL_MS)
+        await self._run_verify_step(
+            ctx, base_round + 2, "VerifyStep2·tap_info",
+            f"R{loop_round} OCR 找到 '信息' @ {info_xy}, 准备 tap",
+            tap_xy=info_xy, ocr_roi_name=ROI_INFO_BTN,
+            wait_timeout_ms=WAIT_TIMEOUT_PANEL_MS)
 
-        # OCR 编号 (retry, retry 间隔 300ms 等弹出文字渲染稳定)
+        # ─── Step 3: OCR ID (retry) ───
         ocr = runner.ocr_dismisser
         got_id: Optional[str] = None
+        last_shot = None
+        last_hits: list = []
         for attempt in range(VERIFY_OCR_RETRY + 1):
             shot = await runner.adb.screenshot()
             if shot is None:
                 continue
+            last_shot = shot
             try:
                 hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, ROI_CARD_ID)
+                last_hits = hits
             except Exception as e:
                 logger.warning(f"[P5] OCR {ROI_CARD_ID} 失败 (try {attempt}): {e}")
                 continue
@@ -547,47 +790,104 @@ class P5WaitPlayersHandler(PhaseHandler):
             if attempt < VERIFY_OCR_RETRY:
                 await asyncio.sleep(0.3)
 
-        # 关详细面板 (永远不用 back, 防误退游戏)
+        # 写 OCR 决策 (无论成败) — 画面 = 详细面板, 黄框 = card_id ROI
+        ocr_summary = ",".join(getattr(h, "text", "") for h in (last_hits or [])[:5])
+        ocr_summary = ocr_summary[:80] if ocr_summary else "(无文字命中)"
+        await self._run_verify_step(
+            ctx, base_round + 3, "VerifyStep3·ocr_id",
+            f"R{loop_round} OCR {ROI_CARD_ID} 命中: '{ocr_summary}' → got_id={got_id}",
+            ocr_roi_name=ROI_CARD_ID, hit=bool(got_id),
+            outcome="ocr_done" if got_id else "ocr_no_10digit",
+            pre_shot=last_shot)
+
+        # ─── Step 4: 关闭详细面板 ───
         close_xy = await self._roi_center_xy(ctx, ROI_CLOSE_BTN)
-        if close_xy is not None:
-            await runner.adb.tap(*close_xy)
-        else:
-            await runner.adb.tap(20, 20)  # 兜底
-        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CLOSE_MS)
+        if close_xy is None:
+            close_xy = (20, 20)  # 兜底 tap 左上空白
+        await self._run_verify_step(
+            ctx, base_round + 4, "VerifyStep4·close",
+            f"R{loop_round} 关闭详细面板 @ {close_xy}",
+            tap_xy=close_xy, wait_timeout_ms=WAIT_TIMEOUT_CLOSE_MS)
 
         return got_id
 
-    async def _kick_player(self, ctx: RunContext, cx: int, cy: int) -> bool:
+    async def _kick_player(self, ctx: RunContext, cx: int, cy: int,
+                            loop_round: int = 0) -> bool:
         """踢人. tap (cx, cy) 重新弹小卡片 → OCR 找 '移出队伍' → 找不到先 tap 更多 → tap 移出.
         返回是否成功执行 tap '移出队伍'.
 
-        优化: 全部固定 sleep 换成帧差 polling.
+        全部子步骤走 `_run_verify_step` helper, 跟 verify 同一个接口.
         """
-        runner = ctx.runner
-        # tap slot 再次弹小卡片
-        await runner.adb.tap(cx, cy)
-        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CARD_MS)
+        base_round = 3000 + loop_round * 10
 
+        # ─── Step 1: tap slot 重新弹小卡片 ───
+        await self._run_verify_step(
+            ctx, base_round + 1, "KickStep1·tap_slot",
+            f"R{loop_round} 准备重新 tap slot ({cx},{cy}) → 弹小卡片踢人",
+            tap_xy=(cx, cy), wait_timeout_ms=WAIT_TIMEOUT_CARD_MS)
+
+        # ─── Step 2: OCR 找 "移出队伍" 按钮 ───
         kick_xy = await self._find_kick_button(ctx)
         if kick_xy is None:
-            # 非好友默认状态: 先点 "更多"
+            # 非好友默认状态: 先 tap "更多" 展开菜单
             more_xy = await self._roi_center_xy(ctx, ROI_MORE_BTN)
             if more_xy is None:
-                logger.warning(f"[P5] ROI {ROI_MORE_BTN} 没配, 也找不到 '移出队伍', 放弃 kick")
+                await self._run_verify_step(
+                    ctx, base_round + 2, "KickStep2·find_kick",
+                    f"R{loop_round} OCR 没找到 '移出队伍' + ROI {ROI_MORE_BTN} 也没配 → 放弃",
+                    ocr_roi_name=ROI_KICK_AREA, hit=False,
+                    outcome="kick_btn_unfindable")
                 await self._close_card(ctx)
                 return False
-            await runner.adb.tap(*more_xy)
-            await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_MENU_MS)
+            await self._run_verify_step(
+                ctx, base_round + 2, "KickStep2·tap_more",
+                f"R{loop_round} 没直接看到'移出', 准备 tap 更多 ROI 中心 {more_xy}",
+                tap_xy=more_xy, ocr_roi_name=ROI_KICK_AREA,
+                wait_timeout_ms=WAIT_TIMEOUT_MENU_MS)
             kick_xy = await self._find_kick_button(ctx)
             if kick_xy is None:
-                logger.warning(f"[P5] tap '更多' 后仍没找到 '移出队伍', 放弃 kick")
+                await self._run_verify_step(
+                    ctx, base_round + 3, "KickStep3·find_kick_after_more",
+                    f"R{loop_round} tap 更多后仍没找到 '移出队伍' → 放弃",
+                    ocr_roi_name=ROI_KICK_AREA, hit=False,
+                    outcome="kick_btn_unfindable_after_more")
                 await self._close_card(ctx)
                 return False
 
-        await runner.adb.tap(*kick_xy)
-        # tap '移出' 后界面会自动关闭, 帧差等 UI 稳定
-        await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CARD_MS)
+        # ─── Step 4: tap "移出队伍" ───
+        await self._run_verify_step(
+            ctx, base_round + 4, "KickStep4·tap_kick",
+            f"R{loop_round} 准备 tap '移出队伍' @ {kick_xy}",
+            tap_xy=kick_xy, ocr_roi_name=ROI_KICK_AREA,
+            wait_timeout_ms=WAIT_TIMEOUT_CARD_MS)
         return True
+
+    async def _find_info_button(self, ctx: RunContext) -> Optional[tuple[int, int]]:
+        """在 player_card_info_btn ROI 内 OCR 找 '信息' 文字, 返回那个 hit 的 (cx, cy).
+
+        正确做法: ROI 是搜索范围, OCR 找到"信息"文字 → 返回它的精确中心,
+        不是直接 tap ROI 中心 (会偏到旁边的 赠送礼物/移出队伍/转让队长 上).
+        """
+        runner = ctx.runner
+        from ..roi_config import all_names as _all_roi
+        if ROI_INFO_BTN not in set(_all_roi()):
+            logger.error(f"[P5] ROI {ROI_INFO_BTN} 未配置")
+            return None
+        shot = await runner.adb.screenshot()
+        if shot is None:
+            return None
+        ocr = runner.ocr_dismisser
+        try:
+            hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, ROI_INFO_BTN)
+        except Exception as e:
+            logger.warning(f"[P5] OCR {ROI_INFO_BTN} 失败: {e}")
+            return None
+        # 严格匹配 "信息" — 跟其他按钮 (赠送礼物/移出队伍/转让队长) 区分
+        for h in hits:
+            t = (getattr(h, "text", "") or "").strip()
+            if t == "信息" or "信息" in t and "礼物" not in t:
+                return (h.cx, h.cy)
+        return None
 
     async def _find_kick_button(self, ctx: RunContext) -> Optional[tuple[int, int]]:
         """OCR player_card_kick_area 区域找含 '移出'+'队伍' 的 hit, 返回 (cx, cy)."""

@@ -96,3 +96,6 @@ player_card_more_btn:
   scale: 2
   desc: 'P5 小卡片底部 更多 按钮 非好友才显示 好友直接看到移出队伍 占位待拖'
   used_in: phases/p5_wait_players.py
+
+# 弹窗清理不需要 ROI — 全部走 YOLO dialog bbox 动态 OCR (位置无关).
+# 见 backend/automation/popup_specs.py + popup_dismiss.py

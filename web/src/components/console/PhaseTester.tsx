@@ -41,7 +41,7 @@ const ROLE_PHASES = new Set(['P3a', 'P3b', 'P4'])
  * 通过响应里有没有 duration_ms 来分流, 不再硬要求 task_id.
  */
 async function runPhaseAsync(body: {
-  instance: number; phase: string; role: 'captain' | 'member'; scheme?: string;
+  instance: number; phase: string; role: 'captain' | 'member'; scheme?: string; expected_id?: string;
 }): Promise<{ ok: boolean; phaseName: string; duration: number; error: string; scheme: string }> {
   const phaseName0 = body.phase
   const t0 = performance.now()
@@ -118,7 +118,9 @@ export function PhaseTester() {
   const clearPhaseResults = useAppStore((s) => s.clearPhaseResults)
   const addLog = useAppStore((s) => s.addLog)
 
-  const { selKeys, selInst, selRole, keepGoing, busy, progress, results } = phaseTester
+  const { selKeys, selInst, selRole, expectedId, keepGoing, busy, progress, results } = phaseTester
+  const needsExpectedId = selKeys.includes('P5')
+  const expectedIdValid = !needsExpectedId || /^\d{10}$/.test(expectedId.trim())
 
   const availableInstances = useMemo(() => {
     const ids = new Set<number>()
@@ -211,14 +213,29 @@ export function PhaseTester() {
     const updateProg = () => setPhaseTester({ progress: `${done}/${total}` })
 
     // 每实例独立跑自己的阶段链 — 用 runPhaseAsync 后台任务 + 轮询
+    // 业务约束: P5 只在队长 (targets[0]) 跑, 其他 instance 跳过 (member 不需要等真人)
+    const leader = targets[0]
     async function runOneInstance(tgt: number): Promise<void> {
       for (const phase of selKeys) {
+        if (phase === 'P5' && targets.length > 1 && tgt !== leader) {
+          addLog({
+            timestamp: Date.now() / 1000,
+            instance: tgt, level: 'info',
+            message: `[阶段测试 #${tgt}] 跳过 P5 (只在队长 #${leader} 跑)`,
+          })
+          done += 1
+          updateProg()
+          continue
+        }
         addLog({
           timestamp: Date.now() / 1000,
           instance: tgt, level: 'info',
           message: `[阶段测试 #${tgt}] 开始 ${phase}…`,
         })
-        const r = await runPhaseAsync({ instance: tgt, phase, role: selRole })
+        const r = await runPhaseAsync({
+          instance: tgt, phase, role: selRole,
+          expected_id: phase === 'P5' ? expectedId.trim() : undefined,
+        })
         done += 1
         updateProg()
         addPhaseResult({
@@ -274,7 +291,10 @@ export function PhaseTester() {
         timestamp: Date.now() / 1000, instance: tgt, level: 'info',
         message: `[阶段测试·大组] #${tgt} ${role} 开始 ${phase}…`,
       })
-      const r = await runPhaseAsync({ instance: tgt, phase, role, scheme })
+      const r = await runPhaseAsync({
+        instance: tgt, phase, role, scheme,
+        expected_id: phase === 'P5' ? expectedId.trim() : undefined,
+      })
       done += 1
       updateProg()
       addPhaseResult({
@@ -350,6 +370,11 @@ export function PhaseTester() {
       // P4: 队长收尾
       if (selKeys.includes('P4')) {
         await runPhase(sq.leader, 'P4', 'captain')
+      }
+
+      // P5: 等真人入队, 只跑队长 (业务约束: 队员只是凑人数, 不需要等)
+      if (selKeys.includes('P5')) {
+        await runPhase(sq.leader, 'P5', 'captain')
       }
     }
 
@@ -514,6 +539,39 @@ export function PhaseTester() {
         </div>
       )}
 
+      {/* P5 必填: expected_id (10 位玩家编号) */}
+      {needsExpectedId && (
+        <div className="flex items-center gap-2 text-xs flex-wrap">
+          <span className="font-semibold">P5 等待玩家 ID:</span>
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="\d{10}"
+            maxLength={10}
+            value={expectedId}
+            onChange={(e) => setPhaseTester({ expectedId: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+            placeholder="10 位数字"
+            className={`px-2 py-1 border rounded font-mono text-xs w-32 ${
+              expectedIdValid
+                ? 'border-border'
+                : 'border-destructive bg-destructive/10 text-destructive'
+            }`}
+          />
+          {useFromConsole && targetsFromConsole.length > 1 ? (
+            <span className="text-[11px] text-info">
+              (P5 只在队长 #{targetsFromConsole[0]} 跑, 其他 {targetsFromConsole.length - 1} 个实例自动跳过)
+            </span>
+          ) : (
+            <span className="text-[11px] text-muted-foreground">
+              (P5 等这个 ID 的真人加入队伍, 240s 超时)
+            </span>
+          )}
+          {!expectedIdValid && expectedId.length > 0 && (
+            <span className="text-[11px] text-destructive">必须 10 位数字</span>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center gap-2 flex-wrap">
         {busy ? (
           <Button
@@ -529,9 +587,10 @@ export function PhaseTester() {
         ) : (
           <Button
             size="sm"
-            disabled={isRunning || selKeys.length === 0}
+            disabled={isRunning || selKeys.length === 0 || !expectedIdValid}
             onClick={onClickRun}
             className="min-w-[180px]"
+            title={!expectedIdValid ? 'P5 需要 10 位玩家 ID' : undefined}
           >
             {(() => {
               const hasSquadPhase = selKeys.some((k) => ROLE_PHASES.has(k))

@@ -205,6 +205,7 @@ interface AppState {
     selKeys: string[]               // 选中阶段 (按勾选顺序)
     selInst: number | null          // 没多选时的备用单实例
     selRole: 'captain' | 'member'
+    expectedId: string              // P5 用: 等待真人入队的 10 位玩家 ID
     keepGoing: boolean
     busy: boolean
     progress: string
@@ -341,6 +342,7 @@ export const useAppStore = create<AppState>((set) => ({
     selKeys: [],
     selInst: null,
     selRole: 'captain',
+    expectedId: '',
     keepGoing: false,
     busy: false,
     progress: '',

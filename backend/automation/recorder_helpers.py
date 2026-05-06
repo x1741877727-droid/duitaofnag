@@ -205,12 +205,18 @@ def record_perception(decision: Any, p: Any, *, started: Optional[float] = None)
 
 
 def record_signal_tier(decision: Any, *, name: str, hit: bool, note: str = "",
-                       duration_ms: float = 0.0, tier_idx: int = 0) -> None:
-    """通用单层 Tier 记录 (P0/P1/P3a/P3b/P4 用).
+                       duration_ms: float = 0.0, tier_idx: int = 0,
+                       yolo_dets: Optional[list] = None,
+                       screenshot: Optional["np.ndarray"] = None) -> None:
+    """通用单层 Tier 记录 (P0/P1/P3a/P3b/P4/P5 用).
 
-    name: '模板'/'YOLO'/'VPN检测'/'OCR' 等
+    name: '模板'/'YOLO'/'VPN检测'/'OCR'/'baseline' 等
     hit:  本层是否拍板 (early_exit)
     note: 一行说明
+    yolo_dets: 可选 - YOLO Detection list (含 .name/.conf/.x1/.y1/.x2/.y2)
+    screenshot: 可选 - 配 yolo_dets 用. 传了就会调 decision.save_yolo_annot 生成
+                yolo_annot.jpg (前端"标注"面板读的就是这张图; 不传只有左侧文字
+                bbox 列表, 右侧标注会显"-无-").
     """
     if decision is None:
         return
@@ -219,6 +225,28 @@ def record_signal_tier(decision: Any, *, name: str, hit: bool, note: str = "",
         t.early_exit = bool(hit)
         t.note = note
         t.duration_ms = round(float(duration_ms), 2)
+        det_list: list = []
+        if yolo_dets:
+            for d in yolo_dets:
+                try:
+                    x1 = int(getattr(d, "x1", 0))
+                    y1 = int(getattr(d, "y1", 0))
+                    x2 = int(getattr(d, "x2", x1 + 32))
+                    y2 = int(getattr(d, "y2", y1 + 32))
+                    det_list.append(YoloDetection(
+                        cls=str(getattr(d, "name", "")),
+                        conf=round(float(getattr(d, "conf", 0.0)), 3),
+                        bbox=[x1, y1, x2, y2],
+                    ))
+                except Exception:
+                    continue
+            t.yolo_detections = det_list
         decision.add_tier(t)
+        # 给了截图 + 检测 → 生成 yolo_annot.jpg, 前端"标注"面板才有图
+        if det_list and screenshot is not None:
+            try:
+                decision.save_yolo_annot(t, screenshot, det_list)
+            except Exception as e:
+                logger.debug(f"[recorder_helpers] save_yolo_annot err: {e}")
     except Exception as e:
         logger.debug(f"[recorder_helpers] record_signal_tier err: {e}")
