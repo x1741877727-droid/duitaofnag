@@ -274,8 +274,13 @@ class YoloDismisser:
                 axis=1,
             ).astype(np.float32)
             sc = max_scores[cls_mask].astype(np.float32)
+            xywh = np.stack(
+                [xyxy[:, 0], xyxy[:, 1],
+                 xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]],
+                axis=1,
+            )
             indices = cv2.dnn.NMSBoxes(
-                bboxes=xyxy.tolist(), scores=sc.tolist(),
+                bboxes=xywh.tolist(), scores=sc.tolist(),
                 score_threshold=CONF_THRESHOLD, nms_threshold=NMS_IOU,
             )
             if len(indices) == 0:
