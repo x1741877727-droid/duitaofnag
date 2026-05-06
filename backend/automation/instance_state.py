@@ -87,8 +87,12 @@ class InstanceState:
 
     @classmethod
     def from_dict(cls, d: dict) -> "InstanceState":
-        ks_raw = d.pop("known_slot_ids", []) or []
-        state = cls(**d)
+        # Schema 演化容错: 把磁盘里多出来的字段过滤掉 (只取 dataclass 已知字段),
+        # 防 cls(**d) 抛 unexpected keyword argument silent fail.
+        known = {f for f in cls.__dataclass_fields__}
+        ks_raw = d.get("known_slot_ids", []) or []
+        filtered = {k: v for k, v in d.items() if k in known and k != "known_slot_ids"}
+        state = cls(**filtered)
         state.known_slot_ids = [KnownSlot.from_dict(k) for k in ks_raw]
         return state
 

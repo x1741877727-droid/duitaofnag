@@ -392,9 +392,40 @@ class MultiRunnerService:
             if _saved_state is not None and _saved_state.phase:
                 logger.info(f"[实例{idx}] Stage 3 resume: state.phase={_saved_state.phase} "
                             f"→ 起跑 phase='{current_phase}'")
+            # Stage 4: 把 role + squad_id (group) 写入 state, phase_base.enter 读盘后会保留
+            if _saved_state is None:
+                _saved_state = InstanceState.fresh(idx)
+            _saved_state.role = runner.role
+            _saved_state.squad_id = group
+            _saved_state.save_atomic()
         except Exception as e:
             logger.warning(f"[实例{idx}] decide_initial_phase 失败 (走 fresh): {e}")
             current_phase = "accelerator"
+
+        # Stage 4: 队长心跳后台 task — 每 5s 写 squad_state.heartbeat, 让队员能检测假死
+        _hb_task = None
+        if runner.role == "captain":
+            from .automation.squad_state import (
+                SquadState, LEADER_HEARTBEAT_INTERVAL_S,
+            )
+
+            async def _leader_heartbeat_loop():
+                while True:
+                    try:
+                        squad = SquadState.load_or_fresh(
+                            group, leader_instance=idx)
+                        if squad.leader_instance != idx:
+                            squad.leader_instance = idx
+                        squad.heartbeat()
+                    except Exception as e:
+                        logger.debug(f"[实例{idx}] heartbeat err: {e}")
+                    try:
+                        await asyncio.sleep(LEADER_HEARTBEAT_INTERVAL_S)
+                    except asyncio.CancelledError:
+                        return
+
+            _hb_task = asyncio.create_task(
+                _leader_heartbeat_loop(), name=f"squad-hb#{idx}")
 
         # ── v2 横切 Watchdog: per-instance 后台任务 ──
         # 只观察 + 写状态, 不主动打断 phase (打断逻辑留到第 4 刀做)
@@ -497,6 +528,13 @@ class MultiRunnerService:
                 try:
                     # 同步当前 phase 到 watchdog state (PopupWatchdog 用)
                     wd_state.current_phase = current_phase
+                    # Stage 4 R1 修复: 同步 current_phase 到 state.phase, 让 legacy
+                    # P3a/P3b/P4 phase 闪退后 decide_initial_phase 能识别真实进度
+                    try:
+                        from .automation.recovery import sync_state_phase
+                        sync_state_phase(idx, current_phase)
+                    except Exception:
+                        pass
                     if current_phase == "accelerator":
                         from .automation.phases.p0_accelerator import P0AcceleratorHandler
                         ok = await _run_v3(P0AcceleratorHandler)
@@ -541,6 +579,14 @@ class MultiRunnerService:
                             if evt:
                                 evt.set()
                             logger.info(f"[实例{idx}] 队长已创建队伍")
+                            # Stage 4: 同步 squad_state 持久化版 team_code (生存 backend 重启)
+                            try:
+                                from .automation.squad_state import SquadState
+                                squad = SquadState.load_or_fresh(
+                                    group, leader_instance=idx)
+                                squad.update_team_code(scheme)
+                            except Exception as e:
+                                logger.debug(f"[实例{idx}] squad_state team_code 写盘 err: {e}")
                             current_phase = "map_setup"
                             phase_retries = 0
                         else:
@@ -562,11 +608,33 @@ class MultiRunnerService:
                                 evt = asyncio.Event()
                                 self._team_events[group] = evt
                             # 无限等，但每 10 秒检查一次（队长可能重建了队伍）
+                            # Stage 4: 加 squad_state.is_leader_alive 检测假死
+                            #   in-memory _team_schemes 跨进程重启会丢; squad_state 持久化版本能熬过 backend 重启.
                             while not self._team_schemes.get(group, ""):
                                 try:
                                     await asyncio.wait_for(evt.wait(), timeout=10)
                                 except asyncio.TimeoutError:
                                     pass  # 继续等
+                                # Stage 4: 每次 10s 醒来同时检查 squad_state
+                                try:
+                                    from .automation.squad_state import SquadState
+                                    squad = SquadState.load(group)
+                                    if squad is not None:
+                                        # 1) 持久化的 team_code 已就绪? 直接用 (跨 backend 重启场景)
+                                        if squad.team_code_valid and squad.team_code:
+                                            self._team_schemes[group] = squad.team_code
+                                            logger.info(
+                                                f"[实例{idx}] team_join: 从 squad_state "
+                                                f"读到 team_code (跨进程同步)")
+                                            break
+                                        # 2) 队长心跳超时 → 假死, 写日志提醒 (不主动 break, 等队长重启)
+                                        if not squad.is_leader_alive():
+                                            logger.warning(
+                                                f"[实例{idx}] team_join: squad_state 显示队长 #{squad.leader_instance} "
+                                                f"心跳超时 (>{15}s), 队员暂停等队长重启")
+                                            inst.error = "队长无响应, 等队长重新生成队伍码..."
+                                except Exception as e:
+                                    logger.debug(f"[实例{idx}] squad_state check err: {e}")
                             scheme = self._team_schemes[group]
                             inst.error = ""
 
@@ -678,6 +746,23 @@ class MultiRunnerService:
                 await wd_mgr.stop_all()
             except Exception:
                 pass
+            # Stage 4: 停队长心跳 task + 标 squad_state.leader_alive=False
+            if _hb_task is not None:
+                _hb_task.cancel()
+                try:
+                    await _hb_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                # 仅在队长正常退出 (stop_all / done) 时标 leader_alive=False;
+                # 闪退场景 finally 不会跑, squad_state 自然保留旧 heartbeat → 队员超时检测
+                try:
+                    from .automation.squad_state import SquadState
+                    squad = SquadState.load(group)
+                    if squad is not None and squad.leader_instance == idx:
+                        squad.leader_alive = False
+                        squad.save_atomic()
+                except Exception:
+                    pass
             inst._phase_start = time.time()
             self._broadcast_state_change(idx, "running", inst.state)
             # 写入运行摘要
