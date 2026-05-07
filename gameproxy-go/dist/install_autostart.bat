@@ -1,27 +1,28 @@
 @echo off
+chcp 65001 >nul
+
 REM ========================================================================
-REM  Step 2 一次性配置脚本 — 双击即可
-REM  做完后开机自动 admin 启 gameproxy + 创 wintun + 配路由表, 永远不用再管
+REM  Step 2 one-time setup. Double-click to run.
+REM  After this, gameproxy auto-starts as SYSTEM on every boot. No more UAC.
 REM ========================================================================
 
-REM === Self-elevate 检测 ===
+REM === Self-elevate ===
 net session >nul 2>&1
 if %errorLevel% NEQ 0 (
-    echo 需要管理员权限, 自动重启提权...
+    echo Not admin. Re-launching elevated via UAC...
     powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b
 )
 
 echo ============================================
-echo  以管理员身份运行中
+echo  Running as Administrator
 echo ============================================
 
-REM === 路径常量 ===
 set "GP_EXE=D:\game-automation\duitaofnag\gameproxy-go\dist\gameproxy.exe"
 set "GP_LOG=D:\game-automation\duitaofnag\gameproxy-go\dist\proxy.log"
 set "PS_BOOT=D:\game-automation\duitaofnag\gameproxy-go\dist\boot_gameproxy.ps1"
 
-REM === 写一个开机启动用的 PS1 ===
+REM === Write boot PS1 (no Chinese inside, only ASCII) ===
 > "%PS_BOOT%" echo $gp = "%GP_EXE%"
 >> "%PS_BOOT%" echo $log = "%GP_LOG%"
 >> "%PS_BOOT%" echo Remove-Item -Force $log -ErrorAction SilentlyContinue
@@ -37,33 +38,36 @@ REM === 写一个开机启动用的 PS1 ===
 >> "%PS_BOOT%" echo }
 
 echo.
-echo === 注册开机自启 Scheduled Task (SYSTEM) ===
+echo === Register Scheduled Task (SYSTEM, on boot) ===
 schtasks /Delete /TN "GameProxyAutoStart" /F >nul 2>&1
 schtasks /Create /TN "GameProxyAutoStart" /TR "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File \"%PS_BOOT%\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F
 if %errorLevel% NEQ 0 (
-    echo [失败] 注册任务出错
+    echo [FAIL] schtasks register error
     pause
     exit /b 1
 )
 
 echo.
-echo === 立即跑一次 (不用等下次开机) ===
+echo === Run task now (no need to wait next boot) ===
 taskkill /IM gameproxy.exe /F 2>nul
 schtasks /Run /TN "GameProxyAutoStart"
 timeout 5 >nul
 
 echo.
-echo === 验证 wintun 创建 ===
-powershell -Command "Get-NetAdapter | Where-Object { $_.Name -eq 'gp-tun' } | Format-Table Name,Status,InterfaceIndex"
+echo === Verify gp-tun adapter ===
+powershell -Command "Get-NetAdapter | Where-Object { $_.Name -eq 'gp-tun' } | Format-Table Name,Status,InterfaceIndex,InterfaceDescription -AutoSize"
 
 echo.
-echo === gameproxy 日志 tail ===
-powershell -Command "Get-Content '%GP_LOG%' -Tail 10"
+echo === Verify routes pointing to 26.26.26.2 ===
+powershell -Command "Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -eq '26.26.26.2' } | Format-Table DestinationPrefix,NextHop,RouteMetric -AutoSize"
+
+echo.
+echo === gameproxy.exe log tail ===
+powershell -Command "if (Test-Path '%GP_LOG%') { Get-Content '%GP_LOG%' -Tail 12 } else { Write-Host 'log not found' }"
 
 echo.
 echo ============================================
-echo  完成! 以后开机自动 admin 启 gameproxy
-echo  每次重启电脑后无需任何操作
-echo  要卸载: schtasks /Delete /TN GameProxyAutoStart /F
+echo  Setup done. gameproxy auto-starts on boot.
+echo  Uninstall: schtasks /Delete /TN GameProxyAutoStart /F
 echo ============================================
 pause
