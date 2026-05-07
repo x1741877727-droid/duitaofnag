@@ -31,6 +31,48 @@ import socket
 from datetime import datetime
 from pathlib import Path
 
+
+# ─────────── Windows admin self-elevate ───────────
+# 让 agent 跑在管理员权限. 没有 admin 时通过 UAC 弹窗重启自己;
+# 之后所有 /exec 命令都是 admin (能装 service, 配 wintun, 读 event log 等).
+def _is_windows_admin():
+    if sys.platform != 'win32':
+        return True  # Linux/macOS 默认 OK (root or not 都按现有行为)
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() == 1
+    except Exception:
+        return False
+
+
+def _self_elevate_windows():
+    """以 admin 身份重启自己 (UAC 弹窗); 父进程退出."""
+    import ctypes
+    # 把 sys.argv 重新拼成 "arg1" "arg2" 形式 (含空格也安全)
+    script = os.path.abspath(sys.argv[0])
+    params = ' '.join('"' + a + '"' for a in sys.argv[1:])
+    full_args = '"' + script + '"'
+    if params:
+        full_args += ' ' + params
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, full_args, None, 1
+    )
+    # ShellExecuteW 返回 > 32 = 成功
+    if rc <= 32:
+        print(f"[ERROR] UAC elevation failed (code {rc}), 继续以普通权限运行", file=sys.stderr)
+        return False
+    # 父进程退出, 让 admin 子进程接管
+    sys.exit(0)
+
+
+if sys.platform == 'win32' and not _is_windows_admin():
+    # 检测一个跳过 elevation 的开关 (避免无限循环或测试)
+    if '--no-elevate' not in sys.argv and os.environ.get('AGENT_NO_ELEVATE') != '1':
+        print("[INFO] Not running as admin. Requesting UAC elevation...", file=sys.stderr)
+        if _self_elevate_windows():
+            sys.exit(0)
+        # elevation 失败 → 继续 non-admin (功能受限但能跑)
+
 try:
     from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, HTMLResponse
