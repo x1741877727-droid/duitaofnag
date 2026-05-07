@@ -19,7 +19,7 @@ interface AccelModeState {
   instances: AccelModeInstance[]
 }
 
-function AccelModePanel() {
+export function AccelModePanel() {
   const [state, setState] = useState<AccelModeState | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
