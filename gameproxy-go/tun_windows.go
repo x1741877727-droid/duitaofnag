@@ -45,15 +45,19 @@ func startTunInbound(srv *Socks5Server, cfg TunConfig) error {
 	mtu := uint32(mtuInt)
 	logInfo("tun-mode: adapter ready name=%q mtu=%d", actualName, mtu)
 
-	// round 3: 起 gVisor netstack + dispatch (lab 模式, forwarder 全部 RST)
+	// 起 gVisor netstack + dispatch
 	stk, err := startTunDispatch(srv, dev, mtu)
 	if err != nil {
 		dev.Close()
 		return fmt.Errorf("startTunDispatch: %w", err)
 	}
 	_ = stk
-	logInfo("tun-mode: gVisor stack ready (lab — 路由表未动, 真实流量不会进来)")
 
-	// graceful shutdown 占位 (round 4 接 main ctx)
-	select {} // block forever — round 4 接 main 的 SIGINT
+	// 自己配 wintun IP + 游戏服路由表 (内嵌, 不依赖外部 PS 脚本)
+	go configureWintunRoutes(actualName)
+
+	logInfo("tun-mode: gVisor stack ready, 后台等 wintun 注册到 network stack 后配路由")
+
+	// block forever (service mode 由 SCM 触发 ctx cancel; CLI 模式由 SIGINT)
+	select {}
 }
