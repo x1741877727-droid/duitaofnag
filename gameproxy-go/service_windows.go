@@ -29,10 +29,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -59,7 +61,18 @@ func runAsServiceIfNeeded() bool {
 	if err != nil || !isService {
 		return false
 	}
+
+	// 重定向 stderr 到 panic.log — Go runtime panic 能被记录 (默认走 stderr 但 SCM 重定向到 NUL 丢了)
+	redirectStderrInService()
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "[PANIC] runAsServiceIfNeeded: %v\n%s\n", r, debug.Stack())
+		}
+	}()
+
 	if err := svc.Run(svcName, &gpService{}); err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] svc.Run failed: %v\n", err)
 		if elog, e := eventlog.Open(svcName); e == nil {
 			elog.Error(1, fmt.Sprintf("svc.Run failed: %v", err))
 			elog.Close()
@@ -68,9 +81,36 @@ func runAsServiceIfNeeded() bool {
 	return true
 }
 
+// redirectStderrInService — 让 service mode 的 stderr 写到 panic.log
+// 包括 Go runtime panic stack trace + 我们写的 fmt.Fprintf(os.Stderr, ...)
+func redirectStderrInService() {
+	exepath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	panicLogPath := filepath.Join(filepath.Dir(exepath), "panic.log")
+	f, err := os.OpenFile(panicLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(f, "\n=== service stderr redirect at %s ===\n", time.Now().Format(time.RFC3339))
+
+	// Go 层 stderr (我们 fmt.Fprintf 走这里)
+	os.Stderr = f
+
+	// OS 层 STD_ERROR_HANDLE (runtime panic / cgo 走这里)
+	_ = windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(f.Fd()))
+}
+
 type gpService struct{}
 
 func (s *gpService) Execute(args []string, r <-chan svc.ChangeRequest, status chan<- svc.Status) (svcSpecificEC bool, exitCode uint32) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "[PANIC] gpService.Execute: %v\n%s\n", r, debug.Stack())
+		}
+	}()
+
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	status <- svc.Status{State: svc.StartPending}
 
@@ -80,10 +120,19 @@ func (s *gpService) Execute(args []string, r <-chan svc.ChangeRequest, status ch
 	}
 	setupLogging()
 	logInfo("=== Service start (SCM) ===")
+	fmt.Fprintf(os.Stderr, "=== gpService.Execute reached, args=%v ===\n", args)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
+		defer func() {
+			if rr := recover(); rr != nil {
+				stack := debug.Stack()
+				logWarn("[svc] PANIC in runProxyMain goroutine: %v", rr)
+				fmt.Fprintf(os.Stderr, "[PANIC] runProxyMain goroutine: %v\n%s\n", rr, stack)
+				errCh <- fmt.Errorf("panic: %v", rr)
+			}
+		}()
 		errCh <- runProxyMain(ctx)
 	}()
 
