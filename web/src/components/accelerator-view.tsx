@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAppStore, type AccelInstanceState } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Zap, Play, Square, RefreshCw, CheckCircle2, XCircle, Loader2, Shield, FileText, Wifi, AlertTriangle } from 'lucide-react'
+import { Zap, Play, Square, RefreshCw, CheckCircle2, XCircle, Loader2, Shield, FileText, Wifi, AlertTriangle, ExternalLink } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 // Step 2 加速器双形态切换 (Round 5c)
@@ -92,6 +92,24 @@ function AccelModePanel() {
       </div>
 
       <div className="p-5 space-y-4">
+        {/* 验证 gameproxy 是本地还是远端 — 复用 APK 时代 gameproxy-verify 同款 HTML */}
+        <div className="flex items-center justify-between p-3 rounded-lg bg-muted/20 border border-border/50">
+          <div>
+            <div className="font-medium text-sm">验证当前 gameproxy</div>
+            <div className="text-xs text-muted-foreground">
+              打开 verify 页看 server 运行时长 (本地 binary 几分钟级 / 远端几天级)
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.open('/api/proxy_verify', '_blank', 'noopener,noreferrer')}
+            className="gap-1"
+          >
+            <ExternalLink className="h-4 w-4" /> 打开验证页
+          </Button>
+        </div>
+
         {/* 紧急 kill switch */}
         <div className={cn(
           "flex items-center justify-between p-3 rounded-lg border",

@@ -213,6 +213,20 @@ func StartAPIServer(addr string, server *Socks5Server) {
 	mux.HandleFunc("/api/label", handleLabelPost(getCaptureDir))
 	mux.HandleFunc("/api/labels", handleLabelsGet(getCaptureDir))
 
+	// verify 页 — 复用 SOCKS5 isVerifyHost 的 HTML, 通过 HTTP API 也能 access
+	// (TUN 模式没 vpn-app 拦虚拟域名了, 用这个 endpoint 替代 emulator 验证)
+	mux.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		fmt.Fprint(w, server.verifyHTML())
+	})
+	mux.HandleFunc("/api/verify", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_ = json.NewEncoder(w).Encode(server.GetVerifyJSON())
+	})
+
 	logInfo("HTTP API 启动: %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		logWarn("HTTP API 启动失败: %v", err)

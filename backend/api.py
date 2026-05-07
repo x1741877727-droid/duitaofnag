@@ -521,6 +521,27 @@ def create_app(config: ConfigManager) -> FastAPI:
         config.save_settings()
         return {"ok": True, "master_disable_tun": payload.disable}
 
+    @app.get("/api/proxy_verify")
+    async def proxy_verify():
+        """反代 gameproxy :9901/verify HTML, 让 cloudflare 公网 UI 也能 access.
+
+        APK 时代 verify 走 vpn-app 拦虚拟域名 gameproxy-verify; TUN 时代没 vpn-app
+        拦截了, 这个 endpoint 让 GameBot UI 上点验证按钮也能看到 verify 页 (含
+        gameproxy uptime/active_connections/total_connections, 区分本地 vs 远端).
+        """
+        import urllib.request
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:9901/verify", timeout=3) as resp:
+                html = resp.read().decode("utf-8")
+            return Response(content=html, media_type="text/html; charset=utf-8")
+        except Exception as e:
+            err_html = f"""<html><body style="font-family:sans-serif;padding:40px;background:#0A0E1A;color:#e0e0e0">
+<h2 style="color:#ff5252">gameproxy :9901/verify 不可达</h2>
+<p>错误: <code>{e}</code></p>
+<p>检查 gameproxy.exe 是否在跑 (ps / netstat) 以及 :9901 是否监听.</p>
+</body></html>"""
+            return Response(content=err_html, media_type="text/html; charset=utf-8", status_code=502)
+
     # ── 截图 ──
 
     @app.get("/api/screenshot/{instance_index}")
