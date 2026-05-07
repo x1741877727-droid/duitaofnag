@@ -119,10 +119,35 @@ func startTunDispatch(srv *Socks5Server, dev tun.Device, mtu uint32) (*stack.Sta
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFw.HandlePacket)
 
-	// UDP forwarder (Round 4.5 接通; 当前 log + drop)
+	// UDP forwarder (Round 4.5: direct dial 双向 pump)
+	// gameproxy 现有改写规则全是 TCP (17500/443), UDP 全部 direct dial 不进 SOCKS5.
+	// 设计简化: UDP 不走 zaixRoute - 战斗 UDP 等也直连 emulator 物理网卡的真目标.
 	udpFw := udp.NewForwarder(s, func(req *udp.ForwarderRequest) {
 		id := req.ID()
-		logInfo("[TUN] UDP %s:%d -> drop (Round 4.5 will dispatch)", id.LocalAddress.String(), int(id.LocalPort))
+		dstAddr := id.LocalAddress.String()
+		dstPort := int(id.LocalPort)
+
+		target := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+		remote, dialErr := net.Dial("udp", target)
+		if dialErr != nil {
+			logInfo("[TUN] UDP %s dial 失败: %v", target, dialErr)
+			return
+		}
+
+		var wq waiter.Queue
+		ep, tcpipErr := req.CreateEndpoint(&wq)
+		if tcpipErr != nil {
+			logWarn("[TUN] UDP CreateEndpoint %s:%d: %s", dstAddr, dstPort, tcpipErr)
+			remote.Close()
+			return
+		}
+		client := gonet.NewUDPConn(&wq, ep)
+
+		logInfo("[TUN] UDP %s:%d (direct)", dstAddr, dstPort)
+
+		// 双向 datagram pump
+		go pumpUDP(client, remote)
+		go pumpUDP(remote, client)
 	})
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFw.HandlePacket)
 
@@ -165,6 +190,24 @@ func pumpWintunToStack(dev tun.Device, linkEP *channel.Endpoint) {
 			})
 			linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)
 			pkt.DecRef()
+		}
+	}
+}
+
+// pumpUDP: 单向 datagram 转发, 任意一端关闭 / 60s idle 超时则关另一端
+func pumpUDP(src, dst net.Conn) {
+	defer src.Close()
+	defer dst.Close()
+	buf := make([]byte, 1500)
+	for {
+		_ = src.SetReadDeadline(time.Now().Add(60 * time.Second))
+		n, err := src.Read(buf)
+		if err != nil {
+			return
+		}
+		_ = dst.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if _, err := dst.Write(buf[:n]); err != nil {
+			return
 		}
 	}
 }
