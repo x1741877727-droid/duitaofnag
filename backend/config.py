@@ -62,6 +62,10 @@ class Settings:
     state_timeout: int = 30                        # 通用状态超时（秒）
     screenshot_interval: float = 1.0               # 截图间隔（秒）
     normalize_resolution: list = field(default_factory=lambda: [1280, 720])  # 归一化分辨率
+    # 加速器（FightMaster VPN）目标 proxy 地址。空字符串=保持 vpn-app 内部默认（171.80.4.221）
+    accelerator_proxy_host: str = ""
+    accelerator_proxy_port: int = 9900
+    accelerator_proxy_token: str = ""              # 预留，gameproxy -tokens 鉴权用
 
 
 class ConfigManager:
@@ -91,6 +95,9 @@ class ConfigManager:
             "state_timeout": self.settings.state_timeout,
             "screenshot_interval": self.settings.screenshot_interval,
             "normalize_resolution": self.settings.normalize_resolution,
+            "accelerator_proxy_host": self.settings.accelerator_proxy_host,
+            "accelerator_proxy_port": self.settings.accelerator_proxy_port,
+            "accelerator_proxy_token": self.settings.accelerator_proxy_token,
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

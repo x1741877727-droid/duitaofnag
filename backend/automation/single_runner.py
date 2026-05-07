@@ -418,14 +418,30 @@ class SingleInstanceRunner:
         return False
 
     async def _start_vpn(self):
-        """通过 ADB 广播启动 FightMaster VPN"""
+        """通过 ADB 广播启动 FightMaster VPN
+
+        若 settings.accelerator_proxy_host 非空，附带 --es proxy_host / --ei proxy_port
+        让 vpn-app 用本地 gameproxy 而非内部默认值（171.80.4.221）。空字符串=保留旧行为。
+        """
         logger.info("[阶段0] 启动 FightMaster VPN")
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
+
+        extras = ""
+        try:
+            from ..config import config as _cfg
+            host = getattr(_cfg.settings, "accelerator_proxy_host", "").strip()
+            if host:
+                import shlex
+                port = int(getattr(_cfg.settings, "accelerator_proxy_port", 9900))
+                extras = f" --es proxy_host {shlex.quote(host)} --ei proxy_port {port}"
+        except Exception as e:
+            logger.warning(f"[阶段0] 读 accelerator_proxy_host 失败, 走默认: {e}")
+
         await loop.run_in_executor(
             None, raw_adb._cmd, "shell",
             "am broadcast -a com.fightmaster.vpn.START "
-            "-n com.fightmaster.vpn/.CommandReceiver"
+            "-n com.fightmaster.vpn/.CommandReceiver" + extras
         )
 
     async def _stop_vpn(self):
