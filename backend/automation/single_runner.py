@@ -106,12 +106,14 @@ class SingleInstanceRunner:
         target_map: str = "狙击团竞",
         on_phase_change=None,  # 回调: (Phase) -> None
         log_dir: str = "",     # 实例日志目录（空字符串=禁用调试日志）
+        account=None,          # Step 2: 可选 AccountConfig, per-instance accel_mode
     ):
         self.adb = adb
         self.matcher = matcher
         self.role = role
         self.target_mode = target_mode
         self.target_map = target_map
+        self.account = account  # Step 2: 该 instance 对应的 AccountConfig (含 accel_mode)
         self._phase = Phase.INIT
         self._on_phase_change = on_phase_change
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
@@ -417,13 +419,38 @@ class SingleInstanceRunner:
                 return True
         return False
 
-    async def _start_vpn(self):
-        """通过 ADB 广播启动 FightMaster VPN
+    def _resolve_accel_mode(self) -> str:
+        """决议当前 instance 的加速器模式: "apk" | "tun".
 
-        若 settings.accelerator_proxy_host 非空，附带 --es proxy_host / --ei proxy_port
-        让 vpn-app 用本地 gameproxy 而非内部默认值（171.80.4.221）。空字符串=保留旧行为。
+        优先级 (高 → 低):
+          1. settings.accelerator_master_disable_tun=True  → 强制 "apk" (紧急回滚)
+          2. self.account.accel_mode (per-instance override)
+          3. settings.accelerator_default_mode (全局默认)
         """
-        logger.info("[阶段0] 启动 FightMaster VPN")
+        try:
+            from ..config import config as _cfg
+            if getattr(_cfg.settings, "accelerator_master_disable_tun", False):
+                return "apk"
+            if self.account is not None and getattr(self.account, "accel_mode", None):
+                return self.account.accel_mode
+            return getattr(_cfg.settings, "accelerator_default_mode", "apk")
+        except Exception:
+            return "apk"  # fail-safe: 任何异常退回 apk
+
+    async def _start_vpn(self):
+        """启动加速器 (按 accel_mode 分支).
+
+        mode=apk (默认): 通过 ADB 广播启动 FightMaster VPN APK; 若 settings.
+            accelerator_proxy_host 非空, 附带 --es proxy_host / --ei proxy_port.
+        mode=tun (Step 2 脱 APK): 跳过 vpn-app 广播; 流量走宿主机 gameproxy.exe
+            的 wintun TUN inbound (Round 4 接通). 模拟器内不需要任何 VPN 进程.
+        """
+        mode = self._resolve_accel_mode()
+        if mode == "tun":
+            logger.info("[阶段0] accel_mode=tun, 跳过 APK 广播 (流量走宿主机 wintun)")
+            return
+
+        logger.info("[阶段0] accel_mode=apk, 启动 FightMaster VPN")
         loop = asyncio.get_event_loop()
         raw_adb = getattr(self.adb, '_adb', self.adb)
 

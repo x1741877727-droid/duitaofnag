@@ -45,6 +45,8 @@ class AccountConfig:
     group: str                 # "A" 或 "B"
     role: str                  # "captain" 或 "member"
     instance_index: int        # 雷电模拟器实例编号（0-5）
+    # Step 2: per-instance 加速器模式覆盖 ("apk" | "tun"); None=用 settings.accelerator_default_mode
+    accel_mode: Optional[str] = None
 
 
 @dataclass
@@ -66,6 +68,9 @@ class Settings:
     accelerator_proxy_host: str = ""
     accelerator_proxy_port: int = 9900
     accelerator_proxy_token: str = ""              # 预留，gameproxy -tokens 鉴权用
+    # Step 2 脱 APK: 加速器模式 全局默认 / 紧急回滚 kill switch
+    accelerator_default_mode: str = "apk"          # "apk" | "tun"; per-account 可覆盖
+    accelerator_master_disable_tun: bool = False   # 紧急回滚: True 强制全部走 apk, 即使 mode=tun
 
 
 class ConfigManager:
@@ -98,6 +103,8 @@ class ConfigManager:
             "accelerator_proxy_host": self.settings.accelerator_proxy_host,
             "accelerator_proxy_port": self.settings.accelerator_proxy_port,
             "accelerator_proxy_token": self.settings.accelerator_proxy_token,
+            "accelerator_default_mode": self.settings.accelerator_default_mode,
+            "accelerator_master_disable_tun": self.settings.accelerator_master_disable_tun,
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -106,14 +113,18 @@ class ConfigManager:
         """保存账号配置到文件"""
         data = []
         for acc in self.accounts:
-            data.append({
+            item = {
                 "qq": acc.qq,
                 "nickname": acc.nickname,
                 "game_id": acc.game_id,
                 "group": acc.group,
                 "role": acc.role,
                 "instance_index": acc.instance_index,
-            })
+            }
+            # accel_mode 只在显式设置时写出 (None=用全局 default, 不污染 JSON)
+            if acc.accel_mode is not None:
+                item["accel_mode"] = acc.accel_mode
+            data.append(item)
         with open(ACCOUNTS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
