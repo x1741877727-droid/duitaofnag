@@ -188,6 +188,7 @@ class AccountItem(BaseModel):
     role: str = "member"
     instance_index: int = 0
     emulator_name: str = ""  # 模拟器名称（只读展示用）
+    accel_mode: Optional[str] = None  # Step 2: "apk" | "tun" | None(用全局 default)
 
 class SettingsUpdate(BaseModel):
     ldplayer_path: Optional[str] = None
@@ -195,6 +196,15 @@ class SettingsUpdate(BaseModel):
     game_package: Optional[str] = None
     game_mode: Optional[str] = None
     game_map: Optional[str] = None
+    # Step 2 加速器双形态切换
+    accelerator_default_mode: Optional[str] = None        # "apk" | "tun"
+    accelerator_master_disable_tun: Optional[bool] = None  # True=紧急强制 apk
+
+class AccelModeUpdate(BaseModel):
+    mode: Optional[str] = None  # "apk" | "tun" | null(清除 override 用全局 default)
+
+class MasterDisableTunUpdate(BaseModel):
+    disable: bool
 
 
 # =====================
@@ -438,6 +448,7 @@ def create_app(config: ConfigManager) -> FastAPI:
                 "group": a.group,
                 "role": a.role,
                 "instance_index": a.instance_index,
+                "accel_mode": a.accel_mode,
             }
             for a in config.accounts
         ]
@@ -448,11 +459,67 @@ def create_app(config: ConfigManager) -> FastAPI:
             AccountConfig(
                 qq=it.qq, nickname=it.nickname, game_id=it.game_id,
                 group=it.group, role=it.role, instance_index=it.instance_index,
+                accel_mode=it.accel_mode,
             )
             for it in items
         ]
         config.save_accounts()
         return {"ok": True}
+
+    # ── Step 2 加速器双形态切换 ──
+
+    @app.get("/api/accelerator/mode")
+    async def get_accel_mode_state():
+        """返回当前加速器全局状态 + 每 instance 的 effective mode.
+
+        effective mode 决议规则 (跟 SingleInstanceRunner._resolve_accel_mode 一致):
+          1. master_disable_tun=True → 强制 "apk"
+          2. account.accel_mode (per-instance override)
+          3. settings.accelerator_default_mode (全局 default)
+        """
+        master_disable = bool(getattr(config.settings, "accelerator_master_disable_tun", False))
+        default_mode = getattr(config.settings, "accelerator_default_mode", "apk")
+
+        instances = []
+        for a in config.accounts:
+            if master_disable:
+                effective = "apk"
+            elif a.accel_mode:
+                effective = a.accel_mode
+            else:
+                effective = default_mode
+            instances.append({
+                "instance_index": a.instance_index,
+                "qq": a.qq,
+                "nickname": a.nickname,
+                "accel_mode_override": a.accel_mode,  # None 或 "apk"/"tun"
+                "effective_mode": effective,
+            })
+        return {
+            "master_disable_tun": master_disable,
+            "default_mode": default_mode,
+            "instances": instances,
+        }
+
+    @app.post("/api/accelerator/mode/{instance_index}")
+    async def set_accel_mode(instance_index: int, payload: AccelModeUpdate):
+        """设某 instance 的 accel_mode override. mode=null/缺省 = 清 override (用全局 default)."""
+        target = next((a for a in config.accounts if a.instance_index == instance_index), None)
+        if target is None:
+            return {"ok": False, "error": f"instance {instance_index} 未找到"}
+        new_mode = payload.mode
+        if new_mode is not None and new_mode not in ("apk", "tun"):
+            return {"ok": False, "error": f"mode 必须是 apk/tun/null, 收到 {new_mode!r}"}
+        target.accel_mode = new_mode
+        config.save_accounts()
+        return {"ok": True, "instance_index": instance_index, "accel_mode": new_mode}
+
+    @app.post("/api/accelerator/master_disable_tun")
+    async def set_master_disable_tun(payload: MasterDisableTunUpdate):
+        """紧急 kill switch: True=强制全部走 apk, False=正常."""
+        config.settings.accelerator_master_disable_tun = payload.disable
+        config.save_settings()
+        return {"ok": True, "master_disable_tun": payload.disable}
 
     # ── 截图 ──
 
