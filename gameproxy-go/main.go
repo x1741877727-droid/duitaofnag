@@ -38,6 +38,12 @@ var (
 	//   Enforce  false = 仅 log（默认，安全）；true = 真正 drop
 	flagDropNonG617500AfterSec = flag.Int("drop-nonG6-17500-after-sec", 0, "17500 S→C 非 G6 包：conn age 阈值（秒），0=关闭")
 	flagDropNonG617500Enforce  = flag.Bool("drop-nonG6-17500-enforce", false, "false=log-only（不拦，仅记日志）；true=实际 drop")
+
+	// 2026-05-07 Step 2 (脱 APK): Windows wintun TUN inbound, 复用现有 socks5.go relay 改写规则
+	// 默认关. 启用时 SOCKS5 inbound 仍保留 (兼容 Step 1), TUN 是额外 inbound. Windows-only.
+	flagTunMode      = flag.Bool("tun-mode", false, "Windows 启用 wintun TUN inbound (脱 APK 模式)")
+	flagTunName      = flag.String("tun-name", "gp-tun", "wintun 网卡名 (仅 Windows)")
+	flagTunRouteFile = flag.String("tun-route-file", "", "TUN 路由白名单文件 (每行一个 CIDR / port / domain)")
 )
 
 func main() {
@@ -145,6 +151,18 @@ func main() {
 	}
 
 	go StartAPIServer(formatAPIAddr(*flagHost, *flagPort), server)
+
+	// Step 2 脱 APK: 启用 Windows TUN inbound (skeleton, 仅 Windows 真实实现)
+	if *flagTunMode {
+		go func() {
+			if err := startTunInbound(server, TunConfig{
+				Name:      *flagTunName,
+				RouteFile: *flagTunRouteFile,
+			}); err != nil {
+				logWarn("TUN inbound: %v (继续以 SOCKS5-only 模式运行)", err)
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
