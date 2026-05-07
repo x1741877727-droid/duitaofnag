@@ -81,8 +81,9 @@ func startTunDispatch(srv *Socks5Server, dev tun.Device, mtu uint32) (*stack.Sta
 		}
 
 		// 先 dial 真目标 — 失败就 RST 不浪费 endpoint 创建
+		// dialerForRelay 在 Windows 上绑物理网卡, 避免 wintun routing loop
 		target := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-		remote, dialErr := net.DialTimeout("tcp", target, 5*time.Second)
+		remote, dialErr := dialerForRelay(5 * time.Second).Dial("tcp", target)
 		if dialErr != nil {
 			logInfo("[TUN] TCP %s dial 失败: %v", target, dialErr)
 			req.Complete(true)
@@ -129,7 +130,8 @@ func startTunDispatch(srv *Socks5Server, dev tun.Device, mtu uint32) (*stack.Sta
 		dstPort := int(id.LocalPort)
 
 		target := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
-		remote, dialErr := net.Dial("udp", target)
+		// 同样绑物理网卡防 routing loop
+		remote, dialErr := dialerForRelay(5 * time.Second).Dial("udp", target)
 		if dialErr != nil {
 			logInfo("[TUN] UDP %s dial 失败: %v", target, dialErr)
 			return

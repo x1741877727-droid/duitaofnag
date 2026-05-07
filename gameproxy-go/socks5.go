@@ -276,13 +276,9 @@ func (s *Socks5Server) handleClient(ctx context.Context, conn net.Conn) {
 		// 宽松模式：仍然接 connection, 走透传/relay
 	}
 
-	// 连接目标服务器
+	// 连接目标服务器 (Windows: dialer 绑物理网卡, 避免 wintun routing loop)
 	failKey := fmt.Sprintf("%s:%d", dstAddr, dstPort)
-	dialer := net.Dialer{
-		Timeout:   5 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-	remote, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", dstAddr, dstPort))
+	remote, err := dialerForRelay(5 * time.Second).Dial("tcp", fmt.Sprintf("%s:%d", dstAddr, dstPort))
 	if err != nil {
 		fc := s.failCache.RecordFailure(failKey)
 		if fc <= 3 {

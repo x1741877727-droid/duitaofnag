@@ -34,6 +34,13 @@ func startTunInbound(srv *Socks5Server, cfg TunConfig) error {
 		cfg.Name = "gp-tun"
 	}
 
+	// 探测物理网卡 idx 给 dialerForRelay 用 (绑物理网卡避免 wintun routing loop)
+	if idx := detectPhysicalIfIdx(); idx > 0 {
+		SetPhysicalIfIdx(idx)
+	} else {
+		logWarn("tun-mode: 探测物理网卡 idx 失败, outbound 可能 routing loop")
+	}
+
 	logInfo("tun-mode: 创建 wintun adapter %q (需 wintun.dll 在 binary 同目录) ...", cfg.Name)
 	dev, err := tun.CreateTUN(cfg.Name, 1500)
 	if err != nil {
