@@ -29,7 +29,7 @@ public class FightMasterVpnService extends VpnService implements tun2socks.VpnSe
 
     // ADB 广播 Action 常量
     public static final String ACTION_START = "com.fightmaster.vpn.START";
-    public static final String ACTION_STOP = "STOP";
+    public static final String ACTION_STOP = "com.fightmaster.vpn.STOP";
     public static final String ACTION_STATUS = "com.fightmaster.vpn.STATUS";
 
     // Intent extra keys
