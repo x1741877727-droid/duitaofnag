@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -214,9 +215,11 @@ func pumpUDP(src, dst net.Conn) {
 
 // pumpStackToWintun: stack outbound packet → wintun.Write
 func pumpStackToWintun(dev tun.Device, linkEP *channel.Endpoint) {
+	// gVisor 的 ReadContext 期望 non-nil ctx (内部 ctx.Done() 用); nil 会 panic.
+	ctx := context.Background()
 	bufs := make([][]byte, 1)
 	for {
-		pkt := linkEP.ReadContext(nil)
+		pkt := linkEP.ReadContext(ctx)
 		if pkt == nil {
 			return
 		}
