@@ -532,6 +532,10 @@ export function OcrView() {
               borderRadius: 7,
               overflow: 'hidden',
               border: `1px solid ${C.border}`,
+              // 容器自身按图比例 (默认 16:9 = 960/540), 让 <img objectFit:cover> 全填,
+              // 不留 letterbox → RecogRectEditor 跟 ocrHits 的 ${x*100}% 落到图上不落黑边
+              aspectRatio: `${imgSize[0]} / ${imgSize[1]}`,
+              maxHeight: '100%',
             }}
           >
             {fullImg ? (
@@ -543,7 +547,7 @@ export function OcrView() {
                   inset: 0,
                   width: '100%',
                   height: '100%',
-                  objectFit: 'contain',
+                  objectFit: 'fill',
                   display: 'block',
                   background: '#000',
                 }}
