@@ -183,8 +183,9 @@ export function DashboardLayoutA({
   const visible = filterInstances(instances, viewFilter, errorOnly)
   const cards = buildCardData(visible, liveDecisions, now)
   const selectedSet = new Set(selectedInstances)
+  // 从派生的 instances 数组找 (PhaseTester 跑时 instancesRecord 是空, 不能用它)
   const selectedInsts = selectedInstances
-    .map((idx) => instancesRecord[String(idx)])
+    .map((idx) => instances.find((i) => i.index === idx))
     .filter((i): i is Instance => Boolean(i))
   const drawerOpen = selectedInsts.length > 0
 
