@@ -247,11 +247,23 @@ class SingleInstanceRunner:
                 elapsed += chunk
             return False
 
+        import time as _t_phase
+        _phase_started_at = _t_phase.time()
         for rnd in range(handler.max_rounds):
             if _cancelled():
                 logger.info(f"[{handler.name}] 收到取消信号 → 中止 (R{rnd})")
                 await handler.exit(ctx, PhaseResult.FAIL)
                 return False
+            # max_seconds 守门 (优先级高于 max_rounds)
+            if handler.max_seconds is not None:
+                _elapsed = _t_phase.time() - _phase_started_at
+                if _elapsed >= handler.max_seconds:
+                    logger.warning(
+                        f"[{handler.name}] 超 max_seconds={handler.max_seconds:.0f}s "
+                        f"(实际 {_elapsed:.1f}s, R{rnd}) → FAIL"
+                    )
+                    await handler.exit(ctx, PhaseResult.FAIL)
+                    return False
             ctx.phase_round = rnd + 1
             try:
                 shot = await self.adb.screenshot()

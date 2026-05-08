@@ -207,7 +207,8 @@ class PhaseHandler(ABC):
     name_cn: str = ""                      # 中文名 (如 "加速器校验")
     description: str = ""                  # 一句话: 这个 phase 在做什么 (中控台展示)
     flow_steps: list[str] = []             # 步骤分解 (按序; 中控台展示)
-    max_rounds: int = 60                   # 超过 → 自动 FAIL
+    max_rounds: int = 60                   # 超过 round 数 → 自动 FAIL
+    max_seconds: "float | None" = None     # 超过 N 秒 → 自动 FAIL (优先级高, 覆盖 max_rounds)
     round_interval_s: float = 0.5          # 每帧间隔 (RETRY 时)
 
     async def enter(self, ctx: RunContext) -> None:

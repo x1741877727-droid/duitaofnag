@@ -158,7 +158,18 @@ class RunnerFSM:
         # 时效内直接复用, 省一次 screencap (~80ms) + phash (~5ms). 超时 fallback 自拍.
         CARRYOVER_MAX_AGE_S = 0.2
 
+        _phase_started_at = time.time()
         for rnd in range(handler.max_rounds):
+            # max_seconds 守门 (优先级高于 max_rounds)
+            if handler.max_seconds is not None:
+                _elapsed = time.time() - _phase_started_at
+                if _elapsed >= handler.max_seconds:
+                    logger.warning(
+                        f"[{handler.name}] 超 max_seconds={handler.max_seconds:.0f}s "
+                        f"(实际 {_elapsed:.1f}s, R{rnd}) → FAIL"
+                    )
+                    await handler.exit(self._ctx, PhaseResult.FAIL)
+                    return PhaseResult.FAIL
             self._ctx.phase_round = rnd + 1
             # 每轮开始计时, 末尾打印各步耗时
             _t0 = time.perf_counter()

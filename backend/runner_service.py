@@ -101,8 +101,13 @@ class GlobalLogHandler(logging.Handler):
     无 instance contextvar 的日志, 标 instance=-1 (= SYS) 推到前端日志栏.
 
     contextvar 已有具体实例 (>=0) 时跳过, 让 per-instance WSLogHandler 处理,
-    避免同一条日志重复推送 (per-instance 一次 + SYS 一次).
+    避免同一条日志重复推送.
+
+    噪声过滤: round-level (`[Pn/Rn]`) / perceive 详情 (`[PERF/perceive/instN]`) 不推前端,
+    只放 phase-level + 系统钩子日志 (避免日志栏被 round 循环吵爆).
     """
+    import re as _re
+    _NOISE_RE = _re.compile(r'/R\d+\]|/perceive/|/inst\d+\]|\[PERF/')
 
     def __init__(self, callback: Callable):
         super().__init__()
@@ -111,6 +116,9 @@ class GlobalLogHandler(logging.Handler):
     def emit(self, record):
         if _current_instance.get(-1) >= 0:
             return  # per-instance handler 会处理这条
+        msg = record.getMessage()
+        if self._NOISE_RE.search(msg):
+            return  # round-level / perceive 详情, 跳过
         try:
             self._callback({
                 "type": "log",
@@ -118,7 +126,7 @@ class GlobalLogHandler(logging.Handler):
                     "timestamp": record.created,
                     "instance": -1,
                     "level": record.levelname.lower(),
-                    "message": record.getMessage(),
+                    "message": msg,
                     "state": "",
                 }
             })
