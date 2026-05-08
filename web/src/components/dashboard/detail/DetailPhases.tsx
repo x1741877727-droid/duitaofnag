@@ -96,11 +96,11 @@ export function DetailPhases({
       let tone: Tone = 'idle'
       if (result) {
         sec = Math.max(1, Math.round((result.duration_ms || 0) / 1000))
-        tone = result.ok ? 'success' : 'error'
+        tone = result.ok ? 'live' : 'error'
       } else if (PHASE_TO_STATE[phaseKey] === inst.state) {
         // 当前正在跑的 phase
         sec = Math.max(1, Math.round(inst.stateDuration ?? 0))
-        tone = 'running'
+        tone = 'warn'
       }
       return { state, label: stateLabel, sec, tone }
     })
