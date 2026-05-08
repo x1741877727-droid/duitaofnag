@@ -300,14 +300,17 @@ def _ensure_gameproxy_running(config: "ConfigManager | None" = None) -> "tuple[b
 
     boot_ps1 = Path(exe).parent / "boot_gameproxy.ps1"
     log_dir = Path(exe).parent
+    # 只用 CREATE_NEW_PROCESS_GROUP, 不用 DETACHED_PROCESS
+    # (DETACHED_PROCESS 让 powershell 立刻崩 — Windows 已知坑, stdin null handle 互动)
     creationflags = 0
     if os.name == "nt":
-        creationflags = 0x00000200 | 0x00000008  # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        creationflags = 0x00000200  # CREATE_NEW_PROCESS_GROUP
 
     try:
         if boot_ps1.is_file():
-            # 用 boot 脚本 — TUN + 网卡 + 路由一条龙
-            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            # 用 cmd /c start /B 双层启动: 让 backend 立刻返回, powershell 跑在 detached child
+            cmd = ["cmd", "/c", "start", "/B", "/MIN",
+                   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                    "-File", str(boot_ps1)]
             log_path = log_dir / "gameproxy_boot.log"
             kind = "boot_gameproxy.ps1"
