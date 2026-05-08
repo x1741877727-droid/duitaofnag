@@ -1,93 +1,207 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
+/*
+ * Design tokens — Claude Design "warm cream + Linear/Vercel" 系统.
+ * 来源: /tmp/design_dl/gameautomation/project/parts.jsx GB_C 表
+ * 风格: 浅色 ink 黑 + 暖米底 + 中性灰阶 + 极简状态色, 0 渐变 / 0 玻璃 / 0 emoji.
+ */
 @theme inline {
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  --font-sans:
+    'Inter', 'PingFang SC', 'Source Han Sans SC', ui-sans-serif, system-ui,
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono:
+    'IBM Plex Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono',
+    Menlo, Consolas, monospace;
 
-  /* 米色/奶油色调 */
-  --color-background: #faf8f5;
-  --color-foreground: #1a1a1a;
-  --color-card: #ffffff;
-  --color-card-foreground: #1a1a1a;
+  /* 主体色阶 */
+  --color-background: #f7f6f2;        /* bg — 暖米 */
+  --color-foreground: #1a1a17;        /* ink — 主文字, 近黑 */
+  --color-card: #ffffff;              /* surface — 卡 */
+  --color-card-foreground: #1a1a17;
   --color-popover: #ffffff;
-  --color-popover-foreground: #1a1a1a;
-  --color-secondary: #f3efe8;
-  --color-secondary-foreground: #5c5549;
-  --color-muted: #f0ece5;
-  --color-muted-foreground: #8a8278;
-  --color-accent: #f0ece5;
-  --color-accent-foreground: #1a1a1a;
-  --color-border: #e8e2d9;
-  --color-input: #e8e2d9;
+  --color-popover-foreground: #1a1a17;
 
-  /* 深绿强调色 */
-  --color-primary: #2d6a4f;
+  --color-secondary: #f1efe9;         /* surface2 */
+  --color-secondary-foreground: #4a463e;
+  --color-muted: #f1efe9;             /* surface2 同色 */
+  --color-muted-foreground: #4a463e;  /* ink2 */
+  --color-accent: #3b3a36;            /* accent — 选中态用, 近黑中性 */
+  --color-accent-foreground: #ffffff;
+
+  --color-border: #e7e3da;            /* border */
+  --color-border-soft: #efece4;       /* borderSoft */
+  --color-input: #e7e3da;
+  --color-ring: #3b3a36;
+
+  /* 灰阶梯度 (ink2/3/4) */
+  --color-subtle: #7d7869;            /* ink3 */
+  --color-fainter: #aca695;           /* ink4 */
+
+  /* 状态色 — 跟 archive-view.jsx 实际代码对齐 */
+  --color-live: #16a34a;
+  --color-live-soft: #dcfce7;
+  --color-warn: #d97706;
+  --color-warn-soft: #fef3c7;
+  --color-error: #dc2626;
+  --color-error-soft: #fee2e2;
+  --color-error-bg: #fff1f2;
+  --color-idle: #71717a;
+  --color-idle-soft: #f4f4f5;
+
+  /* 兼容旧别名 (后续阶段逐步删) */
+  --color-primary: #3b3a36;           /* 用 accent 代替 deep green */
   --color-primary-foreground: #ffffff;
-  --color-ring: #2d6a4f;
-  --color-destructive: #c0392b;
+  --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
-
-  /* 状态颜色 - 自然色调 */
-  --color-success: #2d6a4f;
-  --color-success-muted: #d8f3dc;
-  --color-warning: #b8860b;
+  --color-success: #16a34a;
+  --color-success-muted: #dcfce7;
+  --color-warning: #d97706;
   --color-warning-muted: #fef3c7;
-  --color-info: #3b7dd8;
-  --color-info-muted: #dbeafe;
-  --color-error: #c0392b;
-  --color-error-muted: #fde8e8;
+  --color-info: #1a1a17;              /* 中性化, 不用蓝 */
+  --color-info-muted: #f1efe9;
 
-  /* 队伍颜色 */
-  --color-team-a: #3b7dd8;
+  /* 5-tier 颜色 (识别证据用, 跟 archive-view.jsx 锁死) */
+  --color-tier-1: #16a34a;            /* T1 模板 = live 绿 */
+  --color-tier-1-soft: #dcfce7;
+  --color-tier-2: #d97706;            /* T2 OCR = warn 琥珀 */
+  --color-tier-2-soft: #fef3c7;
+  --color-tier-3: #1a1a17;            /* T3 YOLO = ink 黑 */
+  --color-tier-3-soft: #efece4;
+  --color-tier-4: #7d7869;            /* T4 Memory = ink3 灰 */
+  --color-tier-4-soft: #efece4;
+  --color-tier-5: #aca695;            /* T5 兜底 = ink4 浅灰 */
+  --color-tier-5-soft: #f4f4f5;
+
+  /* 队伍色 — 6 队. 保留中性化方向, 不用饱和色 */
+  --color-team-a: #2563eb;
   --color-team-a-muted: #dbeafe;
-  --color-team-b: #c2812d;
-  --color-team-b-muted: #fef3c7;
-  --color-team-c: #7c3aed;
-  --color-team-c-muted: #ede9fe;
-  --color-team-d: #0d9488;
-  --color-team-d-muted: #ccfbf1;
-  --color-team-e: #db2777;
-  --color-team-e-muted: #fce7f3;
-  --color-team-f: #65a30d;
-  --color-team-f-muted: #ecfccb;
+  --color-team-b: #16a34a;
+  --color-team-b-muted: #dcfce7;
+  --color-team-c: #d97706;
+  --color-team-c-muted: #fef3c7;
+  --color-team-d: #db2777;
+  --color-team-d-muted: #fce7f3;
+  --color-team-e: #7c3aed;
+  --color-team-e-muted: #ede9fe;
+  --color-team-f: #0d9488;
+  --color-team-f-muted: #ccfbf1;
 
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.625rem;
-  --radius-xl: 0.75rem;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
 }
 
 @layer base {
   * {
     @apply border-border;
   }
+  html,
+  body,
+  #root {
+    background: var(--color-background);
+  }
   body {
     @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
     font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 }
 
-/* 滚动条 */
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d4cec4; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #b8b0a4; }
+/* 滚动条 — 细 + 中性 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-fainter);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-subtle);
+  background-clip: content-box;
+}
 
-/* 页面切换动画 */
+/* 字体修饰 */
+.font-mono,
+.gb-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.gb-tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 动画 */
 @keyframes fadeSlideIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 @keyframes slideDown {
-  from { opacity: 0; max-height: 0; }
-  to { opacity: 1; max-height: 500px; }
+  from {
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 500px;
+  }
+}
+@keyframes gbPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes gbBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
 }
 
-.animate-page { animation: fadeSlideIn 0.25s ease-out; }
-.animate-fade { animation: fadeIn 0.2s ease-out; }
-.animate-expand { animation: slideDown 0.2s ease-out; overflow: hidden; }
+.animate-page {
+  animation: fadeSlideIn 0.25s ease-out;
+}
+.animate-fade {
+  animation: fadeIn 0.2s ease-out;
+}
+.animate-expand {
+  animation: slideDown 0.2s ease-out;
+  overflow: hidden;
+}
+.gb-pulse {
+  animation: gbPulse 1.4s ease-in-out infinite;
+}
+.gb-blink {
+  animation: gbBlink 0.9s ease-in-out infinite;
+}
