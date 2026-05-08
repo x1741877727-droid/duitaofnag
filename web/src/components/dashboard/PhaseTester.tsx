@@ -240,6 +240,34 @@ export function PhaseTester() {
     }
     refreshProgress()
 
+    // phase → InstanceState 映射 (PhaseTester 用前端模拟 state, 因为 backend test_phase
+    // 不 broadcast state_change/phase_change 到 /ws, store.instances 永远 init)
+    const PHASE_TO_STATE: Record<string, import('@/lib/store').InstanceState> = {
+      P0: 'accelerator',
+      P1: 'launch_game',
+      P2: 'dismiss_popups',
+      P3a: 'team_create',
+      P3b: 'team_join',
+      P4: 'map_setup',
+      P5: 'ready',
+    }
+    const updateInstance = useAppStore.getState().updateInstance
+    const setInstanceState = (idx: number, state: import('@/lib/store').InstanceState) => {
+      const acct = accounts.find((a) => a.index === idx)
+      // updateInstance 容许 partial; 同时塞 group/role/nickname 以防 record 之前没条目
+      updateInstance(String(idx), {
+        index: idx,
+        state,
+        group: (acct?.group ?? 'A') as TeamGroup,
+        role: (acct?.role || 'member') as 'captain' | 'member',
+        nickname: acct?.nickname || `实例${idx}`,
+        error: '',
+        stateDuration: 0,
+        adbSerial: acct?.adbSerial || `emulator-${5554 + idx * 2}`,
+        stageTimes: {},
+      })
+    }
+
     // ── 2) 单 (instance, phase) 跑 + 写 result + 计数. 返回 ResultRow + 透传 scheme (P3a 用)
     type RunOut = ResultRow & { scheme?: string }
     const runPhase = async (
@@ -253,6 +281,8 @@ export function PhaseTester() {
         const r: RunOut = { phase, phase_name: `#${tgt} ${phase}`, ok: false, error: '未知 phase' }
         addPhaseResult(r); failCount++; return r
       }
+      // 前端立即把 instance 状态切成对应 phase, 监控墙卡片亮起 + MJPEG 开始接流
+      setInstanceState(tgt, PHASE_TO_STATE[phase] || 'in_game')
       const t0 = Date.now()
       try {
         const data = await runOneTask(phase, tgt, role, (ms) => {
@@ -267,7 +297,10 @@ export function PhaseTester() {
           error: data.ok ? undefined : data.error,
           scheme: data.scheme,
         }
-        addPhaseResult(r); r.ok ? okCount++ : failCount++; return r
+        addPhaseResult(r); r.ok ? okCount++ : failCount++
+        // 失败时切 error, 成功时保持 phase state (下个 phase 开始时再覆盖)
+        if (!data.ok) setInstanceState(tgt, 'error')
+        return r
       } catch (e) {
         const r: RunOut = {
           phase,
@@ -276,7 +309,7 @@ export function PhaseTester() {
           duration_ms: Date.now() - t0,
           error: String(e),
         }
-        addPhaseResult(r); failCount++; return r
+        addPhaseResult(r); failCount++; setInstanceState(tgt, 'error'); return r
       }
     }
 
