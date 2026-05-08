@@ -5,7 +5,8 @@
  */
 
 import { cn } from '@/lib/utils'
-import type { Instance, Emulator, AccountAssignment } from '@/lib/store'
+import type { Emulator, AccountAssignment } from '@/lib/store'
+import { PhaseTester } from './PhaseTester'
 
 function greetByHour(): string {
   const h = new Date().getHours()
@@ -105,6 +106,11 @@ export function StandbyState({
               去设置
             </button>
           </div>
+        </div>
+
+        {/* PhaseTester (dev only — 由其内部根据 isRunning gate) */}
+        <div className="mt-2 mb-6">
+          <PhaseTester />
         </div>
 
         {/* preview */}
