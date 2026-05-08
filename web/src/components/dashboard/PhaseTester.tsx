@@ -213,6 +213,9 @@ export function PhaseTester() {
 
   const runTest = async () => {
     if (!canRun) return
+    // DEBUG: 打印 selKeys 跟 targets, 让用户能在 devtools console 看见自己实际选了什么
+    console.log('[PhaseTester] runTest selKeys=', selKeys, 'targets=', targets,
+                'accounts=', accounts.map(a => `#${a.index}/${a.group}/${a.role}`))
     setPhaseTester({ busy: true, progress: '准备...', runningTargets: [...targets] })
     let okCount = 0
     let failCount = 0
@@ -230,6 +233,8 @@ export function PhaseTester() {
       else sq.members.push(idx)
     }
     const squads = Object.values(groups)
+    console.log('[PhaseTester] 切组结果 squads=',
+      squads.map(s => ({group: s.group, captain: s.captain, members: s.members})))
 
     // 进度面板: 各 instance 实时 elapsed
     const elapsedByTgt: Record<number, number> = {}
