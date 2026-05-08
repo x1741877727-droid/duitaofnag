@@ -153,13 +153,58 @@ export function PhaseTester() {
     })
   }
 
+  // 单 (phase, target) 跑一次: POST + 轮询 task_id 直到 done. 失败抛 Error.
+  // 返回 { ok, phase_name, duration_ms, error?, elapsed_ms_last? }
+  const runOneTask = async (
+    phase: string,
+    tgt: number,
+    role: 'captain' | 'member',
+    onProgress: (elapsedMs: number) => void,
+  ): Promise<{ ok: boolean; phase_name?: string; duration_ms?: number; error?: string }> => {
+    const startRes = await fetch('/api/runner/test_phase', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instance: tgt,
+        phase,
+        role,
+        expected_id: phase === 'P5' ? expectedId : undefined,
+        keep_going: keepGoing,
+      }),
+    })
+    const startData = (await startRes.json()) as {
+      ok?: boolean; task_id?: string; error?: string
+    }
+    if (!startData.task_id) throw new Error(startData.error || 'task_id 缺失')
+
+    const tid = startData.task_id
+    const POLL_MS = 1000
+    const MAX_WAIT_MS = 240_000
+    const tStart = Date.now()
+    while (true) {
+      await new Promise((r) => setTimeout(r, POLL_MS))
+      if (Date.now() - tStart > MAX_WAIT_MS) {
+        throw new Error(`轮询超时 ${MAX_WAIT_MS / 1000}s`)
+      }
+      const stRes = await fetch(`/api/runner/test_phase/${tid}`)
+      const st = (await stRes.json()) as {
+        status?: string; result?: { ok?: boolean; phase_name?: string; duration_ms?: number; error?: string }; elapsed_ms?: number
+      }
+      onProgress(st.elapsed_ms || 0)
+      if (st.status === 'done') {
+        const r = st.result || {}
+        return { ok: r.ok !== false, phase_name: r.phase_name, duration_ms: r.duration_ms, error: r.error }
+      }
+    }
+  }
+
   const runTest = async () => {
     if (!canRun) return
-    // 快照 targets — 后续监控墙用 runningTargets, 跟用户在监控墙点卡片选择脱钩
     setPhaseTester({ busy: true, progress: '准备...', runningTargets: [...targets] })
     let okCount = 0
     let failCount = 0
     try {
+      // phase 之间串行 (P0 全部完成 → P1 全部完成 → P2 ...)
       for (const phase of selKeys) {
         const meta = RUNNER_PHASES.find((p) => p.key === phase)
         if (!meta) continue
@@ -172,78 +217,49 @@ export function PhaseTester() {
             })
           : targets
 
-        for (const tgt of phaseTargets) {
-          setPhaseTester({ progress: `${phase} 跑中... #${tgt}` })
-          const acct = accounts.find((a) => a.index === tgt)
-          const fallbackRole = (acct?.role || 'captain') as 'captain' | 'member'
-          const role = meta.role ? effRole(tgt, fallbackRole) : fallbackRole
-          const t0 = Date.now()
-          try {
-            // 1) POST 启动后台 task
-            const startRes = await fetch('/api/runner/test_phase', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                instance: tgt,
-                phase,
-                role,
-                expected_id: phase === 'P5' ? expectedId : undefined,
-                keep_going: keepGoing,
-              }),
-            })
-            const startData = (await startRes.json()) as {
-              ok?: boolean; task_id?: string; error?: string
-            }
-            if (!startData.task_id) {
-              throw new Error(startData.error || 'task_id 缺失')
-            }
+        if (phaseTargets.length === 0) continue
 
-            // 2) 轮询直到 done — 这里 await 才真等到 phase 跑完, 保证 phase/target 严格串行
-            let data: { ok?: boolean; phase_name?: string; duration_ms?: number; error?: string } = {}
-            const tid = startData.task_id
-            const POLL_MS = 1000
-            const MAX_WAIT_MS = 240_000   // 4 分钟单 phase 上限 (P2 max_seconds 180s + 余量)
-            const tStart = Date.now()
-            while (true) {
-              await new Promise((r) => setTimeout(r, POLL_MS))
-              if (Date.now() - tStart > MAX_WAIT_MS) {
-                throw new Error(`轮询超时 ${MAX_WAIT_MS / 1000}s`)
-              }
-              const stRes = await fetch(`/api/runner/test_phase/${tid}`)
-              const st = (await stRes.json()) as {
-                status?: string; result?: typeof data; elapsed_ms?: number
-              }
-              setPhaseTester({
-                progress: `${phase} 跑中... #${tgt} ${Math.round((st.elapsed_ms || 0) / 1000)}s`,
+        // 同 phase 内 N 实例**并行** (Promise.all). 进度面板实时 round-robin 显示各实例 elapsed.
+        const elapsedByTgt: Record<number, number> = {}
+        const refreshProgress = () => {
+          const parts = phaseTargets.map((t) => `#${t}:${Math.round((elapsedByTgt[t] || 0) / 1000)}s`)
+          setPhaseTester({ progress: `${phase} 并行 ${phaseTargets.length} 实例 · ${parts.join(' ')}` })
+        }
+        refreshProgress()
+
+        const results = await Promise.all(
+          phaseTargets.map(async (tgt) => {
+            const acct = accounts.find((a) => a.index === tgt)
+            const fallbackRole = (acct?.role || 'captain') as 'captain' | 'member'
+            const role = meta.role ? effRole(tgt, fallbackRole) : fallbackRole
+            const t0 = Date.now()
+            try {
+              const data = await runOneTask(phase, tgt, role, (ms) => {
+                elapsedByTgt[tgt] = ms
+                refreshProgress()
               })
-              if (st.status === 'done') {
-                data = st.result || {}
-                break
-              }
+              return {
+                phase,
+                phase_name: `#${tgt} ${data.phase_name || meta.name}`,
+                ok: data.ok,
+                duration_ms: data.duration_ms ?? Date.now() - t0,
+                error: data.ok ? undefined : data.error,
+              } as ResultRow
+            } catch (e) {
+              return {
+                phase,
+                phase_name: `#${tgt} ${meta.name}`,
+                ok: false,
+                duration_ms: Date.now() - t0,
+                error: String(e),
+              } as ResultRow
             }
+          }),
+        )
 
-            const ok = data.ok !== false
-            const result: ResultRow = {
-              phase,
-              phase_name: `#${tgt} ${data.phase_name || meta.name}`,
-              ok,
-              duration_ms: data.duration_ms ?? Date.now() - t0,
-              error: ok ? undefined : data.error,
-            }
-            addPhaseResult(result)
-            ok ? okCount++ : failCount++
-            if (!ok && !keepGoing) break
-          } catch (e) {
-            addPhaseResult({
-              phase,
-              phase_name: `#${tgt} ${meta.name}`,
-              ok: false,
-              duration_ms: Date.now() - t0,
-              error: String(e),
-            })
-            failCount++
-            if (!keepGoing) break
-          }
+        for (const r of results) {
+          addPhaseResult(r)
+          r.ok ? okCount++ : failCount++
         }
         if (failCount > 0 && !keepGoing) break
       }
