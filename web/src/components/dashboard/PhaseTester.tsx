@@ -179,7 +179,8 @@ export function PhaseTester() {
           const role = meta.role ? effRole(tgt, fallbackRole) : fallbackRole
           const t0 = Date.now()
           try {
-            const res = await fetch('/api/runner/test_phase', {
+            // 1) POST 启动后台 task
+            const startRes = await fetch('/api/runner/test_phase', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -190,12 +191,37 @@ export function PhaseTester() {
                 keep_going: keepGoing,
               }),
             })
-            const data = (await res.json()) as {
-              ok?: boolean
-              phase_name?: string
-              duration_ms?: number
-              error?: string
+            const startData = (await startRes.json()) as {
+              ok?: boolean; task_id?: string; error?: string
             }
+            if (!startData.task_id) {
+              throw new Error(startData.error || 'task_id 缺失')
+            }
+
+            // 2) 轮询直到 done — 这里 await 才真等到 phase 跑完, 保证 phase/target 严格串行
+            let data: { ok?: boolean; phase_name?: string; duration_ms?: number; error?: string } = {}
+            const tid = startData.task_id
+            const POLL_MS = 1000
+            const MAX_WAIT_MS = 240_000   // 4 分钟单 phase 上限 (P2 max_seconds 180s + 余量)
+            const tStart = Date.now()
+            while (true) {
+              await new Promise((r) => setTimeout(r, POLL_MS))
+              if (Date.now() - tStart > MAX_WAIT_MS) {
+                throw new Error(`轮询超时 ${MAX_WAIT_MS / 1000}s`)
+              }
+              const stRes = await fetch(`/api/runner/test_phase/${tid}`)
+              const st = (await stRes.json()) as {
+                status?: string; result?: typeof data; elapsed_ms?: number
+              }
+              setPhaseTester({
+                progress: `${phase} 跑中... #${tgt} ${Math.round((st.elapsed_ms || 0) / 1000)}s`,
+              })
+              if (st.status === 'done') {
+                data = st.result || {}
+                break
+              }
+            }
+
             const ok = data.ok !== false
             const result: ResultRow = {
               phase,
