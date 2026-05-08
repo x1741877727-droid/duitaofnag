@@ -43,8 +43,10 @@ interface PhaseDef {
   desc: string
   /** 该 phase 是否需要 role (captain/member) */
   role: boolean
-  /** 仅 captain 跑这个 phase (其他 instance skip) */
+  /** 仅 captain 跑这个 phase (其他 instance skip). 等价于 roleScope='captain'. */
   captainOnly?: boolean
+  /** phase 适用范围: 'captain'=只队长跑, 'member'=只队员跑, 'both'/undefined=都跑 */
+  roleScope?: 'captain' | 'member' | 'both'
   /** 该 phase 需要 expected_id (10 位数字) */
   needsId?: boolean
   /** 单实例 phase, 不参与多实例切组 */
@@ -55,10 +57,10 @@ const RUNNER_PHASES: PhaseDef[] = [
   { key: 'P0',  name: '加速器校验',   desc: 'TUN 链路自检',         role: false, single: true },
   { key: 'P1',  name: '启动游戏',     desc: '模拟器内拉起游戏到 Splash',   role: false, single: true },
   { key: 'P2',  name: '清理弹窗',     desc: '开局前所有 popup → lobby',    role: false, single: true },
-  { key: 'P3a', name: '创建队伍',     desc: '队长建房 + 同步 scheme',      role: true },
-  { key: 'P3b', name: '加入队伍',     desc: '队员凭 scheme 加入',          role: true },
-  { key: 'P4',  name: '准备就绪',     desc: '队长收尾 / 队员举旗',         role: true },
-  { key: 'P5',  name: '等待真人入队', desc: '盯着 ID 出现, 240s 超时',     role: false, needsId: true, captainOnly: true },
+  { key: 'P3a', name: '创建队伍',     desc: '队长建房 + 同步 scheme',      role: true,  roleScope: 'captain' },
+  { key: 'P3b', name: '加入队伍',     desc: '队员凭 scheme 加入',          role: true,  roleScope: 'member' },
+  { key: 'P4',  name: '准备就绪',     desc: '队长收尾 / 队员举旗',         role: true,  roleScope: 'both' },
+  { key: 'P5',  name: '等待真人入队', desc: '盯着 ID 出现, 240s 超时',     role: false, needsId: true, captainOnly: true, roleScope: 'captain' },
 ]
 
 const ROLE_PHASES = new Set(['P3a', 'P3b', 'P4'])
@@ -209,13 +211,20 @@ export function PhaseTester() {
         const meta = RUNNER_PHASES.find((p) => p.key === phase)
         if (!meta) continue
 
-        // 业务约束: P5 only captain — 自动 skip 非队长 target
-        const phaseTargets = meta.captainOnly
-          ? targets.filter((idx) => {
-              const acct = accounts.find((a) => a.index === idx)
-              return acct?.role === 'captain'
-            })
-          : targets
+        // 按 phase.roleScope 过滤 target —
+        //   captain: 只队长跑 (P3a/P5)
+        //   member:  只队员跑 (P3b)
+        //   both/未设: 都跑 (P0/P1/P2/P4)
+        // captainOnly 兼容老字段
+        const scope: 'captain' | 'member' | 'both' =
+          meta.roleScope ?? (meta.captainOnly ? 'captain' : 'both')
+        const phaseTargets = targets.filter((idx) => {
+          if (scope === 'both') return true
+          // 优先 effRole (chip 上 toggle 改的) → 其次 acct.role
+          const acct = accounts.find((a) => a.index === idx)
+          const effective = effRole(idx, (acct?.role || 'captain') as 'captain' | 'member')
+          return effective === scope
+        })
 
         if (phaseTargets.length === 0) continue
 
