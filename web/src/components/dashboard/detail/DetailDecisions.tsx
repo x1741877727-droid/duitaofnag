@@ -37,21 +37,24 @@ export function DetailDecisions({
 
   const filtered = useMemo(
     () =>
-      decisions.filter((d) => {
-        if (
-          resultFilter === 'ok' &&
-          d.verify_success !== true &&
-          d.outcome !== 'success'
-        )
-          return false
-        if (
-          resultFilter === 'fail' &&
-          (d.verify_success === true || d.outcome === 'success')
-        )
-          return false
-        if (typeFilter !== 'all' && d.tap_method !== typeFilter) return false
-        return true
-      }),
+      decisions
+        .filter((d) => {
+          if (
+            resultFilter === 'ok' &&
+            d.verify_success !== true &&
+            d.outcome !== 'success'
+          )
+            return false
+          if (
+            resultFilter === 'fail' &&
+            (d.verify_success === true || d.outcome === 'success')
+          )
+            return false
+          if (typeFilter !== 'all' && d.tap_method !== typeFilter) return false
+          return true
+        })
+        .slice()
+        .reverse(),  // 倒序: 最新决策在最上 (store push 到末尾, 这里反转)
     [decisions, resultFilter, typeFilter],
   )
 

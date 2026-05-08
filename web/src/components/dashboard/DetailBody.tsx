@@ -1,7 +1,6 @@
 import { useAppStore, type Instance } from '@/lib/store'
 import { DetailHeader } from './detail/DetailHeader'
 import { DetailLive } from './detail/DetailLive'
-import { DetailTiers } from './detail/DetailTiers'
 import { DetailDecisions } from './detail/DetailDecisions'
 import { DetailPhases } from './detail/DetailPhases'
 import { EmptyDetail } from './detail/EmptyDetail'
@@ -45,14 +44,12 @@ export function DetailBody({
   const ldName = emulators.find((e) => e.index === inst.index)?.name
   const decisions = liveDecisions[inst.index] ?? []
   const phases = phaseHistory[inst.index] ?? []
-  const latest = decisions[0]
 
   return (
     <div className="h-full overflow-y-auto">
       <DetailHeader inst={inst} ldName={ldName} onClose={onClose} />
       <DetailLive inst={inst} />
       <DetailPhases inst={inst} history={phases} />
-      <DetailTiers inst={inst} decision={latest} />
       <DetailDecisions decisions={decisions} />
     </div>
   )

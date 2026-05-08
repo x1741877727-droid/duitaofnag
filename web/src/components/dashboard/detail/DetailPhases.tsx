@@ -15,6 +15,17 @@ const PHASE_TO_STATE: Record<string, InstanceState> = {
   P5: 'ready',
 }
 
+// 跟 PhaseTester.RUNNER_PHASES.roleScope 对齐 — 决定 phase 应该让谁跑
+const PHASE_ROLE_SCOPE: Record<string, 'captain' | 'member' | 'both'> = {
+  P0: 'both',
+  P1: 'both',
+  P2: 'both',
+  P3a: 'captain',
+  P3b: 'member',
+  P4: 'captain',
+  P5: 'captain',
+}
+
 /** store 里的 phaseHistory[idx] 项形态 (来自 store.ts:199). */
 export interface PhaseTransition {
   from: string
@@ -88,7 +99,13 @@ export function DetailPhases({
     const myResults = phaseTester.results.filter(
       (r) => r.phase_name?.startsWith(`#${inst.index} `) || r.phase_name?.startsWith(`#${inst.index}/`),
     )
-    phases = phaseTester.selKeys.map((phaseKey) => {
+    // 按本实例 role 过滤掉不该跑的 phase (队长不显加入队伍, 队员不显创建/设置地图/等真人)
+    const myRole = inst.role as 'captain' | 'member'
+    const myKeys = phaseTester.selKeys.filter((k) => {
+      const scope = PHASE_ROLE_SCOPE[k] ?? 'both'
+      return scope === 'both' || scope === myRole
+    })
+    phases = myKeys.map((phaseKey) => {
       const state = PHASE_TO_STATE[phaseKey] || 'init'
       const result = myResults.find((r) => r.phase === phaseKey || r.phase === `#${inst.index}/${phaseKey}`)
       const stateLabel = STATE_LABEL[state] ?? phaseKey
