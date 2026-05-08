@@ -95,9 +95,9 @@ export function DashboardLayoutA({
     if (fromSnapshot.length > 0) {
       return fromSnapshot.sort((a, b) => a.index - b.index)
     }
-    // 跑工作台时只显示勾选的实例 (用户原话: 启动几个显示几个)
+    // 跑工作台时只显示 run 时快照的 targets (跟监控墙点选脱钩, 不会因为取消 select 卡片就空)
     const sourceIdxs = phaseTesterActive
-      ? selectedInstances
+      ? (phaseTester.runningTargets || [])
       : (accounts || []).map((a) => a.index ?? 0)
     return sourceIdxs.map((idx) => {
       const acct = (accounts || []).find((a) => a.index === idx)
@@ -113,7 +113,7 @@ export function DashboardLayoutA({
         stageTimes: {},
       } as Instance
     }).sort((a, b) => a.index - b.index)
-  }, [instancesRecord, accounts, phaseTesterActive, selectedInstances])
+  }, [instancesRecord, accounts, phaseTesterActive, phaseTester.runningTargets])
 
   const [viewFilter, setViewFilter] = useState<ViewFilter>('all')
   const [errorOnly, setErrorOnly] = useState(false)

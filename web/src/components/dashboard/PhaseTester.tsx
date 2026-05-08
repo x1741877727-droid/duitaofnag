@@ -155,7 +155,8 @@ export function PhaseTester() {
 
   const runTest = async () => {
     if (!canRun) return
-    setPhaseTester({ busy: true, progress: '准备...' })
+    // 快照 targets — 后续监控墙用 runningTargets, 跟用户在监控墙点卡片选择脱钩
+    setPhaseTester({ busy: true, progress: '准备...', runningTargets: [...targets] })
     let okCount = 0
     let failCount = 0
     try {

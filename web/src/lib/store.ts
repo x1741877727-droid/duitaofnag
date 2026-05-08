@@ -225,6 +225,8 @@ interface AppState {
     busy: boolean
     progress: string
     results: { phase: string; phase_name: string; ok: boolean; duration_ms?: number; error?: string }[]
+    /** 当前/最近一次跑的目标实例 (run 开始时快照, 不跟随后续选卡变化) — 监控墙用这个显示卡 */
+    runningTargets: number[]
   }
   setPhaseTester: (patch: Partial<AppState['phaseTester']>) => void
   addPhaseResult: (r: AppState['phaseTester']['results'][number]) => void
@@ -390,6 +392,7 @@ export const useAppStore = create<AppState>((set) => ({
     busy: false,
     progress: '',
     results: [],
+    runningTargets: [],
   },
   setPhaseTester: (patch) => set((state) => ({
     phaseTester: { ...state.phaseTester, ...patch },
