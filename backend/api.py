@@ -242,40 +242,84 @@ def _find_gameproxy_exe(config: "ConfigManager | None" = None) -> "str | None":
     return None
 
 
-def _gameproxy_running() -> bool:
-    """通过 GET 127.0.0.1:9901/api/tun/state 判断 gameproxy 是否已在跑."""
+def _gameproxy_state() -> "dict | None":
+    """GET 127.0.0.1:9901/api/tun/state, 返回原始 dict (含 mode/uptime); 失败 None."""
     import urllib.request, json as _json
     try:
         with urllib.request.urlopen("http://127.0.0.1:9901/api/tun/state", timeout=1) as resp:
-            cur = _json.loads(resp.read().decode("utf-8"))
-            return bool(cur.get("ok") and (cur.get("uptime_seconds", 0) > 0 or cur.get("mode") == "tun"))
+            return _json.loads(resp.read().decode("utf-8"))
     except Exception:
+        return None
+
+
+def _gameproxy_running_tun() -> bool:
+    """gameproxy 已在跑 + 真的是 TUN 模式 (不是 socks5)."""
+    cur = _gameproxy_state()
+    if not cur or not cur.get("ok"):
         return False
+    return cur.get("mode") == "tun" and cur.get("uptime_seconds", 0) > 0
 
 
 def _ensure_gameproxy_running(config: "ConfigManager | None" = None) -> "tuple[bool, str]":
-    """同步函数 (调用方走 asyncio.to_thread). 已在跑就直接返 True; 否则 Popen 启动 + 轮询 6s.
+    """启动 gameproxy.exe + wintun TUN 网卡 + 路由表 (走 boot_gameproxy.ps1).
 
-    返回 (ok, message). 失败 message 含原因.
+    - 已在跑且是 TUN 模式 → 直接 OK
+    - 已在跑但是 socks5 / tun-pending → 杀干净重启走 boot_gameproxy.ps1
+    - 没跑 → 直接 boot 起 TUN
+
+    boot_gameproxy.ps1 含: -tun-mode + -tun-name gp-tun + 创建 wintun 网卡
+    + 配 IP 26.26.26.1/30 + 配 13 条游戏 CIDR 路由经 26.26.26.2.
+
+    要求 backend 进程是 Windows admin (New-NetIPAddress / New-NetRoute 必须特权).
     """
     import subprocess, time
     from pathlib import Path
 
-    if _gameproxy_running():
-        return True, "已在运行"
+    cur = _gameproxy_state()
+    if cur and cur.get("mode") == "tun" and cur.get("uptime_seconds", 0) > 0:
+        return True, f"已在运行 (TUN 模式, uptime={cur.get('uptime_seconds')}s)"
+
+    # 当前是 socks5 / tun-pending / 异常 → 杀干净重启
+    if cur is not None and cur.get("ok") and cur.get("mode") != "tun":
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "gameproxy.exe"],
+                    capture_output=True, timeout=5,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+            else:
+                subprocess.run(["pkill", "-f", "gameproxy"], capture_output=True, timeout=5)
+            time.sleep(1)
+        except Exception as e:
+            logger.warning(f"[api] 杀旧 gameproxy 失败 (继续重启): {e}")
 
     exe = _find_gameproxy_exe(config)
     if not exe:
         return False, "gameproxy.exe 未找到 (设置 gameproxy_path 或放到 exe 同目录)"
 
+    boot_ps1 = Path(exe).parent / "boot_gameproxy.ps1"
+    log_dir = Path(exe).parent
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = 0x00000200 | 0x00000008  # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+
     try:
-        log_dir = Path(exe).parent
-        log_path = log_dir / "gameproxy.log"
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = 0x00000200 | 0x00000008  # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        if boot_ps1.is_file():
+            # 用 boot 脚本 — TUN + 网卡 + 路由一条龙
+            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", str(boot_ps1)]
+            log_path = log_dir / "gameproxy_boot.log"
+            kind = "boot_gameproxy.ps1"
+        else:
+            # fallback: 裸启 + 至少加 -tun-mode
+            cmd = [exe, "-host", "0.0.0.0", "-port", "9900",
+                   "-tun-mode", "-tun-name", "gp-tun"]
+            log_path = log_dir / "gameproxy.log"
+            kind = "gameproxy.exe -tun-mode (无 boot 脚本兜底)"
+
         subprocess.Popen(
-            [exe],
+            cmd,
             cwd=str(log_dir),
             stdout=open(log_path, "ab"),
             stderr=subprocess.STDOUT,
@@ -283,14 +327,18 @@ def _ensure_gameproxy_running(config: "ConfigManager | None" = None) -> "tuple[b
             creationflags=creationflags,
         )
     except Exception as e:
-        return False, f"Popen 失败: {e}"
+        return False, f"Popen 失败 ({kind}): {e}"
 
-    # 等 :9901 起来, 最多 6s
-    for _ in range(12):
+    # 等 TUN 真就绪 (boot 脚本最多 30s 等 wintun 网卡 + 几秒配路由), 给到 40s
+    for _ in range(80):
         time.sleep(0.5)
-        if _gameproxy_running():
-            return True, f"已启动 (exe: {exe})"
-    return False, f"已 Popen 但 6s 内未就绪 (exe: {exe})"
+        if _gameproxy_running_tun():
+            return True, f"已启动 (TUN 模式, exe: {exe}, via {kind})"
+    # 退化: 看看至少 :9901 上来了没
+    cur2 = _gameproxy_state()
+    if cur2 and cur2.get("ok"):
+        return False, f"40s 内 TUN 未就绪 (mode={cur2.get('mode')}, uptime={cur2.get('uptime_seconds')}s) — 检查 wintun.dll / 管理员权限"
+    return False, f"40s 内 :9901 未上来 (kind={kind}, exe={exe})"
 
 
 async def _redeploy_overlay(config: "ConfigManager | None", aio_mod) -> None:
@@ -674,8 +722,8 @@ def create_app(config: ConfigManager) -> FastAPI:
         手动重启的兜底.
         """
         import asyncio as _aio
-        # 已在跑就不重复启 — 但还是顺势重推一次浮窗 (用户可能新加了模拟器)
-        if _gameproxy_running():
+        # 已在跑且是 TUN 就不重启 — 但还是顺势重推一次浮窗 (用户可能新加了模拟器)
+        if _gameproxy_running_tun():
             _aio.create_task(_redeploy_overlay(config, _aio))
             try:
                 import urllib.request, json as _json
