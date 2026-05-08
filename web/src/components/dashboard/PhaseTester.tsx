@@ -480,7 +480,7 @@ export function PhaseTester() {
         </span>
         <span className="flex-1" />
         <span className="gb-mono text-[11px] text-subtle">
-          已选 {selKeys.length} 阶段 · {targets.length} 实例
+          已选 [{selKeys.join(',') || '空'}] · {targets.length} 实例
         </span>
       </button>
 
