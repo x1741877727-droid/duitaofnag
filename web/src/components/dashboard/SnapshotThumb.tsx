@@ -33,6 +33,7 @@ export function SnapshotThumb({
   fps = 2,
   className,
   children,
+  state,
 }: {
   instanceIdx: number
   tone: Tone
@@ -41,6 +42,9 @@ export function SnapshotThumb({
   fps?: number
   className?: string
   children?: ReactNode
+  /** 实例状态. 'init'/'done' 时不接 MJPEG, 防止对没启动的 emulator 起 adb screenrecord
+   * 导致 backend native 段错误 (PyAV decode 空 H.264 流). */
+  state?: string
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const mock = isMockMode()
@@ -117,7 +121,19 @@ export function SnapshotThumb({
     )
   }
 
-  // 真模式 — MJPEG
+  // 真模式 — MJPEG. instance 没启动 (state init/done) 时显示占位, 不挂流避免 backend 崩.
+  const isInactive = state === 'init' || state === 'done' || !state
+  if (isInactive) {
+    return (
+      <div
+        className={cn('relative w-full h-full overflow-hidden flex items-center justify-center', className)}
+        style={{ background: '#1a1a17', color: '#7d7869' }}
+      >
+        <span className="text-[11px] gb-mono">未启动</span>
+        {children}
+      </div>
+    )
+  }
   const wQuery = width > 0 ? `w=${width}&` : ''
   const src = `/api/stream/${instanceIdx}?${wQuery}fps=${fps}`
 

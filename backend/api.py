@@ -836,6 +836,22 @@ def create_app(config: ConfigManager) -> FastAPI:
         fps = max(1, min(15, int(fps)))
         adb_path = config.settings.adb_path or os.path.join(
             config.settings.ldplayer_path, "adb.exe")
+
+        # 守护: 确认目标 emulator 在线 (`adb devices` 含 emulator-XXXX device).
+        # 否则 ScreenrecordStream 对不存在的 emulator 起 screenrecord → PyAV decode
+        # 空 H.264 流 → native 段错误 → backend 整个进程 abort. 这是历史 bug 重现保护.
+        try:
+            serial = f"emulator-{5554 + int(instance_index) * 2}"
+            r = subprocess.run([adb_path, "devices"], capture_output=True, timeout=3,
+                               creationflags=_SF)
+            online = r.stdout.decode("utf-8", errors="replace") if r.stdout else ""
+            if f"{serial}\tdevice" not in online:
+                from fastapi import HTTPException
+                raise HTTPException(503, f"模拟器 {serial} 未在线 (启动 LDPlayer 实例后再开监控)")
+        except subprocess.TimeoutExpired:
+            from fastapi import HTTPException
+            raise HTTPException(503, "adb devices 超时, emulator 状态未知")
+
         broadcaster = service.get_or_create_stream_broadcaster(
             instance_index, fps=fps, max_width=int(w), adb_path=adb_path,
         )

@@ -31,6 +31,7 @@ export function DetailLive({
           errorMsg={inst.error}
           width={0}
           fps={5}
+          state={inst.state}
         />
         <div
           className="absolute left-2.5 bottom-2.5 px-2.5 py-1 rounded-md flex items-center gap-2 text-card"

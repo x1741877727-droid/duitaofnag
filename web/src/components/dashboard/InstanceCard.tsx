@@ -61,6 +61,7 @@ export function InstanceCard({
             errorMsg={inst.error}
             width={216}
             fps={1}
+            state={inst.state}
           />
           <div
             className="absolute top-1 left-1 gb-mono text-[10px] font-semibold text-card"
@@ -150,6 +151,7 @@ export function InstanceCard({
           errorMsg={inst.error}
           width={320}
           fps={2}
+          state={inst.state}
         />
 
         {/* index 角标 (左上) */}
