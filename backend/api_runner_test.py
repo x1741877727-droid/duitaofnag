@@ -201,6 +201,11 @@ async def _execute_test_phase(req: TestPhaseReq) -> dict:
     except Exception:
         pass
 
+    logger.info(
+        f"[test_phase] DONE instance={req.instance} phase={phase} ok={ok} "
+        f"scheme_out={'[' + scheme_out[:48] + '...]' if scheme_out else '[EMPTY]'}"
+    )
+
     try:
         from .automation.decision_log import get_recorder
         rec = get_recorder()
