@@ -205,73 +205,142 @@ export function PhaseTester() {
     setPhaseTester({ busy: true, progress: '准备...', runningTargets: [...targets] })
     let okCount = 0
     let failCount = 0
-    try {
-      // phase 之间串行 (P0 全部完成 → P1 全部完成 → P2 ...)
-      for (const phase of selKeys) {
-        const meta = RUNNER_PHASES.find((p) => p.key === phase)
-        if (!meta) continue
 
-        // 按 phase.roleScope 过滤 target —
-        //   captain: 只队长跑 (P3a/P5)
-        //   member:  只队员跑 (P3b)
-        //   both/未设: 都跑 (P0/P1/P2/P4)
-        // captainOnly 兼容老字段
-        const scope: 'captain' | 'member' | 'both' =
-          meta.roleScope ?? (meta.captainOnly ? 'captain' : 'both')
-        const phaseTargets = targets.filter((idx) => {
-          if (scope === 'both') return true
-          // 优先 effRole (chip 上 toggle 改的) → 其次 acct.role
-          const acct = accounts.find((a) => a.index === idx)
-          const effective = effRole(idx, (acct?.role || 'captain') as 'captain' | 'member')
-          return effective === scope
-        })
+    // ── 1) 按真实 accounts.group 分大组 (A/B/C/...). 旧版按 squadSize 切组弃用.
+    // 每组拣一个 captain (effRole==='captain'), 其余为 members.
+    type Squad = { group: string; captain: number | null; members: number[] }
+    const groups: Record<string, Squad> = {}
+    for (const idx of targets) {
+      const acct = accounts.find((a) => a.index === idx)
+      const g = String(acct?.group ?? 'A')
+      const role = effRole(idx, (acct?.role || 'captain') as 'captain' | 'member')
+      const sq = (groups[g] ||= { group: g, captain: null, members: [] })
+      if (role === 'captain' && sq.captain === null) sq.captain = idx
+      else sq.members.push(idx)
+    }
+    const squads = Object.values(groups)
 
-        if (phaseTargets.length === 0) continue
+    // 进度面板: 各 instance 实时 elapsed
+    const elapsedByTgt: Record<number, number> = {}
+    const refreshProgress = () => {
+      const all = [...targets].sort((a, b) => a - b)
+      const parts = all.map((t) => `#${t}:${Math.round((elapsedByTgt[t] || 0) / 1000)}s`)
+      setPhaseTester({ progress: `并发 ${squads.length} 组 · ${parts.join(' ')}` })
+    }
+    refreshProgress()
 
-        // 同 phase 内 N 实例**并行** (Promise.all). 进度面板实时 round-robin 显示各实例 elapsed.
-        const elapsedByTgt: Record<number, number> = {}
-        const refreshProgress = () => {
-          const parts = phaseTargets.map((t) => `#${t}:${Math.round((elapsedByTgt[t] || 0) / 1000)}s`)
-          setPhaseTester({ progress: `${phase} 并行 ${phaseTargets.length} 实例 · ${parts.join(' ')}` })
-        }
-        refreshProgress()
-
-        const results = await Promise.all(
-          phaseTargets.map(async (tgt) => {
-            const acct = accounts.find((a) => a.index === tgt)
-            const fallbackRole = (acct?.role || 'captain') as 'captain' | 'member'
-            const role = meta.role ? effRole(tgt, fallbackRole) : fallbackRole
-            const t0 = Date.now()
-            try {
-              const data = await runOneTask(phase, tgt, role, (ms) => {
-                elapsedByTgt[tgt] = ms
-                refreshProgress()
-              })
-              return {
-                phase,
-                phase_name: `#${tgt} ${data.phase_name || meta.name}`,
-                ok: data.ok,
-                duration_ms: data.duration_ms ?? Date.now() - t0,
-                error: data.ok ? undefined : data.error,
-              } as ResultRow
-            } catch (e) {
-              return {
-                phase,
-                phase_name: `#${tgt} ${meta.name}`,
-                ok: false,
-                duration_ms: Date.now() - t0,
-                error: String(e),
-              } as ResultRow
-            }
-          }),
-        )
-
-        for (const r of results) {
-          addPhaseResult(r)
-          r.ok ? okCount++ : failCount++
-        }
-        if (failCount > 0 && !keepGoing) break
+    // ── 2) 单 (instance, phase) 跑 + 写 result + 计数
+    const runPhase = async (
+      tgt: number,
+      phase: string,
+      role: 'captain' | 'member',
+    ): Promise<ResultRow> => {
+      const meta = RUNNER_PHASES.find((p) => p.key === phase)
+      if (!meta) {
+        const r: ResultRow = { phase, phase_name: `#${tgt} ${phase}`, ok: false, error: '未知 phase' }
+        addPhaseResult(r); failCount++; return r
       }
+      const t0 = Date.now()
+      try {
+        const data = await runOneTask(phase, tgt, role, (ms) => {
+          elapsedByTgt[tgt] = ms
+          refreshProgress()
+        })
+        const r: ResultRow = {
+          phase,
+          phase_name: `#${tgt} ${data.phase_name || meta.name}`,
+          ok: data.ok,
+          duration_ms: data.duration_ms ?? Date.now() - t0,
+          error: data.ok ? undefined : data.error,
+        }
+        addPhaseResult(r); r.ok ? okCount++ : failCount++; return r
+      } catch (e) {
+        const r: ResultRow = {
+          phase,
+          phase_name: `#${tgt} ${meta.name}`,
+          ok: false,
+          duration_ms: Date.now() - t0,
+          error: String(e),
+        }
+        addPhaseResult(r); failCount++; return r
+      }
+    }
+
+    // ── 3) 单大组的状态机
+    //   per-instance pipeline: P0 → P1 → P2 (不等队友, 队长跑完立即 P3a)
+    //   P3a (captain) → P3b (members 等队长 P3a done)
+    //   P4: 按 roleScope='both' 队长 + 队员都跑 (并发, 等齐)
+    //   P5: 只队长 (captainOnly)
+    const ROLE_PHASE_KEYS = new Set(['P3a', 'P3b', 'P4', 'P5'])
+    const preSquadPhases = selKeys.filter((k) => !ROLE_PHASE_KEYS.has(k))
+
+    const runOneSquad = async (sq: Squad) => {
+      const all = [...(sq.captain !== null ? [sq.captain] : []), ...sq.members]
+      if (all.length === 0) return
+
+      // 每实例独立 P0→P1→P2 串链 (返 promise: ok=false 算失败)
+      const preDone: Record<number, Promise<boolean>> = {}
+      for (const idx of all) {
+        const role: 'captain' | 'member' = idx === sq.captain ? 'captain' : 'member'
+        preDone[idx] = (async () => {
+          for (const phase of preSquadPhases) {
+            const r = await runPhase(idx, phase, role)
+            if (!r.ok && !keepGoing) return false
+          }
+          return true
+        })()
+      }
+
+      // P3a: 队长自己 P0/1/2 完立刻跑 (不等队员)
+      let p3aPromise: Promise<ResultRow> | null = null
+      if (selKeys.includes('P3a') && sq.captain !== null) {
+        const cap = sq.captain
+        p3aPromise = (async () => {
+          const ok = await preDone[cap]
+          if (!ok && !keepGoing) {
+            const r: ResultRow = { phase: 'P3a', phase_name: `#${cap} 创建队伍`, ok: false, error: '队长前置失败' }
+            addPhaseResult(r); failCount++; return r
+          }
+          return runPhase(cap, 'P3a', 'captain')
+        })()
+      }
+
+      // P3b: 队员等自己 P0/1/2 完 + 队长 P3a 完
+      const p3bPromises: Promise<unknown>[] = []
+      if (selKeys.includes('P3b') && sq.members.length > 0 && p3aPromise) {
+        for (const memIdx of sq.members) {
+          p3bPromises.push((async () => {
+            const memOk = await preDone[memIdx]
+            if (!memOk && !keepGoing) return
+            const lr = await p3aPromise!
+            if (!lr.ok) return  // 队长 P3a 没成功, P3b 跳 (backend scheme 没同步)
+            await runPhase(memIdx, 'P3b', 'member')
+          })())
+        }
+      }
+
+      await Promise.allSettled([
+        ...(p3aPromise ? [p3aPromise] : []),
+        ...p3bPromises,
+      ])
+
+      // P4: roleScope='both'. 队长 + 队员都跑 (并发, 等齐).
+      if (selKeys.includes('P4')) {
+        await Promise.allSettled(all.map((idx) => {
+          const role: 'captain' | 'member' = idx === sq.captain ? 'captain' : 'member'
+          return runPhase(idx, 'P4', role)
+        }))
+      }
+
+      // P5: 只队长 (业务约束 + RUNNER_PHASES.captainOnly)
+      if (selKeys.includes('P5') && sq.captain !== null) {
+        await runPhase(sq.captain, 'P5', 'captain')
+      }
+    }
+
+    try {
+      // ── 4) 跨大组完全并发
+      await Promise.allSettled(squads.map(runOneSquad))
     } finally {
       setPhaseTester({
         busy: false,
