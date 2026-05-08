@@ -13,9 +13,10 @@ import android.os.IBinder;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
@@ -80,30 +81,35 @@ public class OverlayService extends Service {
     private void showOverlay() {
         wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
 
-        // 外层垂直布局: 上 = 文字气泡, 下 = 猫
+        // 垂直布局: 上 = 气泡, 下 = 猫. col 整体贴屏幕底, 猫底边 = 屏幕底边.
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setGravity(Gravity.CENTER_HORIZONTAL);
 
-        // 文字: 透明背景 + ink 字 + 白色阴影描边, 任何背景下都可读
+        // 文字气泡: 半透明 ink 黑底 + 白字, 跟猫之间留 4dp 间距
         TextView bubble = new TextView(this);
         bubble.setText(getString(R.string.overlay_text));
-        bubble.setTextColor(0xFF1A1A17);
+        bubble.setTextColor(0xFFFFFFFF);
         bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f);
-        // shadowLayer 模拟描边: radius=2 让阴影成圈, dx/dy=0 居中
-        bubble.setShadowLayer(dp(2), 0, 0, 0xFFFFFFFF);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xCC1A1A17);          // 80% alpha ink 黑
+        bg.setCornerRadius(dp(8));
+        bubble.setBackground(bg);
+        bubble.setPadding(dp(7), dp(2), dp(7), dp(2));
         bubble.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams lpBubble = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        lpBubble.bottomMargin = -dp(2);          // 文字轻贴猫头
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpBubble.bottomMargin = dp(2);
         col.addView(bubble, lpBubble);
 
-        // 小猫: 透明 PNG, 缩到 40dp
+        // 小猫: 透明 PNG, 高 36dp + adjustViewBounds 自动按 240:174 比例算宽 ≈ 50dp
         ImageView cat = new ImageView(this);
         cat.setImageResource(R.drawable.cat_overlay);
         cat.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        LinearLayout.LayoutParams lpCat = new LinearLayout.LayoutParams(dp(40), dp(40));
+        cat.setAdjustViewBounds(true);
+        LinearLayout.LayoutParams lpCat = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
         col.addView(cat, lpCat);
 
         root = col;
@@ -125,9 +131,9 @@ public class OverlayService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
 
-        // 屏幕底部正中, 贴近底边 (4dp 让猫脚刚好碰底)
+        // 屏幕底部正中, 真贴底 (y=0 让猫脚直接到屏幕边缘)
         lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.y = dp(4);
+        lp.y = 0;
 
         try {
             wm.addView(root, lp);

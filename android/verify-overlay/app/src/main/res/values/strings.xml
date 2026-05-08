@@ -7,5 +7,5 @@
     <string name="status_need_permission">请先授予浮窗权限</string>
     <string name="status_ok_fmt">✓ 加速器正常 · 已运行 %1$d 分钟</string>
     <string name="status_fail_fmt">✗ 未启动: %1$s</string>
-    <string name="overlay_text">fightmaster 已启动</string>
+    <string name="overlay_text">对掏房脚本已启动</string>
 </resources>
