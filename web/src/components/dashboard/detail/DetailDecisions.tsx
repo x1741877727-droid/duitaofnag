@@ -39,22 +39,15 @@ export function DetailDecisions({
     () =>
       decisions
         .filter((d) => {
-          if (
-            resultFilter === 'ok' &&
-            d.verify_success !== true &&
-            d.outcome !== 'success'
-          )
-            return false
-          if (
-            resultFilter === 'fail' &&
-            (d.verify_success === true || d.outcome === 'success')
-          )
-            return false
+          const isOk = d.verify_success === true || d.outcome === 'success'
+          const isFail = d.verify_success === false
+          if (resultFilter === 'ok' && !isOk) return false
+          if (resultFilter === 'fail' && !isFail) return false
           if (typeFilter !== 'all' && d.tap_method !== typeFilter) return false
           return true
         })
         .slice()
-        .reverse(),  // 倒序: 最新决策在最上 (store push 到末尾, 这里反转)
+        .reverse(),
     [decisions, resultFilter, typeFilter],
   )
 
@@ -81,9 +74,16 @@ export function DetailDecisions({
         style={{ maxHeight: 240 }}
       >
         {filtered.map((d, i) => {
-          const ok =
-            d.verify_success === true ||
-            (d.verify_success == null && d.outcome === 'success')
+          // 三态: ok / fail / pending (未验证 / no_target / 等待中, 不该统一标失败)
+          let status: 'ok' | 'fail' | 'pending' = 'pending'
+          let statusText = '⋯ 等待'
+          let statusColor = 'var(--color-muted-foreground)'
+          if (d.verify_success === true || d.outcome === 'success') {
+            status = 'ok'; statusText = '✓ 成功'; statusColor = 'var(--color-live)'
+          } else if (d.verify_success === false) {
+            status = 'fail'; statusText = '✗ 失败'; statusColor = 'var(--color-error)'
+          }
+          void status
           const target = d.tap_target ?? d.outcome ?? '—'
           return (
             <div
@@ -104,11 +104,9 @@ export function DetailDecisions({
               <span className="gb-mono text-foreground truncate">{target}</span>
               <span
                 className="text-[10.5px] font-semibold"
-                style={{
-                  color: ok ? 'var(--color-live)' : 'var(--color-error)',
-                }}
+                style={{ color: statusColor }}
               >
-                {ok ? '✓ 成功' : '✗ 失败'}
+                {statusText}
               </span>
               <span className="gb-mono text-subtle text-right">{d.round}r</span>
             </div>

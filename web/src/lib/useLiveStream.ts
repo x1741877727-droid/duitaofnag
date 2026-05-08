@@ -94,9 +94,13 @@ export function useLiveStream() {
           return
         }
         switch (data.type) {
-          case 'decision':
-            pushLiveDecision(data as LiveDecisionEvent)
+          case 'decision': {
+            // backend ts 是 unix 秒, 前端统一用 ms — 一次转换防 (now-ts) 算成几千万分钟
+            const ev = data as LiveDecisionEvent
+            const ts = ev.ts && ev.ts < 1e12 ? ev.ts * 1000 : ev.ts
+            pushLiveDecision({ ...ev, ts })
             break
+          }
           case 'phase_change':
             pushPhaseChange(data as PhaseChangeEvent)
             break
