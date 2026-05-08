@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useLiveStream } from '@/lib/useLiveStream'
 import { useAppStore, type TeamGroup, type TeamRole } from '@/lib/store'
+import {
+  getDemoAccounts,
+  getDemoEmulators,
+  getDemoInstances,
+  getDemoLiveDecisions,
+  getDemoPhaseHistory,
+} from '@/lib/demo-data'
 import { Header } from '@/components/header/Header'
 import { DashboardLayoutA } from '@/components/dashboard/DashboardLayoutA'
 import { SettingsView } from '@/components/settings-view'
@@ -11,9 +18,22 @@ import { AcceleratorView } from '@/components/accelerator-view'
 import { RecognitionView } from '@/components/recognition/RecognitionView'
 import { DataView } from '@/components/data/DataView'
 
+/** 派生: URL ?demo=running|standby 时注入 mock 数据直接看视觉. */
+type DemoMode = 'running' | 'standby' | null
+function getDemoMode(): DemoMode {
+  if (typeof window === 'undefined') return null
+  const p = new URLSearchParams(window.location.search)
+  const v = p.get('demo')
+  return v === 'running' || v === 'standby' ? v : null
+}
+
 function App() {
+  const demo = getDemoMode()
+
+  // hooks 总是调用 (Rules of Hooks); demo 模式 WS 失败也不影响 mock UI
   useWebSocket()
   useLiveStream()
+
   const {
     currentView,
     showLogPanel,
@@ -24,8 +44,30 @@ function App() {
     setInstances,
   } = useAppStore()
 
+  // demo 模式: 注入 mock 数据 (只跑一次)
+  useEffect(() => {
+    if (!demo) return
+    setAccounts(getDemoAccounts())
+    setEmulators(getDemoEmulators())
+    if (demo === 'running') {
+      setInstances(getDemoInstances())
+      setIsRunning(true)
+      useAppStore.setState({
+        liveDecisions: getDemoLiveDecisions(),
+        phaseHistory: getDemoPhaseHistory(),
+        runningDuration: 8163, // 02:16:03
+        liveConnected: true,
+      })
+    } else {
+      // standby — 只注入 accounts + emulators, isRunning 保持 false → 进 HeroSplash
+      setIsRunning(false)
+      setInstances({})
+    }
+  }, [demo, setAccounts, setEmulators, setInstances, setIsRunning])
+
   // 启动时加载账号 + 模拟器
   useEffect(() => {
+    if (demo) return
     fetch('/api/accounts')
       .then((r) => r.json())
       .then((data: Record<string, unknown>[]) => {

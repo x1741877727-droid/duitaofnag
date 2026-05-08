@@ -1,12 +1,16 @@
 /**
- * StandbyState — 待启动态: 有账号但还没启动.
- * 简化版: hero 卡 + 实例预览 grid + 启动 CTA.
- * 完整 HeroSplash 动画 (states.jsx 1000+ 行) 此处不做, 只保留核心信息.
+ * StandbyState — 待启动态.
+ *
+ * 默认 (非 dev) 进 HeroSplash 全屏 hero (开工 + scope picker, 完全照搬设计).
+ * dev 模式下显示 PhaseTester (跳过 hero).
+ *
+ * 来源: states.jsx StandbyState (71-163)
  */
 
-import { cn } from '@/lib/utils'
-import type { Emulator, AccountAssignment } from '@/lib/store'
+import { useMemo, useState } from 'react'
+import { useAppStore, type AccountAssignment } from '@/lib/store'
 import { PhaseTester } from './PhaseTester'
+import { HeroSplash } from './HeroSplash'
 
 function greetByHour(): string {
   const h = new Date().getHours()
@@ -16,105 +20,95 @@ function greetByHour(): string {
   return '晚上好'
 }
 
-interface PreviewItem {
-  index: number
-  nickname: string
-  group: string
-  captain: boolean
-  emulatorReady: boolean
-  emulatorName: string
-}
-
 export function StandbyState({
   accounts,
-  emulators,
   onStart,
   onSettings,
-  className,
 }: {
-  /** 来自 store.accounts. */
   accounts: AccountAssignment[]
-  /** 来自 store.emulators. */
-  emulators: Emulator[]
   onStart: () => void
   onSettings: () => void
-  className?: string
 }) {
-  const items: PreviewItem[] = accounts.map((a) => {
-    const emu = emulators.find((e) => e.index === a.index)
-    return {
-      index: a.index,
-      nickname: a.nickname || `玩家${a.index}`,
-      group: a.group,
-      captain: a.role === 'captain',
-      emulatorReady: emu?.running ?? false,
-      emulatorName: emu?.name ?? `emulator-${5554 + a.index * 2}`,
-    }
-  })
+  const devMode = useAppStore((s) => s.devMode)
+  const tunMode: 'TUN' | 'SOCKS5' | 'OFF' = 'TUN' // TODO: read from /api/tun/state
 
-  const teamCount = new Set(items.map((i) => i.group)).size
-  const emuReady = items.filter((i) => i.emulatorReady).length
-  const total = items.length
+  // 派生 instance 数据 (从 accounts 派生满足 HeroSplash 的 Instance shape)
+  const instances = useMemo(
+    () =>
+      accounts.map((a) => ({
+        index: a.index,
+        group: a.group,
+        role: a.role,
+        nickname: a.nickname || `玩家${a.index}`,
+        state: 'init' as const,
+        error: '',
+        stateDuration: 0,
+        adbSerial: a.adbSerial,
+      })),
+    [accounts],
+  )
 
+  const greet = greetByHour()
+  const teamCount = useMemo(
+    () => new Set(instances.map((i) => i.group)).size,
+    [instances],
+  )
+
+  // dev: skip hero, show PhaseTester
+  // non-dev: 默认 hero, 用户点 "先看看" 进 reveal 模式
+  const [heroMode, setHeroMode] = useState(!devMode)
+
+  if (heroMode && !devMode) {
+    return (
+      <HeroSplash
+        greet={greet}
+        count={instances.length}
+        teamCount={teamCount}
+        accel={tunMode}
+        instances={instances}
+        onStart={() => onStart()}
+        onReveal={() => setHeroMode(false)}
+      />
+    )
+  }
+
+  // reveal mode: 简易 instance 预览 (设计的 ReadyCard + PreviewPanel 后续增强)
   return (
-    <div
-      className={cn(
-        'flex-1 flex flex-col bg-background overflow-hidden',
-        className,
-      )}
-    >
-      <div className="flex-1 overflow-y-auto px-7 py-6">
-        {/* HERO */}
-        <div className="mb-6">
-          <div className="text-[12px] text-subtle mb-1">{greetByHour()}</div>
-          <h1 className="text-[28px] font-semibold text-foreground tracking-tight leading-tight">
-            一切准备就绪
-          </h1>
-          <div className="grid grid-cols-3 gap-3 mt-5 max-w-[680px]">
-            <ReadyTile
-              label="账号"
-              value={`${total} 个号`}
-              sub={`已分 ${teamCount} 个队`}
-            />
-            <ReadyTile
-              label="模拟器"
-              value={`${emuReady}/${total}`}
-              sub="台 LDPlayer 在跑"
-              tone={emuReady < total ? 'warn' : 'live'}
-            />
-            <ReadyTile
-              label="加速器"
-              value="保护中"
-              sub="TUN 模式"
-              tone="live"
-            />
-          </div>
-          <div className="flex gap-2 mt-6">
-            <button
-              type="button"
-              onClick={onStart}
-              disabled={total === 0 || emuReady === 0}
-              className="px-5 py-2.5 rounded-lg text-[13px] font-semibold text-card cursor-pointer border bg-accent border-accent hover:bg-foreground hover:border-foreground disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            >
-              开始今天的工作 · {total} 台 →
-            </button>
-            <button
-              type="button"
-              onClick={onSettings}
-              className="px-4 py-2.5 rounded-lg text-[13px] font-medium text-muted-foreground cursor-pointer border border-border bg-card hover:border-foreground transition-colors"
-            >
-              去设置
-            </button>
-          </div>
+    <div className="flex-1 flex flex-col bg-background overflow-y-auto">
+      <div className="px-7 py-6">
+        {!devMode && (
+          <button
+            type="button"
+            onClick={() => setHeroMode(true)}
+            className="text-[11.5px] text-subtle bg-transparent border-0 cursor-pointer pb-3"
+            style={{ fontFamily: 'inherit' }}
+          >
+            ← 回封面
+          </button>
+        )}
+        <div className="text-[12px] text-subtle mb-1">{greet}</div>
+        <h1 className="text-[28px] font-semibold text-foreground tracking-tight">
+          一切准备就绪 · {instances.length} 台
+        </h1>
+        <div className="flex gap-2 mt-5">
+          <button
+            type="button"
+            onClick={onStart}
+            className="px-5 py-2.5 rounded-lg text-[13px] font-semibold text-card cursor-pointer border border-accent bg-accent hover:bg-foreground"
+          >
+            开始今天的工作 · {instances.length} 台 →
+          </button>
+          <button
+            type="button"
+            onClick={onSettings}
+            className="px-4 py-2.5 rounded-lg text-[13px] text-muted-foreground cursor-pointer border border-border bg-card hover:border-foreground"
+          >
+            去设置
+          </button>
         </div>
 
-        {/* PhaseTester (dev only — 由其内部根据 isRunning gate) */}
-        <div className="mt-2 mb-6">
-          <PhaseTester />
-        </div>
-
-        {/* preview */}
-        <div className="mt-2">
+        {/* preview list */}
+        <div className="mt-6">
           <div
             className="text-[11px] font-semibold text-muted-foreground uppercase mb-2.5"
             style={{ letterSpacing: '.04em' }}
@@ -122,12 +116,7 @@ export function StandbyState({
             实例预览
           </div>
           <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
-            {items.length === 0 && (
-              <div className="text-[13px] text-fainter px-3 py-6">
-                还没账号 — 去设置加几个吧
-              </div>
-            )}
-            {items.map((it) => (
+            {instances.map((it) => (
               <div
                 key={it.index}
                 className="rounded-md p-2.5 bg-card border border-border flex items-center gap-2.5"
@@ -138,67 +127,27 @@ export function StandbyState({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 text-[13px] font-medium text-foreground">
                     <span className="truncate">{it.nickname}</span>
-                    {it.captain && (
+                    {it.role === 'captain' && (
                       <span className="text-[10px] font-semibold text-accent">
                         队长
                       </span>
                     )}
                   </div>
                   <div className="text-[11px] text-subtle gb-mono truncate">
-                    {it.emulatorName} · {it.group} 队
+                    {it.adbSerial} · {it.group} 队
                   </div>
                 </div>
-                <ReadinessDot ok={it.emulatorReady} />
               </div>
             ))}
           </div>
         </div>
+
+        {devMode && (
+          <div className="mt-6">
+            <PhaseTester />
+          </div>
+        )}
       </div>
     </div>
-  )
-}
-
-function ReadyTile({
-  label,
-  value,
-  sub,
-  tone = 'idle',
-}: {
-  label: string
-  value: string
-  sub: string
-  tone?: 'idle' | 'live' | 'warn' | 'error'
-}) {
-  const valueColor =
-    tone === 'live'
-      ? 'text-[var(--color-live)]'
-      : tone === 'warn'
-        ? 'text-[var(--color-warn)]'
-        : 'text-foreground'
-  return (
-    <div className="rounded-lg bg-card border border-border p-3.5">
-      <div
-        className="text-[10px] font-semibold uppercase text-subtle mb-1"
-        style={{ letterSpacing: '.04em' }}
-      >
-        {label}
-      </div>
-      <div className={cn('text-[20px] font-semibold gb-mono leading-none', valueColor)}>
-        {value}
-      </div>
-      <div className="text-[11px] text-subtle mt-1">{sub}</div>
-    </div>
-  )
-}
-
-function ReadinessDot({ ok }: { ok: boolean }) {
-  return (
-    <span
-      className="inline-block w-2 h-2 rounded-full"
-      style={{
-        background: ok ? 'var(--color-live)' : 'var(--color-fainter)',
-      }}
-      aria-label={ok ? '就绪' : '未就绪'}
-    />
   )
 }

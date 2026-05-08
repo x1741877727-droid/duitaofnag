@@ -122,7 +122,7 @@ function CaptainCard({
         {/* 截图区域 */}
         <div className="relative w-36 h-22 rounded-md bg-muted/80 flex items-center justify-center flex-shrink-0 overflow-hidden">
           <img
-            src={`/api/screenshot/${instance.index}?w=320&t=${Math.floor(Date.now() / 3000)}`}
+            src={`/api/stream/${instance.index}?w=320&fps=2`}
             className="w-full h-full object-cover"
             alt=""
             loading="lazy"
@@ -255,7 +255,7 @@ function MemberCard({
       {expanded && (
         <div className="px-3 pb-3 pt-2 border-t border-border/30 animate-expand">
           <img
-            src={`/api/screenshot/${instance.index}?t=${Date.now()}`}
+            src={`/api/stream/${instance.index}?fps=5`}
             className="w-full rounded-md bg-muted/80"
             alt=""
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}

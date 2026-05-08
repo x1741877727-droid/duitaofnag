@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { Button } from '@/components/ui/button'
-import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, Archive, Image, BarChart3, Crosshair, Brain, Type, SlidersHorizontal, Target } from 'lucide-react'
+import { Play, Square, Settings, LayoutDashboard, FileText, ChevronDown, ChevronUp, Activity, BarChart3, Database, Eye, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export function Header() {
@@ -37,17 +37,13 @@ export function Header() {
 
         <nav className="flex items-center gap-0.5 min-w-0 overflow-x-auto">
           {([
-            { key: 'dashboard', label: '运行', Icon: LayoutDashboard, title: '运行控制' },
-            { key: 'console', label: '中控台', Icon: Activity, title: '中控台' },
-            { key: 'archive', label: '档案', Icon: Archive, title: '决策档案' },
-            { key: 'templates', label: '模版', Icon: Image, title: '模版库' },
-            { key: 'template-tuner', label: '模版调试', Icon: SlidersHorizontal, title: '模版 Preprocessing 调试 / 阈值校准' },
-            { key: 'yolo', label: 'YOLO', Icon: Crosshair, title: 'YOLO' },
-            { key: 'ocr', label: 'OCR', Icon: Type, title: 'OCR 调试 / ROI 校准' },
-            { key: 'memory', label: '记忆', Icon: Brain, title: '记忆库' },
-            { key: 'perf', label: '性能', Icon: BarChart3, title: '性能监控' },
-            { key: 'oracle', label: 'Oracle', Icon: Target, title: 'Oracle 集 — 决策回放 + 回归' },
-            { key: 'settings', label: '设置', Icon: Settings, title: '设置' },
+            { key: 'dashboard',   label: '运行',    Icon: LayoutDashboard, title: '运行控制' },
+            { key: 'console',     label: '中控台',  Icon: Activity,        title: '中控台' },
+            { key: 'accelerator', label: '加速器',  Icon: Zap,             title: '加速器: TUN/SOCKS5 状态 + 实时计数' },
+            { key: 'recognition', label: '识别',    Icon: Eye,             title: '识别: 模版 / YOLO / OCR / 调试' },
+            { key: 'data',        label: '数据',    Icon: Database,        title: '数据: 决策档案 / 记忆库 / Oracle' },
+            { key: 'perf',        label: '性能',    Icon: BarChart3,       title: '性能监控' },
+            { key: 'settings',    label: '设置',    Icon: Settings,        title: '设置' },
           ] as const).map(({ key, label, Icon, title }) => {
             const active = currentView === key
             return (

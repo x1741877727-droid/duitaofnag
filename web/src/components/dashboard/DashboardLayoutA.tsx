@@ -139,7 +139,6 @@ export function DashboardLayoutA({
     return (
       <StandbyState
         accounts={accounts as AccountAssignment[]}
-        emulators={useAppStore.getState().emulators}
         onStart={onStart}
         onSettings={() => setCurrentView('settings')}
       />

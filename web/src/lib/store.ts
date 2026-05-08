@@ -92,18 +92,21 @@ export interface AccelInstanceState {
 
 // ─── 中控台 v3 — 实时事件 / 决策 ───
 
+// 顶层 nav (重构后 11→7)
 export type ConsoleView =
-  | 'dashboard'      // 运行控制 (现有 squad/start/stop)
-  | 'console'        // 中控台 (实时观察 + 反向控制)
-  | 'archive'        // 决策档案 (历史会话)
-  | 'templates'      // 模版库
-  | 'template-tuner' // 模版调试 (preprocessing 校准)
-  | 'yolo'           // YOLO (测试 / 数据集 / 标注 / 采集 / 模型)
-  | 'ocr'            // OCR 调试 (ROI 校准 + OCR 实测)
-  | 'memory'         // 记忆库 (Memory L1 浏览)
+  | 'dashboard'      // 运行控制
+  | 'console'        // 中控台
+  | 'accelerator'    // 加速器 (TUN / SOCKS5 状态 + 实时计数)
+  | 'recognition'    // 识别 (含 sub: templates / template-tuner / yolo / ocr)
+  | 'data'           // 数据 (含 sub: archive / memory / oracle)
   | 'perf'           // 性能
-  | 'oracle'         // Oracle 集 (决策回放 + 回归)
   | 'settings'
+
+// 识别页内的 4 个 sub-tab
+export type RecognitionSubView = 'templates' | 'template-tuner' | 'yolo' | 'ocr'
+
+// 数据页内的 3 个 sub-tab
+export type DataSubView = 'archive' | 'memory' | 'oracle'
 
 export interface LiveDecisionEvent {
   // 单条决策摘要 (从 /ws/live decision 事件来)
@@ -140,8 +143,19 @@ interface AppState {
   isRunning: boolean
   setIsRunning: (running: boolean) => void
 
+  // dev / 客户 模式切换 (持久化 localStorage)
+  // dev=true → 显示识别 nav + PhaseTester + 设置里 dev 模块
+  devMode: boolean
+  setDevMode: (b: boolean) => void
+
   currentView: ConsoleView
   setCurrentView: (view: ConsoleView) => void
+
+  // 识别 / 数据 子页 (新 nav 重构)
+  recognitionSubView: RecognitionSubView
+  setRecognitionSubView: (sub: RecognitionSubView) => void
+  dataSubView: DataSubView
+  setDataSubView: (sub: DataSubView) => void
 
   showLogPanel: boolean
   setShowLogPanel: (show: boolean) => void
@@ -221,12 +235,40 @@ const MAX_LIVE_PER_INSTANCE = 50
 const MAX_LOGS = 500
 // MAX_LIVE_PER_INSTANCE defined above near interface
 
+// dev mode 持久化 — 客户机上 false, dev 机上 true
+const DEV_MODE_KEY = 'gamebot.devMode'
+function readDevMode(): boolean {
+  try {
+    return localStorage.getItem(DEV_MODE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function writeDevMode(b: boolean) {
+  try {
+    localStorage.setItem(DEV_MODE_KEY, b ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
+
 export const useAppStore = create<AppState>((set) => ({
   isRunning: false,
   setIsRunning: (running) => set({ isRunning: running }),
 
+  devMode: readDevMode(),
+  setDevMode: (b) => {
+    writeDevMode(b)
+    set({ devMode: b })
+  },
+
   currentView: 'dashboard',
   setCurrentView: (view) => set({ currentView: view }),
+
+  recognitionSubView: 'templates',
+  setRecognitionSubView: (sub) => set({ recognitionSubView: sub }),
+  dataSubView: 'archive',
+  setDataSubView: (sub) => set({ dataSubView: sub }),
 
   showLogPanel: true,
   setShowLogPanel: (show) => set({ showLogPanel: show }),

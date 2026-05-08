@@ -11,12 +11,14 @@ interface NavItem {
   key: ConsoleView
   label: string
   badge?: string
+  /** 仅 dev 模式显示. */
+  devOnly?: boolean
 }
 
 const NAV_ITEMS: NavItem[] = [
   { key: 'console', label: '中控台' },
   { key: 'data', label: '数据' },
-  { key: 'recognition', label: '识别', badge: 'dev' },
+  { key: 'recognition', label: '识别', badge: 'dev', devOnly: true },
   { key: 'settings', label: '设置' },
 ]
 
@@ -39,6 +41,9 @@ export function Header({
   const instances = useAppStore((s) => s.instances)
   const accounts = useAppStore((s) => s.accounts)
   const runningDuration = useAppStore((s) => s.runningDuration)
+  const devMode = useAppStore((s) => s.devMode)
+  const setDevMode = useAppStore((s) => s.setDevMode)
+  const visibleNav = NAV_ITEMS.filter((n) => devMode || !n.devOnly)
 
   const total = accounts.length || Object.keys(instances).length
   const errors = Object.values(instances).filter((i) => i.state === 'error').length
@@ -72,7 +77,7 @@ export function Header({
 
       {/* nav */}
       <nav className="flex items-center gap-0.5 min-w-0">
-        {NAV_ITEMS.map((item) => {
+        {visibleNav.map((item) => {
           const active = currentView === item.key
           return (
             <button
@@ -108,6 +113,30 @@ export function Header({
       </nav>
 
       <span className="flex-1" />
+
+      {/* DEV mode toggle (角标式开关, 任何状态都显示) */}
+      <button
+        type="button"
+        onClick={() => setDevMode(!devMode)}
+        title={devMode ? '关闭 DEV 模式 (隐藏识别 / PhaseTester)' : '开启 DEV 模式 (显示识别 / PhaseTester)'}
+        className={cn(
+          'inline-flex items-center gap-1.5 px-2 py-1 rounded-md',
+          'text-[10px] font-bold uppercase border cursor-pointer transition-colors',
+          devMode
+            ? 'bg-[#fef3c7] text-[#92400e] border-[#fcd34d]'
+            : 'bg-secondary text-fainter border-border hover:text-muted-foreground',
+        )}
+        style={{ letterSpacing: '.08em' }}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            'inline-block w-1.5 h-1.5 rounded-full',
+            devMode ? 'bg-[#92400e]' : 'bg-fainter',
+          )}
+        />
+        DEV {devMode ? 'ON' : 'OFF'}
+      </button>
 
       {/* stats — 仅运行中显示 */}
       {isRunning && (
