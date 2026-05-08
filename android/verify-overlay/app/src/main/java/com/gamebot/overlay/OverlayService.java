@@ -85,29 +85,25 @@ public class OverlayService extends Service {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setGravity(Gravity.CENTER_HORIZONTAL);
 
-        // 文字气泡: 白底 + ink 字 + 圆角描边, 像漫画对话框
+        // 文字: 透明背景 + ink 字 + 白色阴影描边, 任何背景下都可读
         TextView bubble = new TextView(this);
         bubble.setText(getString(R.string.overlay_text));
         bubble.setTextColor(0xFF1A1A17);
-        bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xF2FFFFFF);                 // 95% 白
-        bg.setCornerRadius(dp(10));
-        bg.setStroke(dp(1), 0xFF1A1A17);         // ink 描边
-        bubble.setBackground(bg);
-        bubble.setPadding(dp(8), dp(3), dp(8), dp(3));
+        bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f);
+        // shadowLayer 模拟描边: radius=2 让阴影成圈, dx/dy=0 居中
+        bubble.setShadowLayer(dp(2), 0, 0, 0xFFFFFFFF);
         bubble.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams lpBubble = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        lpBubble.bottomMargin = -dp(3);          // 让气泡轻微"压"在猫身上, 像贴住
+        lpBubble.bottomMargin = -dp(2);          // 文字轻贴猫头
         col.addView(bubble, lpBubble);
 
-        // 小猫: 透明 PNG, 趴在底部
+        // 小猫: 透明 PNG, 缩到 40dp
         ImageView cat = new ImageView(this);
         cat.setImageResource(R.drawable.cat_overlay);
         cat.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        LinearLayout.LayoutParams lpCat = new LinearLayout.LayoutParams(dp(72), dp(72));
+        LinearLayout.LayoutParams lpCat = new LinearLayout.LayoutParams(dp(40), dp(40));
         col.addView(cat, lpCat);
 
         root = col;
