@@ -359,20 +359,48 @@ export function PhaseTester() {
 
       // P3b: 队员等自己 P0/1/2 完 + 队长 P3a 完. 把 P3a 拿到的 scheme 显式传给 P3b
       // (PhaseTester test_runner 走旁路, 不接 runner_service._team_schemes 同步管道, 必须 API 字段直传)
+      // 每条 skip 分支都写到 result 让用户能在工作台结果区看到为啥跳的, 不再静默 return
       const p3bPromises: Promise<unknown>[] = []
-      if (selKeys.includes('P3b') && sq.members.length > 0 && p3aPromise) {
+      const p3bSelected = selKeys.includes('P3b')
+      const p3bSkipReason =
+        !p3bSelected ? `selKeys 没含 'P3b' (实际选了: ${selKeys.join(',')})`
+        : sq.members.length === 0 ? `大组 ${sq.group} 没队员 (members=[]), captain=${sq.captain}`
+        : !p3aPromise ? `没选 P3a, P3b 没 scheme 来源`
+        : ''
+      if (p3bSkipReason) {
+        // 整段 P3b skip — 写一条结果给用户看
+        addPhaseResult({
+          phase: 'P3b', phase_name: '加入队伍 (跳过)', ok: false,
+          error: `P3b skip: ${p3bSkipReason}`,
+        })
+        failCount++
+      } else {
         for (const memIdx of sq.members) {
           p3bPromises.push((async () => {
             const memOk = await preDone[memIdx]
-            if (!memOk && !keepGoing) return
+            if (!memOk && !keepGoing) {
+              addPhaseResult({
+                phase: 'P3b', phase_name: `#${memIdx} 加入队伍 (跳过)`, ok: false,
+                error: `队员 #${memIdx} 前置 P0/P1/P2 失败, P3b 跳`,
+              })
+              failCount++
+              return
+            }
             const lr = await p3aPromise!
-            if (!lr.ok) return  // 队长 P3a 没成功, P3b 跳
+            if (!lr.ok) {
+              addPhaseResult({
+                phase: 'P3b', phase_name: `#${memIdx} 加入队伍 (跳过)`, ok: false,
+                error: `队长 P3a 失败 (${lr.error || '?'}), 队员 #${memIdx} 没 scheme 加入`,
+              })
+              failCount++
+              return
+            }
             if (!lr.scheme) {
-              const r: RunOut = {
+              addPhaseResult({
                 phase: 'P3b', phase_name: `#${memIdx} 加入队伍`, ok: false,
-                error: '队长 P3a 没返回 game_scheme_url (backend 没写 ctx.game_scheme_url?)',
-              }
-              addPhaseResult(r); failCount++
+                error: `队长 P3a 没返回 game_scheme_url (backend 没写 ctx.game_scheme_url?)`,
+              })
+              failCount++
               return
             }
             await runPhase(memIdx, 'P3b', 'member', lr.scheme)
