@@ -25,7 +25,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { useAppStore, type AccountAssignment, type Instance } from '@/lib/store'
+import { useAppStore, type AccountAssignment, type Instance, type TeamGroup } from '@/lib/store'
 import { Kbd } from '@/components/ui/kbd'
 
 const TEAM_TINT: Record<string, string> = {

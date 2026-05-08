@@ -2,7 +2,18 @@ import { cn } from '@/lib/utils'
 import { STATE_LABEL, STATE_TONE, fmtPhase, toneColor, type Tone } from '@/lib/design-tokens'
 import { StatusDot } from '@/components/ui/status-dot'
 import { Section } from './Section'
-import type { Instance } from '@/lib/store'
+import { useAppStore, type Instance, type InstanceState } from '@/lib/store'
+
+// PhaseTester 选的 phase key → InstanceState (跟 PhaseTester.tsx PHASE_TO_STATE 对齐)
+const PHASE_TO_STATE: Record<string, InstanceState> = {
+  P0: 'accelerator',
+  P1: 'launch_game',
+  P2: 'dismiss_popups',
+  P3a: 'team_create',
+  P3b: 'team_join',
+  P4: 'map_setup',
+  P5: 'ready',
+}
 
 /** store 里的 phaseHistory[idx] 项形态 (来自 store.ts:199). */
 export interface PhaseTransition {
@@ -66,7 +77,36 @@ export function DetailPhases({
   inst: Instance
   history: PhaseTransition[]
 }) {
-  const phases = buildPhaseSegments(history, inst)
+  const phaseTester = useAppStore((s) => s.phaseTester)
+  const testerActive = phaseTester.busy || phaseTester.results.length > 0
+
+  // PhaseTester 模式: 时间线只显示用户选的那几个 phase (selKeys), 已跑的拿 duration_ms,
+  // 当前 phase 用 inst.stateDuration, 还没跑到的占 1s 占位.
+  // 非 PhaseTester 模式: 走旧 phaseHistory 路径.
+  let phases: PhaseSegment[]
+  if (testerActive && phaseTester.selKeys.length > 0) {
+    const myResults = phaseTester.results.filter(
+      (r) => r.phase_name?.startsWith(`#${inst.index} `) || r.phase_name?.startsWith(`#${inst.index}/`),
+    )
+    phases = phaseTester.selKeys.map((phaseKey) => {
+      const state = PHASE_TO_STATE[phaseKey] || 'init'
+      const result = myResults.find((r) => r.phase === phaseKey || r.phase === `#${inst.index}/${phaseKey}`)
+      const stateLabel = STATE_LABEL[state] ?? phaseKey
+      let sec = 1
+      let tone: Tone = 'idle'
+      if (result) {
+        sec = Math.max(1, Math.round((result.duration_ms || 0) / 1000))
+        tone = result.ok ? 'success' : 'error'
+      } else if (PHASE_TO_STATE[phaseKey] === inst.state) {
+        // 当前正在跑的 phase
+        sec = Math.max(1, Math.round(inst.stateDuration ?? 0))
+        tone = 'running'
+      }
+      return { state, label: stateLabel, sec, tone }
+    })
+  } else {
+    phases = buildPhaseSegments(history, inst)
+  }
   const total = phases.reduce((s, p) => s + p.sec, 0)
 
   return (
