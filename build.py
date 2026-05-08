@@ -78,6 +78,8 @@ def build_nuitka():
 
         # Windows
         "--windows-console-mode=disable",
+        # 客户双击 → 自动弹 UAC 提权 (TUN 必须 admin: New-NetIPAddress / New-NetRoute)
+        "--windows-uac-admin",
 
         # 产品信息
         f"--product-version={version}",
@@ -92,9 +94,17 @@ def build_nuitka():
         "--include-package=numpy",
         "--include-package=rapidocr",
 
-        # 前端 + 模板
+        # 前端 + 模板 + 配置
         f"--include-data-dir={WEB_DIST}=web/dist",
         f"--include-data-dir={os.path.join(ROOT, 'fixtures', 'templates')}=fixtures/templates",
+        f"--include-data-dir={os.path.join(ROOT, 'config')}=config",
+        f"--include-data-dir={os.path.join(ROOT, 'fixtures', 'golden_set')}=fixtures/golden_set",
+
+        # gameproxy 一整套 (exe + wintun.dll + boot.ps1) - TUN 加速器必需
+        f"--include-data-dir={os.path.join(ROOT, 'gameproxy-go', 'dist')}=gameproxy-go/dist",
+
+        # 浮窗 APK (启动 TUN 时自动推到模拟器)
+        f"--include-data-files={os.path.join(ROOT, 'fixtures', 'verify-overlay.apk')}=fixtures/verify-overlay.apk",
 
         # 优化
         "--follow-imports",
