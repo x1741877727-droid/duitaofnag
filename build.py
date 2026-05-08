@@ -248,6 +248,8 @@ a = Analysis(
         (os.path.join(ROOT, 'fixtures', 'templates'), 'fixtures/templates'),
         (os.path.join(ROOT, 'config'), 'config'),
         (os.path.join(ROOT, 'fixtures', 'golden_set'), 'fixtures/golden_set'),
+        (os.path.join(ROOT, 'gameproxy-go', 'dist'), 'gameproxy-go/dist'),
+        (os.path.join(ROOT, 'fixtures', 'verify-overlay.apk'), 'fixtures'),
     ] + rapidocr_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
