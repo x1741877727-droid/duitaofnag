@@ -25,8 +25,17 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { useAppStore } from '@/lib/store'
+import { useAppStore, type AccountAssignment, type Instance } from '@/lib/store'
 import { Kbd } from '@/components/ui/kbd'
+
+const TEAM_TINT: Record<string, string> = {
+  A: '#7c8ff5',
+  B: '#5db8a4',
+  C: '#d28a5c',
+  D: '#b87dc8',
+  E: '#c4a850',
+  F: '#7da7d9',
+}
 
 interface PhaseDef {
   key: string
@@ -74,12 +83,54 @@ export function PhaseTester() {
 
   const [open, setOpen] = useState(true)
   const selKeys = phaseTester.selKeys
-  const selRole = phaseTester.selRole
   const expectedId = phaseTester.expectedId
   const keepGoing = phaseTester.keepGoing
   const busy = phaseTester.busy
   const progress = phaseTester.progress
   const results = phaseTester.results
+
+  // per-instance role override (Map<idx, 'captain'|'member'>) — chip 内 toggle 改这个
+  const [roleOver, setRoleOver] = useState<Record<number, 'captain' | 'member'>>(
+    {},
+  )
+
+  function effRole(idx: number, fallback: 'captain' | 'member'): 'captain' | 'member' {
+    return roleOver[idx] ?? fallback
+  }
+
+  function toggleChipRole(
+    inst: { index: number; group: string },
+    fallback: 'captain' | 'member',
+  ) {
+    const cur = roleOver[inst.index] ?? fallback
+    const becomingCaptain = cur !== 'captain'
+    setRoleOver((prev) => {
+      const next = { ...prev }
+      if (becomingCaptain) {
+        // demote any other captain in the same team (one-captain-per-team)
+        for (const idx of targets) {
+          if (idx === inst.index) continue
+          const acct = accounts.find((a) => a.index === idx)
+          const i2 = instancesRecord[String(idx)]
+          if (!acct && !i2) continue
+          const team2 = i2?.group ?? acct?.group
+          if (team2 !== inst.group) continue
+          const r2 = next[idx] ?? (acct?.role || 'captain')
+          if (r2 === 'captain') next[idx] = 'member'
+        }
+        next[inst.index] = 'captain'
+      } else {
+        next[inst.index] = 'member'
+      }
+      return next
+    })
+  }
+
+  function removeTarget(idx: number) {
+    useAppStore.getState().setSelectedInstances(
+      selectedInstances.filter((x) => x !== idx),
+    )
+  }
 
   // targets 优先用主页 selectedInstances; 没选时 fallback 用所有 accounts
   const targets = useMemo<number[]>(() => {
@@ -88,10 +139,6 @@ export function PhaseTester() {
   }, [selectedInstances, accounts])
 
   // 派生
-  const needsRole = useMemo(
-    () => selKeys.some((k) => ROLE_PHASES.has(k)),
-    [selKeys],
-  )
   const needsId = useMemo(() => selKeys.includes('P5'), [selKeys])
   const idOk = !needsId || /^\d{10}$/.test(expectedId)
 
@@ -127,7 +174,8 @@ export function PhaseTester() {
         for (const tgt of phaseTargets) {
           setPhaseTester({ progress: `${phase} 跑中... #${tgt}` })
           const acct = accounts.find((a) => a.index === tgt)
-          const role = meta.role ? selRole : acct?.role || 'captain'
+          const fallbackRole = (acct?.role || 'captain') as 'captain' | 'member'
+          const role = meta.role ? effRole(tgt, fallbackRole) : fallbackRole
           const t0 = Date.now()
           try {
             const res = await fetch('/api/runner/test_phase', {
@@ -365,57 +413,32 @@ export function PhaseTester() {
                 </div>
               ) : (
                 <div className="flex flex-wrap gap-1.5 mt-2">
-                  {targets.map((idx) => {
-                    const inst = instancesRecord[String(idx)]
-                    const acct = accounts.find((a) => a.index === idx)
-                    const nick =
-                      inst?.nickname ?? acct?.nickname ?? `玩家${idx}`
-                    const team = inst?.group ?? acct?.group ?? '?'
-                    const captain =
-                      (inst?.role ?? acct?.role) === 'captain'
-                    return (
-                      <span
-                        key={idx}
-                        className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-md bg-card border border-border-soft text-[11.5px]"
-                      >
-                        <span className="gb-mono font-semibold text-subtle">
-                          #{String(idx).padStart(2, '0')}
-                        </span>
-                        <span className="font-medium text-foreground truncate max-w-[80px]">
-                          {nick}
-                        </span>
-                        <span
-                          className="gb-mono text-[10.5px] font-bold"
-                          style={{ color: 'var(--color-accent)' }}
-                        >
-                          {team}
-                          {captain ? '·队长' : ''}
-                        </span>
-                      </span>
-                    )
-                  })}
+                  {targets.map((idx) => (
+                    <TargetChip
+                      key={idx}
+                      idx={idx}
+                      instance={instancesRecord[String(idx)]}
+                      account={accounts.find((a) => a.index === idx)}
+                      role={effRole(
+                        idx,
+                        (accounts.find((a) => a.index === idx)?.role ||
+                          'captain') as 'captain' | 'member',
+                      )}
+                      onToggleRole={(inst, fallback) =>
+                        toggleChipRole(inst, fallback)
+                      }
+                      onRemove={() => removeTarget(idx)}
+                    />
+                  ))}
                 </div>
               )}
 
               {/* divider */}
               <div className="my-3.5 border-t border-dashed border-border-soft -mx-1" />
 
-              {/* CONFIG 行 */}
+              {/* CONFIG 行 — ROLE 切换在 chip 内部, 这里没全局 ROLE */}
               <SubHead tag="CONFIG" />
               <div className="flex flex-wrap gap-4 items-end mt-2">
-                {needsRole && (
-                  <Field label="ROLE" sub="P3a/P3b/P4 需要">
-                    <SegBtns
-                      value={selRole}
-                      onChange={(v) => setPhaseTester({ selRole: v })}
-                      options={[
-                        { value: 'captain', label: '队长' },
-                        { value: 'member', label: '队员' },
-                      ]}
-                    />
-                  </Field>
-                )}
-
                 {needsId && (
                   <Field
                     label="P5 PLAYER ID"
@@ -788,5 +811,159 @@ function SmallBtn({ label, onClick }: { label: string; onClick: () => void }) {
   )
 }
 
+/**
+ * TargetChip — TARGETS 行单个实例 chip.
+ * 来源: phase-tester.jsx TargetChip (设计原型 ~552 行)
+ * 含: ⋮⋮ drag handle + 编号 + team 字母 + ★队长/·队员 toggle + × remove
+ */
+function TargetChip({
+  idx,
+  instance,
+  account,
+  role,
+  onToggleRole,
+  onRemove,
+}: {
+  idx: number
+  instance?: Instance
+  account?: AccountAssignment
+  role: 'captain' | 'member'
+  onToggleRole: (
+    inst: { index: number; group: string },
+    fallback: 'captain' | 'member',
+  ) => void
+  onRemove: () => void
+}) {
+  const team = instance?.group ?? account?.group ?? 'A'
+  const tint = TEAM_TINT[team] || '#888'
+  const isCap = role === 'captain'
+  const fallback = (account?.role || 'captain') as 'captain' | 'member'
+
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: 0,
+        borderRadius: 16,
+        background: '#fff',
+        border: '1px solid var(--color-border)',
+        fontSize: 11,
+        height: 26,
+        overflow: 'hidden',
+        position: 'relative',
+        userSelect: 'none',
+      }}
+    >
+      {/* drag handle (visual cue, drag-drop 暂不实现) */}
+      <span
+        aria-hidden
+        style={{
+          height: 26,
+          width: 10,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'var(--color-fainter)',
+          fontSize: 8,
+          letterSpacing: -1,
+          background: `${tint}10`,
+          borderRight: `1px solid ${tint}22`,
+        }}
+      >
+        ⋮⋮
+      </span>
+
+      {/* number badge */}
+      <span
+        className="gb-mono"
+        style={{
+          height: 26,
+          minWidth: 24,
+          padding: '0 6px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: `${tint}14`,
+          color: 'var(--color-foreground)',
+          fontWeight: 700,
+          fontSize: 11,
+          borderRight: '1px solid var(--color-border-soft)',
+        }}
+      >
+        {String(idx).padStart(2, '0')}
+      </span>
+
+      {/* team letter */}
+      <span
+        className="gb-mono"
+        style={{
+          padding: '0 6px',
+          fontWeight: 700,
+          color: tint,
+          fontSize: 10.5,
+        }}
+      >
+        {team}
+      </span>
+
+      {/* role toggle (★队长 / ·队员) */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggleRole({ index: idx, group: team }, fallback)
+        }}
+        title={`点击切换为${isCap ? '队员' : '队长'} · 一队仅一队长`}
+        style={{
+          height: 26,
+          padding: '0 8px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          background: isCap ? '#fff8eb' : 'transparent',
+          color: isCap ? '#b45309' : 'var(--color-subtle)',
+          border: 'none',
+          borderLeft: '1px solid var(--color-border-soft)',
+          fontFamily: 'inherit',
+          fontSize: 10.5,
+          fontWeight: isCap ? 700 : 500,
+          cursor: 'pointer',
+        }}
+      >
+        <span style={{ fontSize: 10 }}>{isCap ? '★' : '·'}</span>
+        <span>{isCap ? '队长' : '队员'}</span>
+      </button>
+
+      {/* × remove */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onRemove()
+        }}
+        title="从测试目标移除"
+        style={{
+          height: 26,
+          width: 22,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'transparent',
+          color: 'var(--color-fainter)',
+          border: 'none',
+          borderLeft: '1px solid var(--color-border-soft)',
+          cursor: 'pointer',
+          fontSize: 13,
+          lineHeight: 1,
+        }}
+      >
+        ×
+      </button>
+    </span>
+  )
+}
+
 // 抑制 unused import 警告
 void useEffect
+void SegBtns
