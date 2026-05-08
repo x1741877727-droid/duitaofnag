@@ -95,14 +95,14 @@ export function DashboardLayoutA({
       return fromSnapshot.sort((a, b) => a.index - b.index)
     }
     return (accounts || []).map((a) => ({
-      index: a.instance_index ?? 0,
+      index: a.index ?? 0,
       group: (a.group ?? 'A') as TeamGroup,
       role: (a.role ?? 'member') as 'captain' | 'member',
       state: 'init' as InstanceState,
-      nickname: a.nickname || `实例${a.instance_index}`,
+      nickname: a.nickname || `实例${a.index}`,
       error: '',
       stateDuration: 0,
-      adbSerial: `emulator-${5554 + (a.instance_index ?? 0) * 2}`,
+      adbSerial: a.adbSerial || `emulator-${5554 + (a.index ?? 0) * 2}`,
       stageTimes: {},
     } as Instance)).sort((a, b) => a.index - b.index)
   }, [instancesRecord, accounts])

@@ -243,15 +243,13 @@ export function ArchiveSnapshot({
     return () => ro.disconnect()
   }, [width, height])
 
-  // YOLO class → 颜色映射 (识别样本名色彩区分, 便于一眼判断是 close_x / action_btn 等)
-  const YOLO_CLASS_COLOR: Record<string, string> = {
-    close_x: '#dc2626',           // 红 — 关闭按钮
-    action_btn: '#2563eb',        // 蓝 — 确认/同意按钮
-    dialog: '#d97706',            // 橙 — 弹窗框
-    lobby: '#16a34a',             // 绿 — 大厅
-    team_slot_btn_collapse: '#7c3aed',  // 紫
-    team_slot_btn_exit: '#ec4899',      // 粉
-    slot_nameplate: '#0891b2',    // 青
+  // 按 bbox 来源类型上色 (yolo / ocr / template / memory 用不同色区分一眼分得清).
+  // YOLO class 内部不分色 — class 名走 label 文字 (e.g. "close_x 0.94").
+  const SOURCE_COLOR: Record<string, string> = {
+    yolo: '#2563eb',     // 蓝
+    ocr: '#d97706',      // 橙
+    template: '#16a34a', // 绿
+    memory: '#7d7869',   // 灰
   }
 
   type Drawn = {
@@ -280,10 +278,8 @@ export function ArchiveSnapshot({
           ? [{ bbox: e.bbox as [number, number, number, number], conf: e.conf, label: `${tier} · ${e.conf}` }]
           : []
     list.forEach((b, i) => {
-      // YOLO class 着色, 其他 (template / ocr / memory) 走 tier 颜色
-      const color = b.source === 'yolo' && b.cls
-        ? (YOLO_CLASS_COLOR[b.cls] || tierColor)
-        : tierColor
+      // 按 source 着色 (yolo蓝 / ocr橙 / template绿 / memory灰), 没 source 走 tier 色兜底
+      const color = (b.source && SOURCE_COLOR[b.source]) || tierColor
       // label: backend UIBox.label 已经含 class 名 (e.g. "close_x 0.94"), 直接用; fallback tier
       const useLabel = b.label || `${tier} · ${b.conf}`
       drawn.push({
