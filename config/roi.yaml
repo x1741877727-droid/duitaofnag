@@ -62,40 +62,38 @@ team_ready_btn:
   desc: 队员加入队伍后左上角"取消准备"按钮区 (P3b-2-verify, 检测加入成功)
   used_in: single_runner.py:phase_team_join
   preprocessing: []
-# ───────────────────── P5 等待玩家 (2026-05-05 重构 v2) ─────────────────────
-# 设计变更: 抛弃 4 个 team_slot_N_nickname OCR 方案 (受 OCR 漂移 / 昵称隐藏 /
-# 模仿 ID 影响). 改用模板匹配 slot 旁的展开/退出按钮 (UI 元素稳定, 永远显示).
-# baseline = N 个按钮位置, 真人加入 = 多出 1 个新位置.
 team_lobby_area:
-  rect: [0.05, 0.45, 0.95, 0.80]
+  rect: [0.05, 0.45, 0.95, 0.8]
   scale: 1
-  desc: 'P5 大厅 4 角色昵称区域 模板匹配搜索范围 占位待拖'
+  desc: P5 大厅 4 角色昵称区域 模板匹配搜索范围 占位待拖
   used_in: phases/p5_wait_players.py
 player_card_info_btn:
-  rect: [0.30, 0.85, 0.55, 1.00]
+  rect: [0.24685990338164254, 0.6814449917898193, 0.7548309178743962, 0.7717569786535303]
   scale: 2
-  desc: 'P5 小卡片 信息 按钮 tap 后进详细面板 占位待拖'
+  desc: P5 小卡片 信息 按钮 tap 后进详细面板 占位待拖
   used_in: phases/p5_wait_players.py
+  preprocessing: []
 player_card_id:
-  rect: [0.45, 0.25, 0.75, 0.35]
+  rect: [0.5688405797101449, 0.19047619047619047, 0.6594202898550725, 0.23809523809523808]
   scale: 3
-  desc: 'P5 详细面板 编号 10 位数字区域 核心 OCR 占位待拖'
+  desc: P5 详细面板 编号 10 位数字区域 核心 OCR 占位待拖
   used_in: phases/p5_wait_players.py
+  preprocessing: [binarize]
 player_card_close_btn:
-  rect: [0.92, 0.05, 1.00, 0.15]
+  rect: [0.9432367149758454, 0.0, 1.0, 0.08045977011494253]
   scale: 2
-  desc: 'P5 详细面板右上角 X 关闭按钮 不用 back 防误触退出游戏弹窗 占位待拖'
+  desc: P5 详细面板右上角 X 关闭按钮 不用 back 防误触退出游戏弹窗 占位待拖
   used_in: phases/p5_wait_players.py
+  preprocessing: []
 player_card_kick_area:
-  rect: [0.55, 0.40, 1.00, 1.00]
+  rect: [0.33695652173913043, 0.6929392446633826, 0.7560386473429952, 0.7619047619047619]
   scale: 2
-  desc: 'P5 大区域盖小卡片底部按钮条+右侧弹出菜单 OCR 找 移出队伍 文字 占位待拖'
+  desc: P5 大区域盖小卡片底部按钮条+右侧弹出菜单 OCR 找 移出队伍 文字 占位待拖
   used_in: phases/p5_wait_players.py
+  preprocessing: []
 player_card_more_btn:
-  rect: [0.85, 0.85, 1.00, 1.00]
+  rect: [0.24371980676328497, 0.7060755336617406, 0.7548309178743962, 0.755336617405583]
   scale: 2
-  desc: 'P5 小卡片底部 更多 按钮 非好友才显示 好友直接看到移出队伍 占位待拖'
+  desc: P5 小卡片底部 更多 按钮 非好友才显示 好友直接看到移出队伍 占位待拖
   used_in: phases/p5_wait_players.py
-
-# 弹窗清理不需要 ROI — 全部走 YOLO dialog bbox 动态 OCR (位置无关).
-# 见 backend/automation/popup_specs.py + popup_dismiss.py
+  preprocessing: []
