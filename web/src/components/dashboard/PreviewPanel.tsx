@@ -5,9 +5,10 @@
  *   StandbyTile  (1077-1116)
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { C } from '@/lib/design-tokens'
-import type { Instance, TeamGroup } from '@/lib/store'
+import type { Emulator, Instance, TeamGroup } from '@/lib/store'
+import { stateConfig } from '@/lib/store'
 
 type ViewFilter = 'all' | 'g1' | 'g2' | 'g3'
 
@@ -41,10 +42,13 @@ function filterInstances(
 
 export function PreviewPanel({
   instances,
+  emulators,
   testerSel,
   onToggleTester,
 }: {
   instances: Instance[]
+  /** 真实 emulator 列表, 用于显示每实例 running 状态. */
+  emulators: Emulator[]
   /** dev mode 时传 selected idx 数组; 非 dev 传 null. */
   testerSel: number[] | null
   onToggleTester: ((idx: number) => void) | null
@@ -54,6 +58,10 @@ export function PreviewPanel({
   const counts = makeCounts(instances)
   const filtered = filterInstances(instances, viewFilter, errorOnly)
   const isTester = testerSel != null
+  const runningSet = useMemo(
+    () => new Set(emulators.filter((e) => e.running).map((e) => e.index)),
+    [emulators],
+  )
 
   return (
     <div
@@ -126,6 +134,7 @@ export function PreviewPanel({
             inst={i}
             picked={isTester ? testerSel!.includes(i.index) : null}
             onPick={onToggleTester ? () => onToggleTester(i.index) : null}
+            emuRunning={runningSet.has(i.index)}
           />
         ))}
         {filtered.length === 0 && (
@@ -150,10 +159,12 @@ function StandbyTile({
   inst,
   picked,
   onPick,
+  emuRunning,
 }: {
   inst: Instance
   picked: boolean | null
   onPick: (() => void) | null
+  emuRunning: boolean
 }) {
   const interactive = !!onPick
   const captain = inst.role === 'captain'
@@ -220,19 +231,37 @@ function StandbyTile({
           marginTop: 1,
         }}
       >
-        <span
-          style={{
-            display: 'inline-flex',
-            gap: 3,
-            fontSize: 10.5,
-            color: C.live,
-            fontWeight: 500,
-            alignItems: 'center',
-          }}
-        >
-          <span>✓</span>
-          <span>就绪</span>
-        </span>
+        {(() => {
+          // 实时 phase 状态优先 (PhaseTester / 主 runner 跑时, ws state_change 写到 inst.state).
+          // inst.state 是 init / done / error 时退回显示模拟器在线状态 (emuRunning).
+          const showPhase = inst.state && inst.state !== 'init' && inst.state !== 'done'
+          if (showPhase) {
+            const cfg = stateConfig[inst.state]
+            const tone =
+              cfg.status === 'error' ? C.error
+              : cfg.status === 'warning' ? C.warn
+              : cfg.status === 'success' ? C.live
+              : C.ink2  // running / idle 都用 ink2
+            return (
+              <span style={{
+                display: 'inline-flex', gap: 3, fontSize: 10.5,
+                color: tone, fontWeight: 500, alignItems: 'center',
+              }}>
+                <span>●</span>
+                <span>{cfg.label}</span>
+              </span>
+            )
+          }
+          return (
+            <span style={{
+              display: 'inline-flex', gap: 3, fontSize: 10.5,
+              color: emuRunning ? C.live : C.ink4, fontWeight: 500, alignItems: 'center',
+            }}>
+              <span>{emuRunning ? '✓' : '○'}</span>
+              <span>{emuRunning ? '就绪' : '未启动'}</span>
+            </span>
+          )
+        })()}
         {interactive && picked && (
           <span
             style={{
