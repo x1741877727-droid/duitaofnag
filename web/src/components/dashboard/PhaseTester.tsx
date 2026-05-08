@@ -52,7 +52,7 @@ interface PhaseDef {
 }
 
 const RUNNER_PHASES: PhaseDef[] = [
-  { key: 'P0',  name: '加速器校验',   desc: 'TUN/SOCKS5 链路自检',         role: false, single: true },
+  { key: 'P0',  name: '加速器校验',   desc: 'TUN 链路自检',         role: false, single: true },
   { key: 'P1',  name: '启动游戏',     desc: '模拟器内拉起游戏到 Splash',   role: false, single: true },
   { key: 'P2',  name: '清理弹窗',     desc: '开局前所有 popup → lobby',    role: false, single: true },
   { key: 'P3a', name: '创建队伍',     desc: '队长建房 + 同步 scheme',      role: true },
@@ -132,11 +132,11 @@ export function PhaseTester() {
     )
   }
 
-  // targets 优先用主页 selectedInstances; 没选时 fallback 用所有 accounts
-  const targets = useMemo<number[]>(() => {
-    if (selectedInstances.length > 0) return selectedInstances
-    return accounts.map((a) => a.index)
-  }, [selectedInstances, accounts])
+  // targets 严格 = 主页选择, 没选就 0 实例 (用户必须主动勾选)
+  const targets = useMemo<number[]>(
+    () => selectedInstances,
+    [selectedInstances],
+  )
 
   // 派生
   const needsId = useMemo(() => selKeys.includes('P5'), [selKeys])

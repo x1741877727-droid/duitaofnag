@@ -420,6 +420,17 @@ def create_app(config: ConfigManager) -> FastAPI:
     async def startup():
         ws_manager.start_drain()
         service.set_broadcast(ws_manager.broadcast_sync)
+        # 全局日志拦截器 — 让 backend 启动钩子 / 阶段测试 / overlay 部署 等
+        # 没具体 instance contextvar 的日志, 也能进前端右侧日志栏 (标 SYS).
+        try:
+            from .runner_service import GlobalLogHandler
+            import logging as _logging
+            _global_handler = GlobalLogHandler(ws_manager.broadcast_sync)
+            _global_handler.setLevel(_logging.INFO)
+            _logging.getLogger("backend").addHandler(_global_handler)
+            logger.info("[api] 全局日志拦截器已挂 (backend.* → 前端 SYS)")
+        except Exception as _e:
+            logger.warning(f"[api] 全局日志拦截器挂载失败: {_e}")
         # OCR pre-warm: 启动时跑一次 dummy 图, 让 RapidOCR 模型权重 + ONNX runtime
         # 加载到内存. 避免第一次真实 OCR 调用时 cold start 慢 4-6 倍 (实测 2.7s vs 0.5s).
         # 在后台线程跑, 不阻塞 startup.

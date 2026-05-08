@@ -96,6 +96,36 @@ class WSLogHandler(logging.Handler):
             pass
 
 
+class GlobalLogHandler(logging.Handler):
+    """系统级日志拦截器 — backend 启动钩子 / 阶段测试 / overlay 部署 等
+    无 instance contextvar 的日志, 标 instance=-1 (= SYS) 推到前端日志栏.
+
+    contextvar 已有具体实例 (>=0) 时跳过, 让 per-instance WSLogHandler 处理,
+    避免同一条日志重复推送 (per-instance 一次 + SYS 一次).
+    """
+
+    def __init__(self, callback: Callable):
+        super().__init__()
+        self._callback = callback
+
+    def emit(self, record):
+        if _current_instance.get(-1) >= 0:
+            return  # per-instance handler 会处理这条
+        try:
+            self._callback({
+                "type": "log",
+                "data": {
+                    "timestamp": record.created,
+                    "instance": -1,
+                    "level": record.levelname.lower(),
+                    "message": record.getMessage(),
+                    "state": "",
+                }
+            })
+        except Exception:
+            pass
+
+
 class _PhaseError(Exception):
     """阶段执行失败（可重试）"""
     def __init__(self, phase: str, reason: str):
@@ -954,6 +984,26 @@ class MultiRunnerService:
         self._screenshot_cache[cache_key] = (time.time(), jpg)
         return jpg
 
+    # ── MJPEG 流广播 (per-instance frame broadcaster) ──
+    # 多客户端订阅同一 instance 时, 单个 producer 拉帧 fan-out 给所有 subscriber,
+    # 避免 N 个客户端 = N×fps screencap 把 LDPlayer 打爆.
+
+    _stream_broadcasters: "dict[int, _StreamBroadcaster]" = {}
+
+    def get_or_create_stream_broadcaster(self, instance_index: int,
+                                          fps: int, max_width: int,
+                                          adb_path: str) -> "_StreamBroadcaster":
+        bc = self._stream_broadcasters.get(instance_index)
+        if bc is None or bc.closed:
+            bc = _StreamBroadcaster(self, instance_index, fps=fps,
+                                    max_width=max_width, adb_path=adb_path)
+            self._stream_broadcasters[instance_index] = bc
+        else:
+            # 已有 broadcaster: 跟随首个订阅者的参数; 后续 fps/w 改了不重启
+            # (商业上够用, 真要细控可以 keyed by (idx,fps,w))
+            pass
+        return bc
+
     async def _snapshot_loop(self):
         """每秒推送一次全量快照"""
         try:
@@ -981,3 +1031,106 @@ class MultiRunnerService:
             if os.path.isdir(d):
                 return d
         return candidates[0]
+
+
+class _StreamBroadcaster:
+    """单 instance 的 MJPEG producer + fan-out broadcaster.
+
+    工作方式:
+      - 第一个客户端 subscribe → producer 协程启动, 按 fps 拉帧
+      - 帧被 push 到所有 subscriber 的 asyncio.Queue (满了 drop 旧帧, 不堵)
+      - 最后一个客户端 unsubscribe → producer 自动退出, broadcaster 标记 closed
+    """
+
+    QUEUE_MAX = 2  # 每订阅者最多缓 2 帧, 多了直接丢旧帧 (slow client 不拖累 source)
+
+    def __init__(self, service: "MultiRunnerService", instance_index: int,
+                 fps: int, max_width: int, adb_path: str):
+        self.service = service
+        self.instance_index = instance_index
+        self.fps = max(1, min(15, fps))
+        self.max_width = max_width
+        self.adb_path = adb_path
+        self.subscribers: set[asyncio.Queue] = set()
+        self.closed = False
+        self._producer_task: Optional[asyncio.Task] = None
+
+    async def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=self.QUEUE_MAX)
+        self.subscribers.add(q)
+        if self._producer_task is None or self._producer_task.done():
+            self._producer_task = asyncio.create_task(self._producer())
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue):
+        self.subscribers.discard(q)
+        # 用 sentinel None 唤醒可能 await get() 的消费者
+        try:
+            q.put_nowait(None)
+        except Exception:
+            pass
+
+    async def _producer(self):
+        """按 fps 拉帧, fan-out 给所有 subscriber. 没订阅者就退出."""
+        interval = 1.0 / self.fps
+        try:
+            while self.subscribers:
+                t0 = time.time()
+                jpg = await self._fetch_frame()
+                if jpg:
+                    # fan-out, 满 queue 丢旧帧
+                    for q in list(self.subscribers):
+                        if q.full():
+                            try:
+                                q.get_nowait()
+                            except Exception:
+                                pass
+                        try:
+                            q.put_nowait(jpg)
+                        except Exception:
+                            pass
+                # 节奏控制: 总周期 = interval, 减去本次拉帧耗时
+                elapsed = time.time() - t0
+                sleep_s = max(0.0, interval - elapsed)
+                if sleep_s > 0:
+                    await asyncio.sleep(sleep_s)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"[stream #{self.instance_index}] producer err: {e}")
+        finally:
+            self.closed = True
+            # 唤醒所有 subscriber
+            for q in list(self.subscribers):
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
+
+    async def _fetch_frame(self) -> Optional[bytes]:
+        """绕过 service.get_screenshot 的 2s 缓存, 直接拉一帧."""
+        raw_adb = None
+        runner = self.service._runners.get(self.instance_index)
+        if runner:
+            adb = runner.adb
+            raw_adb = getattr(adb, '_adb', adb)
+        elif self.adb_path:
+            serial = f"emulator-{5554 + self.instance_index * 2}"
+            raw_adb = ADBController(serial, self.adb_path)
+        if raw_adb is None:
+            return None
+        try:
+            shot = await raw_adb.screenshot()
+        except Exception:
+            return None
+        if shot is None:
+            return None
+        if self.max_width > 0 and shot.shape[1] > self.max_width:
+            scale = self.max_width / shot.shape[1]
+            new_h = int(shot.shape[0] * scale)
+            shot = cv2.resize(shot, (self.max_width, new_h), interpolation=cv2.INTER_AREA)
+        quality = 50 if self.max_width > 0 else 75
+        ok, buf = cv2.imencode(".jpg", shot, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return None
+        return buf.tobytes()
