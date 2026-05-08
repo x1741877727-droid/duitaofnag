@@ -1,4 +1,21 @@
-// Top-level build file — 模块的 build.gradle 各自管自己的依赖.
-plugins {
-    id 'com.android.application' version '8.2.2' apply false
+// Top-level build file — 跟 vpn-app 同一套 (AGP 7.4.2 + Gradle 7.5.1) 以复用本地缓存.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
 }
