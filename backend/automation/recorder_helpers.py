@@ -150,13 +150,18 @@ def _tier_yolo_from_perception(p: Any) -> TierRecord:
     raw = list(getattr(p, "yolo_dets_raw", []) or [])
     for d in raw:
         try:
-            x1 = int(getattr(d, "cx", 0)) - int(getattr(d, "w", 64) // 2 if hasattr(d, "w") else 32)
-            y1 = int(getattr(d, "cy", 0)) - int(getattr(d, "h", 64) // 2 if hasattr(d, "h") else 32)
-            bbox = getattr(d, "bbox", None)
-            if bbox and len(bbox) == 4:
-                bbox = [int(v) for v in bbox]
+            # Detection dataclass 用 x1/y1/x2/y2 字段 (yolo_dismisser.py:103). 之前误查
+            # d.bbox / d.w 永远拿不到, 走 fallback 写死 64×64 占位 → archive 显示错位 bbox.
+            if all(hasattr(d, k) for k in ("x1", "y1", "x2", "y2")):
+                bbox = [int(d.x1), int(d.y1), int(d.x2), int(d.y2)]
             else:
-                bbox = [x1, y1, x1 + 64, y1 + 64]
+                _bb = getattr(d, "bbox", None)
+                if _bb and len(_bb) == 4:
+                    bbox = [int(v) for v in _bb]
+                else:
+                    cx = int(getattr(d, "cx", 0))
+                    cy = int(getattr(d, "cy", 0))
+                    bbox = [cx - 32, cy - 32, cx + 32, cy + 32]
             t.yolo_detections.append(YoloDetection(
                 cls=str(getattr(d, "name", "")),
                 conf=round(float(getattr(d, "conf", 0.0)), 3),
