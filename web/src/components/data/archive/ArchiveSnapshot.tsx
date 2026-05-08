@@ -243,6 +243,17 @@ export function ArchiveSnapshot({
     return () => ro.disconnect()
   }, [width, height])
 
+  // YOLO class → 颜色映射 (识别样本名色彩区分, 便于一眼判断是 close_x / action_btn 等)
+  const YOLO_CLASS_COLOR: Record<string, string> = {
+    close_x: '#dc2626',           // 红 — 关闭按钮
+    action_btn: '#2563eb',        // 蓝 — 确认/同意按钮
+    dialog: '#d97706',            // 橙 — 弹窗框
+    lobby: '#16a34a',             // 绿 — 大厅
+    team_slot_btn_collapse: '#7c3aed',  // 紫
+    team_slot_btn_exit: '#ec4899',      // 粉
+    slot_nameplate: '#0891b2',    // 青
+  }
+
   type Drawn = {
     tier: 'T1' | 'T2' | 'T3' | 'T4' | 'T5'
     /** 'primary' = 主 (完整矩形 + 标签), 'corner' = 同 tier 候选 (4 角点 ticks). */
@@ -254,24 +265,27 @@ export function ArchiveSnapshot({
     imgW: number
     imgH: number
     label: string
+    /** 颜色: yolo 走 class 着色, 其他走 tier 着色. */
+    color: string
   }
   const drawn: Drawn[] = []
   for (const e of evidence || []) {
     if (visibleTiers && !visibleTiers.has(e.tier)) continue
     const tier = e.tier as 'T1' | 'T2' | 'T3' | 'T4' | 'T5'
+    const tierColor = TIER_META[tier].color
     const list: UIBox[] =
       ('bboxes' in e && e.bboxes && e.bboxes.length)
         ? e.bboxes
         : ('bbox' in e && e.bbox)
           ? [{ bbox: e.bbox as [number, number, number, number], conf: e.conf, label: `${tier} · ${e.conf}` }]
           : []
-    const total = list.length
     list.forEach((b, i) => {
-      // 决策 tier: 第一个 (max conf) 完整, 其他角点 — 主次分明.
-      // 非决策 tier: 第一个完整 (主证据), 其他也角点 — 避免画面被切碎.
-      // primary 标签: 多检测时附 ×N (e.g. "T3 · ×4 · 0.96")
-      const primaryLabel =
-        total > 1 ? `${tier} · ×${total} · ${b.conf}` : `${tier} · ${b.conf}`
+      // YOLO class 着色, 其他 (template / ocr / memory) 走 tier 颜色
+      const color = b.source === 'yolo' && b.cls
+        ? (YOLO_CLASS_COLOR[b.cls] || tierColor)
+        : tierColor
+      // label: backend UIBox.label 已经含 class 名 (e.g. "close_x 0.94"), 直接用; fallback tier
+      const useLabel = b.label || `${tier} · ${b.conf}`
       drawn.push({
         tier,
         role: i === 0 ? 'primary' : 'corner',
@@ -280,7 +294,8 @@ export function ArchiveSnapshot({
         imgY: b.bbox[1],
         imgW: b.bbox[2],
         imgH: b.bbox[3],
-        label: i === 0 ? primaryLabel : `${tier} · ${b.conf}`,
+        label: useLabel,
+        color,
       })
     })
   }
@@ -329,7 +344,6 @@ export function ArchiveSnapshot({
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
         {imgRect &&
           drawn.map((b, i) => {
-            const meta = TIER_META[b.tier]
             const left = ox + b.imgX * sx
             const top = oy + b.imgY * sy
             const w = b.imgW * sx
@@ -347,7 +361,7 @@ export function ArchiveSnapshot({
                   w={w}
                   h={h}
                   tick={tick}
-                  color={meta.color}
+                  color={b.color}
                   stroke={stroke}
                 />
               )
@@ -364,14 +378,14 @@ export function ArchiveSnapshot({
                   top,
                   width: w,
                   height: h,
-                  border: `1.5px solid ${meta.color}`,
+                  border: `1.5px solid ${b.color}`,
                   outline: '1px solid rgba(255,255,255,.45)',
                   outlineOffset: -2,
                   boxShadow: b.isDecided
-                    ? `0 0 0 1.5px ${meta.color}, 0 0 0 3px ${meta.color}33`
+                    ? `0 0 0 1.5px ${b.color}, 0 0 0 3px ${b.color}33`
                     : 'none',
                   borderRadius: 2,
-                  background: b.isDecided ? meta.color + '14' : 'transparent',
+                  background: b.isDecided ? b.color + '14' : 'transparent',
                 }}
               >
                 <div
@@ -379,7 +393,7 @@ export function ArchiveSnapshot({
                     position: 'absolute',
                     top: labelInside ? 0 : -15,
                     left: labelInside ? 0 : -1.5,
-                    background: meta.color,
+                    background: b.color,
                     color: '#fff',
                     fontFamily: C.fontMono,
                     fontSize: 9,

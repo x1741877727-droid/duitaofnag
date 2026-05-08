@@ -128,6 +128,10 @@ export interface UIBox {
   conf: string
   /** "lobby (0.93)" 之类的简短 label, 显示在 box 上方. */
   label: string
+  /** YOLO class 名 (e.g. "close_x" / "action_btn" / "dialog" / "lobby"). 仅 yolo 来源. */
+  cls?: string
+  /** bbox 来源类型, 用于按 class 着色 (yolo) vs 按 tier 着色 (template/ocr/memory). */
+  source?: 'yolo' | 'ocr' | 'template' | 'memory'
 }
 
 /** 5-tier 证据 (UI 用) — 从后端 tiers[] 整合而成. */
@@ -317,21 +321,34 @@ function adaptTier(t: BackendTier, isDecided: boolean): UIEvidence {
   const bboxes: UIBox[] = []
   for (const y of yoloHits) {
     const r = rectFromXyxy(y.bbox)
-    if (r) bboxes.push({ bbox: r, conf: y.conf.toFixed(3), label: `${y.cls} ${y.conf.toFixed(2)}` })
+    if (r) bboxes.push({
+      bbox: r, conf: y.conf.toFixed(3),
+      label: `${y.cls} ${y.conf.toFixed(2)}`,
+      cls: y.cls, source: 'yolo',
+    })
   }
   for (const o of ocrHits) {
     const r = rectFromXyxy(o.bbox)
-    if (r) bboxes.push({ bbox: r, conf: o.conf.toFixed(3), label: `"${o.text}" ${o.conf.toFixed(2)}` })
+    if (r) bboxes.push({
+      bbox: r, conf: o.conf.toFixed(3),
+      label: `"${o.text}" ${o.conf.toFixed(2)}`,
+      source: 'ocr',
+    })
+  }
+  for (const tpl of tplHits) {
+    // 模板 hit 没 bbox (只有 cx, cy + size?). 跳过.
+    void tpl
   }
   if (bboxes.length === 0 && t.ocr_roi && t.ocr_roi.length >= 4) {
     const r = rectFromXyxy(t.ocr_roi)
-    if (r) bboxes.push({ bbox: r, conf: '—', label: 'ocr roi' })
+    if (r) bboxes.push({ bbox: r, conf: '—', label: 'ocr roi', source: 'ocr' })
   }
   if (bboxes.length === 0 && memHit) {
     bboxes.push({
       bbox: [memHit.cx - 50, memHit.cy - 18, 110, 38],
       conf: '—',
       label: `mem (${memHit.cx},${memHit.cy})`,
+      source: 'memory',
     })
   }
 

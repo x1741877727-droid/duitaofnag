@@ -3,6 +3,8 @@ import { cn } from '@/lib/utils'
 import {
   useAppStore,
   type Instance,
+  type InstanceState,
+  type TeamGroup,
   type AccountAssignment,
 } from '@/lib/store'
 import { Pill } from '@/components/ui/pill'
@@ -84,11 +86,26 @@ export function DashboardLayoutA({
   const clearInstanceSelection = useAppStore((s) => s.clearInstanceSelection)
   const setSelectedInstances = useAppStore((s) => s.setSelectedInstances)
 
-  const instances = useMemo<Instance[]>(
-    () =>
-      Object.values(instancesRecord).sort((a, b) => a.index - b.index),
-    [instancesRecord],
-  )
+  // 监控墙 instances: 优先用 backend snapshot (主 runner 跑时含真 state).
+  // backend 没发 snapshot 时 (PhaseTester 跑 / 主 runner 没起), 从 accounts 派生 12 个 init 占位,
+  // 让监控墙至少有 12 卡看, 不显示 "0 实例 / 当前筛选下没有实例".
+  const instances = useMemo<Instance[]>(() => {
+    const fromSnapshot = Object.values(instancesRecord)
+    if (fromSnapshot.length > 0) {
+      return fromSnapshot.sort((a, b) => a.index - b.index)
+    }
+    return (accounts || []).map((a) => ({
+      index: a.instance_index ?? 0,
+      group: (a.group ?? 'A') as TeamGroup,
+      role: (a.role ?? 'member') as 'captain' | 'member',
+      state: 'init' as InstanceState,
+      nickname: a.nickname || `实例${a.instance_index}`,
+      error: '',
+      stateDuration: 0,
+      adbSerial: `emulator-${5554 + (a.instance_index ?? 0) * 2}`,
+      stageTimes: {},
+    } as Instance)).sort((a, b) => a.index - b.index)
+  }, [instancesRecord, accounts])
 
   const [viewFilter, setViewFilter] = useState<ViewFilter>('all')
   const [errorOnly, setErrorOnly] = useState(false)

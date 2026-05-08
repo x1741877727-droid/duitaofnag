@@ -182,11 +182,9 @@ class RunContext:
         self.pending_verify = None
 
     def is_blacklisted(self, x: int, y: int, radius: int = 30) -> bool:
-        """坐标是否在会话黑名单内 (距离 < radius)"""
-        return any(
-            abs(x - bx) < radius and abs(y - by) < radius
-            for (bx, by) in self.blacklist_coords
-        )
+        """坐标黑名单已停用 — 总是返回 False (用户要求, 避免识别到却不点).
+        blacklist_coords 仍然写入但不生效, 后续要恢复改这里返回 any(...)."""
+        return False
 
 
 # ─────────────── PhaseHandler ABC ───────────────
