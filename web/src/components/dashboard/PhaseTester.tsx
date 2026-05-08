@@ -156,13 +156,15 @@ export function PhaseTester() {
   }
 
   // 单 (phase, target) 跑一次: POST + 轮询 task_id 直到 done. 失败抛 Error.
-  // 返回 { ok, phase_name, duration_ms, error?, elapsed_ms_last? }
+  // scheme: 仅 P3b 用 (队长 P3a 拿到的队伍 scheme URL, 注入 ctx.game_scheme_url)
+  // 返回 { ok, scheme? (P3a 跑完返回的 game_scheme_url), phase_name, duration_ms, error? }
   const runOneTask = async (
     phase: string,
     tgt: number,
     role: 'captain' | 'member',
     onProgress: (elapsedMs: number) => void,
-  ): Promise<{ ok: boolean; phase_name?: string; duration_ms?: number; error?: string }> => {
+    scheme?: string,
+  ): Promise<{ ok: boolean; scheme?: string; phase_name?: string; duration_ms?: number; error?: string }> => {
     const startRes = await fetch('/api/runner/test_phase', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -172,6 +174,7 @@ export function PhaseTester() {
         role,
         expected_id: phase === 'P5' ? expectedId : undefined,
         keep_going: keepGoing,
+        scheme,
       }),
     })
     const startData = (await startRes.json()) as {
@@ -190,12 +193,20 @@ export function PhaseTester() {
       }
       const stRes = await fetch(`/api/runner/test_phase/${tid}`)
       const st = (await stRes.json()) as {
-        status?: string; result?: { ok?: boolean; phase_name?: string; duration_ms?: number; error?: string }; elapsed_ms?: number
+        status?: string
+        result?: { ok?: boolean; phase_name?: string; duration_ms?: number; error?: string; game_scheme_url?: string }
+        elapsed_ms?: number
       }
       onProgress(st.elapsed_ms || 0)
       if (st.status === 'done') {
         const r = st.result || {}
-        return { ok: r.ok !== false, phase_name: r.phase_name, duration_ms: r.duration_ms, error: r.error }
+        return {
+          ok: r.ok !== false,
+          scheme: r.game_scheme_url || undefined,
+          phase_name: r.phase_name,
+          duration_ms: r.duration_ms,
+          error: r.error,
+        }
       }
     }
   }
@@ -229,15 +240,17 @@ export function PhaseTester() {
     }
     refreshProgress()
 
-    // ── 2) 单 (instance, phase) 跑 + 写 result + 计数
+    // ── 2) 单 (instance, phase) 跑 + 写 result + 计数. 返回 ResultRow + 透传 scheme (P3a 用)
+    type RunOut = ResultRow & { scheme?: string }
     const runPhase = async (
       tgt: number,
       phase: string,
       role: 'captain' | 'member',
-    ): Promise<ResultRow> => {
+      scheme?: string,
+    ): Promise<RunOut> => {
       const meta = RUNNER_PHASES.find((p) => p.key === phase)
       if (!meta) {
-        const r: ResultRow = { phase, phase_name: `#${tgt} ${phase}`, ok: false, error: '未知 phase' }
+        const r: RunOut = { phase, phase_name: `#${tgt} ${phase}`, ok: false, error: '未知 phase' }
         addPhaseResult(r); failCount++; return r
       }
       const t0 = Date.now()
@@ -245,17 +258,18 @@ export function PhaseTester() {
         const data = await runOneTask(phase, tgt, role, (ms) => {
           elapsedByTgt[tgt] = ms
           refreshProgress()
-        })
-        const r: ResultRow = {
+        }, scheme)
+        const r: RunOut = {
           phase,
           phase_name: `#${tgt} ${data.phase_name || meta.name}`,
           ok: data.ok,
           duration_ms: data.duration_ms ?? Date.now() - t0,
           error: data.ok ? undefined : data.error,
+          scheme: data.scheme,
         }
         addPhaseResult(r); r.ok ? okCount++ : failCount++; return r
       } catch (e) {
-        const r: ResultRow = {
+        const r: RunOut = {
           phase,
           phase_name: `#${tgt} ${meta.name}`,
           ok: false,
@@ -305,7 +319,8 @@ export function PhaseTester() {
         })()
       }
 
-      // P3b: 队员等自己 P0/1/2 完 + 队长 P3a 完
+      // P3b: 队员等自己 P0/1/2 完 + 队长 P3a 完. 把 P3a 拿到的 scheme 显式传给 P3b
+      // (PhaseTester test_runner 走旁路, 不接 runner_service._team_schemes 同步管道, 必须 API 字段直传)
       const p3bPromises: Promise<unknown>[] = []
       if (selKeys.includes('P3b') && sq.members.length > 0 && p3aPromise) {
         for (const memIdx of sq.members) {
@@ -313,8 +328,16 @@ export function PhaseTester() {
             const memOk = await preDone[memIdx]
             if (!memOk && !keepGoing) return
             const lr = await p3aPromise!
-            if (!lr.ok) return  // 队长 P3a 没成功, P3b 跳 (backend scheme 没同步)
-            await runPhase(memIdx, 'P3b', 'member')
+            if (!lr.ok) return  // 队长 P3a 没成功, P3b 跳
+            if (!lr.scheme) {
+              const r: RunOut = {
+                phase: 'P3b', phase_name: `#${memIdx} 加入队伍`, ok: false,
+                error: '队长 P3a 没返回 game_scheme_url (backend 没写 ctx.game_scheme_url?)',
+              }
+              addPhaseResult(r); failCount++
+              return
+            }
+            await runPhase(memIdx, 'P3b', 'member', lr.scheme)
           })())
         }
       }
