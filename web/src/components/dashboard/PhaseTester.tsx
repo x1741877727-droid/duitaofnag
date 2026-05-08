@@ -63,7 +63,7 @@ const RUNNER_PHASES: PhaseDef[] = [
   { key: 'P5',  name: '等待真人入队', desc: '盯着 ID 出现, 240s 超时',     role: false, needsId: true, captainOnly: true, roleScope: 'captain' },
 ]
 
-const ROLE_PHASES = new Set(['P3a', 'P3b', 'P4'])
+// (旧 ROLE_PHASES 常量已被 runOneSquad 内的 ROLE_PHASE_KEYS 替代, 删除避免混淆)
 
 interface ResultRow {
   phase: string
@@ -192,20 +192,25 @@ export function PhaseTester() {
         throw new Error(`轮询超时 ${MAX_WAIT_MS / 1000}s`)
       }
       const stRes = await fetch(`/api/runner/test_phase/${tid}`)
+      // backend test_phase_status 用 **t.get('result', {}) 把 result 展开到**顶层**,
+      // 不是嵌套在 .result 子对象 (我之前抄错路径导致 lr.scheme 永远 undefined → P3b skip)
       const st = (await stRes.json()) as {
         status?: string
-        result?: { ok?: boolean; phase_name?: string; duration_ms?: number; error?: string; game_scheme_url?: string }
         elapsed_ms?: number
+        ok?: boolean
+        phase_name?: string
+        duration_ms?: number
+        error?: string
+        game_scheme_url?: string
       }
       onProgress(st.elapsed_ms || 0)
       if (st.status === 'done') {
-        const r = st.result || {}
         return {
-          ok: r.ok !== false,
-          scheme: r.game_scheme_url || undefined,
-          phase_name: r.phase_name,
-          duration_ms: r.duration_ms,
-          error: r.error,
+          ok: st.ok !== false,
+          scheme: st.game_scheme_url || undefined,
+          phase_name: st.phase_name,
+          duration_ms: st.duration_ms,
+          error: st.error,
         }
       }
     }
