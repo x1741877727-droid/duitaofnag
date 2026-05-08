@@ -59,7 +59,7 @@ const RUNNER_PHASES: PhaseDef[] = [
   { key: 'P2',  name: '清理弹窗',     desc: '开局前所有 popup → lobby',    role: false, single: true },
   { key: 'P3a', name: '创建队伍',     desc: '队长建房 + 同步 scheme',      role: true,  roleScope: 'captain' },
   { key: 'P3b', name: '加入队伍',     desc: '队员凭 scheme 加入',          role: true,  roleScope: 'member' },
-  { key: 'P4',  name: '准备就绪',     desc: '队长收尾 / 队员举旗',         role: true,  roleScope: 'both' },
+  { key: 'P4',  name: '选模式地图',   desc: '队长选模式 + 选地图 + 准备开打',  role: true,  roleScope: 'captain' },
   { key: 'P5',  name: '等待真人入队', desc: '盯着 ID 出现, 240s 超时',     role: false, needsId: true, captainOnly: true, roleScope: 'captain' },
 ]
 
@@ -324,12 +324,9 @@ export function PhaseTester() {
         ...p3bPromises,
       ])
 
-      // P4: roleScope='both'. 队长 + 队员都跑 (并发, 等齐).
-      if (selKeys.includes('P4')) {
-        await Promise.allSettled(all.map((idx) => {
-          const role: 'captain' | 'member' = idx === sq.captain ? 'captain' : 'member'
-          return runPhase(idx, 'P4', role)
-        }))
+      // P4 (captainOnly): 队长选模式 + 选地图. 队员等队长 P4 完才能进 P5.
+      if (selKeys.includes('P4') && sq.captain !== null) {
+        await runPhase(sq.captain, 'P4', 'captain')
       }
 
       // P5: 只队长 (业务约束 + RUNNER_PHASES.captainOnly)
