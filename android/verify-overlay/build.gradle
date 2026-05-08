@@ -1,0 +1,4 @@
+// Top-level build file — 模块的 build.gradle 各自管自己的依赖.
+plugins {
+    id 'com.android.application' version '8.2.2' apply false
+}

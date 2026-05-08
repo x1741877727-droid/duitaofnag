@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 极简 launcher icon — 黑底 + 一个圆角白方块, 跟项目 ink/cream token 同调 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#1A1A17"
+        android:pathData="M0,0h48v48h-48z" />
+    <path
+        android:fillColor="#F0EEE9"
+        android:pathData="M14,18 L14,30 L20,30 L20,28 L16,28 L16,18 Z" />
+    <path
+        android:fillColor="#16A34A"
+        android:pathData="M28,18 L28,30 L34,30 L34,18 Z" />
+</vector>

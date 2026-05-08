@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">加速器校验</string>
+    <string name="btn_check">检查</string>
+    <string name="status_idle">未检查</string>
+    <string name="status_checking">检查中…</string>
+    <string name="status_need_permission">请先授予浮窗权限</string>
+    <string name="status_ok_fmt">✓ 加速器正常 · 已运行 %1$d 分钟</string>
+    <string name="status_fail_fmt">✗ 未启动: %1$s</string>
+    <string name="overlay_text">fightmaster 已启动</string>
+</resources>

@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import time
 
 # Windows 下隐藏 cmd 窗口
@@ -208,6 +209,103 @@ class MasterDisableTunUpdate(BaseModel):
 
 
 # =====================
+# 加速器 auto-start helper
+# =====================
+
+def _find_gameproxy_exe(config: "ConfigManager | None" = None) -> "str | None":
+    """按优先级找 gameproxy.exe 路径."""
+    from pathlib import Path
+    candidates: list[str] = []
+    if config is not None:
+        try:
+            p = getattr(config.settings, "gameproxy_path", "").strip()
+            if p:
+                candidates.append(p)
+        except Exception:
+            pass
+    # 跟 build.py 输出 dist 平级 (Nuitka standalone 部署常用) — exe 旁边
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.append(os.path.join(exe_dir, "gameproxy.exe"))
+        candidates.append(os.path.join(exe_dir, "gameproxy-go", "dist", "gameproxy.exe"))
+    # 开发树 + 绝对路径兜底
+    candidates += [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "gameproxy-go", "dist", "gameproxy.exe"),
+        r"D:\game-automation\duitaofnag\gameproxy-go\dist\gameproxy.exe",
+        r"C:\Users\Administrator\gameproxy.exe",
+        r"C:\Users\Administrator\Desktop\game-automation\gameproxy.exe",
+    ]
+    for c in candidates:
+        if c and Path(c).is_file():
+            return c
+    return None
+
+
+def _gameproxy_running() -> bool:
+    """通过 GET 127.0.0.1:9901/api/tun/state 判断 gameproxy 是否已在跑."""
+    import urllib.request, json as _json
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:9901/api/tun/state", timeout=1) as resp:
+            cur = _json.loads(resp.read().decode("utf-8"))
+            return bool(cur.get("ok") and (cur.get("uptime_seconds", 0) > 0 or cur.get("mode") == "tun"))
+    except Exception:
+        return False
+
+
+def _ensure_gameproxy_running(config: "ConfigManager | None" = None) -> "tuple[bool, str]":
+    """同步函数 (调用方走 asyncio.to_thread). 已在跑就直接返 True; 否则 Popen 启动 + 轮询 6s.
+
+    返回 (ok, message). 失败 message 含原因.
+    """
+    import subprocess, time
+    from pathlib import Path
+
+    if _gameproxy_running():
+        return True, "已在运行"
+
+    exe = _find_gameproxy_exe(config)
+    if not exe:
+        return False, "gameproxy.exe 未找到 (设置 gameproxy_path 或放到 exe 同目录)"
+
+    try:
+        log_dir = Path(exe).parent
+        log_path = log_dir / "gameproxy.log"
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = 0x00000200 | 0x00000008  # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        subprocess.Popen(
+            [exe],
+            cwd=str(log_dir),
+            stdout=open(log_path, "ab"),
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as e:
+        return False, f"Popen 失败: {e}"
+
+    # 等 :9901 起来, 最多 6s
+    for _ in range(12):
+        time.sleep(0.5)
+        if _gameproxy_running():
+            return True, f"已启动 (exe: {exe})"
+    return False, f"已 Popen 但 6s 内未就绪 (exe: {exe})"
+
+
+async def _redeploy_overlay(config: "ConfigManager | None", aio_mod) -> None:
+    """gameproxy 起来后异步重推浮窗 — 不阻断 caller, 失败 silent."""
+    try:
+        await aio_mod.sleep(2)  # 等 ldconsole / adb 缓存稳一下
+        from .automation.overlay_installer import deploy_all as _d
+        res = await aio_mod.to_thread(_d, config)
+        logger.info(f"[api] overlay 重推: {res.get('success', 0)}/{res.get('total', 0)}"
+                    + (f" — {res.get('reason')}" if res.get('reason') else ""))
+    except Exception as e:
+        logger.warning(f"[api] overlay 重推异常: {e}")
+
+
+# =====================
 # 应用工厂
 # =====================
 
@@ -338,6 +436,29 @@ def create_app(config: ConfigManager) -> FastAPI:
             except Exception as e:
                 logger.warning(f"[api] OCR pre-warm 失败 (不影响功能): {e}")
         _asyncio.create_task(_ocr_prewarm())
+
+        # gameproxy auto-start: backend 启动 = 加速器自动跟着起.
+        # 客户分发场景下双击 GameBot.exe 即一切就绪, 无需手动点 UI 按钮.
+        # 加速器起来后再推浮窗 APK 到所有在线模拟器 (心理 + 物理双保险).
+        async def _gameproxy_autostart():
+            try:
+                ok, msg = await _asyncio.to_thread(_ensure_gameproxy_running, config)
+                logger.info(f"[api] gameproxy auto-start: {msg}")
+                if not ok:
+                    logger.warning(f"[api] gameproxy 自启失败 (不影响 backend): {msg}")
+                    return
+                # 等 ldconsole / adb 服务稳一会儿再扫
+                await _asyncio.sleep(2)
+                try:
+                    from .automation.overlay_installer import deploy_all as _deploy_overlay
+                    res = await _asyncio.to_thread(_deploy_overlay, config)
+                    logger.info(f"[api] overlay 部署: {res.get('success', 0)}/{res.get('total', 0)} 成功"
+                                + (f" — {res.get('reason')}" if res.get("reason") else ""))
+                except Exception as e:
+                    logger.warning(f"[api] overlay 部署异常 (不影响 backend): {e}")
+            except Exception as e:
+                logger.warning(f"[api] gameproxy auto-start 异常: {e}")
+        _asyncio.create_task(_gameproxy_autostart())
 
     @app.on_event("shutdown")
     async def shutdown():
@@ -521,6 +642,94 @@ def create_app(config: ConfigManager) -> FastAPI:
         config.save_settings()
         return {"ok": True, "master_disable_tun": payload.disable}
 
+    @app.get("/api/tun/state")
+    async def tun_state():
+        """反代 gameproxy :9901/api/tun/state — 加速器页用 (当前模式 + 实时计数).
+
+        gameproxy 不可达时返回 mode=offline, 让前端区分"服务挂了" vs "服务在跑没改包".
+        """
+        import urllib.request, json as _json
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:9901/api/tun/state", timeout=2) as resp:
+                return _json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            return {"ok": False, "mode": "offline", "error": str(e), "counters": {}}
+
+    @app.post("/api/tun/start")
+    async def tun_start():
+        """启动 gameproxy.exe (本地 TUN 加速器) — UI 手动启停按钮调.
+
+        正常流程是 backend 启动时已自启 (startup hook), 此端点用于 gameproxy 崩了
+        手动重启的兜底.
+        """
+        import asyncio as _aio
+        # 已在跑就不重复启 — 但还是顺势重推一次浮窗 (用户可能新加了模拟器)
+        if _gameproxy_running():
+            _aio.create_task(_redeploy_overlay(config, _aio))
+            try:
+                import urllib.request, json as _json
+                with urllib.request.urlopen("http://127.0.0.1:9901/api/tun/state", timeout=1) as resp:
+                    cur = _json.loads(resp.read().decode("utf-8"))
+                return {"ok": True, "already_running": True, "state": cur}
+            except Exception:
+                return {"ok": True, "already_running": True}
+        ok, msg = await _aio.to_thread(_ensure_gameproxy_running, config)
+        if ok:
+            _aio.create_task(_redeploy_overlay(config, _aio))
+        return {"ok": ok, "message": msg}
+
+    @app.post("/api/tun/stop")
+    async def tun_stop():
+        """杀 gameproxy.exe 进程 (本地 TUN 加速器停) + 同步关所有模拟器浮窗."""
+        import os, subprocess
+        import asyncio as _aio
+        # 先关浮窗 (服务都在跑就让它跟着 gameproxy 一起走)
+        try:
+            from .automation.overlay_installer import stop_all as _stop_overlay
+            _aio.create_task(_aio.to_thread(_stop_overlay, config))
+        except Exception:
+            pass
+        try:
+            if os.name == "nt":
+                # taskkill /F /IM gameproxy.exe → 杀全部同名实例
+                r = subprocess.run(
+                    ["taskkill", "/F", "/IM", "gameproxy.exe"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                ok = r.returncode == 0
+                return {"ok": ok, "stdout": r.stdout, "stderr": r.stderr}
+            else:
+                r = subprocess.run(["pkill", "-f", "gameproxy"], capture_output=True, text=True, timeout=5)
+                return {"ok": r.returncode in (0, 1), "stdout": r.stdout, "stderr": r.stderr}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @app.post("/api/overlay/deploy")
+    async def overlay_deploy():
+        """手动重推浮窗 APK 到所有在线模拟器.
+
+        正常流程是 gameproxy 自启时一并推送; 这个 endpoint 用于手动重推
+        (新连模拟器 / APK 升级 / 浮窗被用户误关).
+        """
+        import asyncio as _aio
+        try:
+            from .automation.overlay_installer import deploy_all as _deploy
+            res = await _aio.to_thread(_deploy, config)
+            return res
+        except Exception as e:
+            return {"ok": False, "reason": f"deploy 异常: {e}"}
+
+    @app.post("/api/overlay/stop")
+    async def overlay_stop():
+        """关停所有模拟器的浮窗 service (gameproxy 关时同步关浮窗用)."""
+        import asyncio as _aio
+        try:
+            from .automation.overlay_installer import stop_all as _stop
+            res = await _aio.to_thread(_stop, config)
+            return res
+        except Exception as e:
+            return {"ok": False, "reason": f"stop 异常: {e}"}
+
     @app.get("/api/proxy_verify")
     async def proxy_verify():
         """反代 gameproxy :9901/verify HTML, 让 cloudflare 公网 UI 也能 access.
@@ -553,6 +762,50 @@ def create_app(config: ConfigManager) -> FastAPI:
         if jpg is None:
             return Response(content=b"", status_code=204)
         return Response(content=jpg, media_type="image/jpeg")
+
+    @app.get("/api/stream/{instance_index}")
+    async def stream(instance_index: int, fps: int = 5, w: int = 0):
+        """MJPEG 流式截图 (multipart/x-mixed-replace).
+
+        多客户端订阅同一 instance 时共享一个 producer (避免重复 screencap).
+        ?fps=N (1-15) 控制帧率, ?w=N 缩放宽度.
+        """
+        from fastapi.responses import StreamingResponse
+        fps = max(1, min(15, int(fps)))
+        adb_path = config.settings.adb_path or os.path.join(
+            config.settings.ldplayer_path, "adb.exe")
+        broadcaster = service.get_or_create_stream_broadcaster(
+            instance_index, fps=fps, max_width=int(w), adb_path=adb_path,
+        )
+        boundary = b"--gpframe"
+
+        async def gen():
+            queue = await broadcaster.subscribe()
+            try:
+                while True:
+                    jpg = await queue.get()
+                    if jpg is None:  # broadcaster 关闭信号
+                        break
+                    yield (
+                        b"--gpframe\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(jpg)).encode() + b"\r\n\r\n"
+                        + jpg + b"\r\n"
+                    )
+            finally:
+                broadcaster.unsubscribe(queue)
+
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate, private",
+            "Pragma": "no-cache",
+            "Connection": "close",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(
+            gen(),
+            media_type=f"multipart/x-mixed-replace; boundary={boundary.decode().lstrip('-')}",
+            headers=headers,
+        )
 
     # ── 健康 ──
 

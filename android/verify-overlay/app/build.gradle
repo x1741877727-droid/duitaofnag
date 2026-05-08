@@ -1,0 +1,34 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.gamebot.overlay'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.gamebot.overlay"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.debug   // 用 debug key 签 — 客户内网, 不上 store
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.12.0'
+}
