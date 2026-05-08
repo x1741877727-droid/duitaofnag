@@ -86,26 +86,34 @@ export function DashboardLayoutA({
   const clearInstanceSelection = useAppStore((s) => s.clearInstanceSelection)
   const setSelectedInstances = useAppStore((s) => s.setSelectedInstances)
 
-  // 监控墙 instances: 优先用 backend snapshot (主 runner 跑时含真 state).
-  // backend 没发 snapshot 时 (PhaseTester 跑 / 主 runner 没起), 从 accounts 派生 12 个 init 占位,
-  // 让监控墙至少有 12 卡看, 不显示 "0 实例 / 当前筛选下没有实例".
+  // 监控墙 instances:
+  //   1) backend 发了 snapshot → 用 backend (含真 state, 主 runner 跑时)
+  //   2) PhaseTester busy/有 results → 只显示工作台勾选的那几个 (selectedInstances)
+  //   3) 其他 → 不 fallback (StandbyState 已经接管, 不会到这里)
   const instances = useMemo<Instance[]>(() => {
     const fromSnapshot = Object.values(instancesRecord)
     if (fromSnapshot.length > 0) {
       return fromSnapshot.sort((a, b) => a.index - b.index)
     }
-    return (accounts || []).map((a) => ({
-      index: a.index ?? 0,
-      group: (a.group ?? 'A') as TeamGroup,
-      role: (a.role ?? 'member') as 'captain' | 'member',
-      state: 'init' as InstanceState,
-      nickname: a.nickname || `实例${a.index}`,
-      error: '',
-      stateDuration: 0,
-      adbSerial: a.adbSerial || `emulator-${5554 + (a.index ?? 0) * 2}`,
-      stageTimes: {},
-    } as Instance)).sort((a, b) => a.index - b.index)
-  }, [instancesRecord, accounts])
+    // 跑工作台时只显示勾选的实例 (用户原话: 启动几个显示几个)
+    const sourceIdxs = phaseTesterActive
+      ? selectedInstances
+      : (accounts || []).map((a) => a.index ?? 0)
+    return sourceIdxs.map((idx) => {
+      const acct = (accounts || []).find((a) => a.index === idx)
+      return {
+        index: idx,
+        group: (acct?.group ?? 'A') as TeamGroup,
+        role: (acct?.role ?? 'member') as 'captain' | 'member',
+        state: 'init' as InstanceState,
+        nickname: acct?.nickname || `实例${idx}`,
+        error: '',
+        stateDuration: 0,
+        adbSerial: acct?.adbSerial || `emulator-${5554 + idx * 2}`,
+        stageTimes: {},
+      } as Instance
+    }).sort((a, b) => a.index - b.index)
+  }, [instancesRecord, accounts, phaseTesterActive, selectedInstances])
 
   const [viewFilter, setViewFilter] = useState<ViewFilter>('all')
   const [errorOnly, setErrorOnly] = useState(false)

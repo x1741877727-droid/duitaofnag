@@ -9,6 +9,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { C } from '@/lib/design-tokens'
+import { useAppStore } from '@/lib/store'
 import {
   TIER_META,
   fetchSessionList,
@@ -1481,6 +1482,30 @@ export function ArchiveView() {
       alive = false
     }
   }, [view, sessionId])
+
+  // LIVE session 实时刷新: 监听 store.liveDecisions 变化, 当前 session 是 isCurrent 时
+  // 重 fetch 决策列表, 跟随真实跑出来的新决策.
+  const liveDecisions = useAppStore((s) => s.liveDecisions)
+  const liveCount = useMemo(
+    () => Object.values(liveDecisions).reduce((n, arr) => n + arr.length, 0),
+    [liveDecisions],
+  )
+  useEffect(() => {
+    if (view !== 'detail' || !sessionId) return
+    const cur = sessions?.find((s) => s.id === sessionId)
+    if (!cur?.isCurrent) return  // 只在 LIVE session 才追新
+    let alive = true
+    fetchDecisionList(sessionId)
+      .then((list) => {
+        if (!alive) return
+        setDecisions(list)
+        if (list.length > 0) setDecisionId((cur2) => cur2 ?? list[0].id)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [liveCount, view, sessionId, sessions])
 
   // load detail when selecting decision
   useEffect(() => {
