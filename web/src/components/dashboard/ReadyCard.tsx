@@ -3,6 +3,7 @@
  * 完全照搬 /tmp/design_dl/gameautomation/project/states.jsx ReadyCard (716-810).
  */
 
+import { useState } from 'react'
 import { C } from '@/lib/design-tokens'
 
 export function ReadyCard({
@@ -12,14 +13,28 @@ export function ReadyCard({
   emuReady,
   accel,
   onStart,
+  onAccelToggle,
 }: {
   greet: string
   count: number
   teamCount: number
   emuReady: number
-  accel: 'TUN' | 'SOCKS5' | 'OFF'
+  accel: 'TUN' | 'OFF'
   onStart: () => void
+  /** 启停加速器 (parent 实现 POST /api/tun/start 或 stop + 立即 refresh state). */
+  onAccelToggle?: () => Promise<void> | void
 }) {
+  const [accelBusy, setAccelBusy] = useState(false)
+  const handleAccelClick = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!onAccelToggle || accelBusy) return
+    setAccelBusy(true)
+    try {
+      await onAccelToggle()
+    } finally {
+      setAccelBusy(false)
+    }
+  }
   return (
     <div
       style={{
@@ -125,11 +140,16 @@ export function ReadyCard({
       >
         {(
           [
-            ['账号', `${count} 个 · ${teamCount} 队`, true],
-            ['模拟器', `${emuReady} / ${count} 在跑`, emuReady === count],
-            ['加速器', accel === 'OFF' ? '未启用' : `${accel} 模式`, accel !== 'OFF'],
-          ] as Array<[string, string, boolean]>
-        ).map(([l, v, ok], i) => (
+            { l: '账号', v: `${count} 个 · ${teamCount} 队`, ok: true, kind: 'plain' as const },
+            { l: '模拟器', v: `${emuReady} / ${count} 在跑`, ok: emuReady === count, kind: 'plain' as const },
+            {
+              l: '加速器',
+              v: accel === 'OFF' ? '未启用' : `${accel} 模式`,
+              ok: accel !== 'OFF',
+              kind: 'accel' as const,
+            },
+          ]
+        ).map(({ l, v, ok, kind }, i) => (
           <div
             key={l}
             style={{
@@ -164,10 +184,58 @@ export function ReadyCard({
                 color: C.ink,
                 fontWeight: 500,
                 fontFamily: C.fontMono,
+                flex: 1,
               }}
             >
               {v}
             </span>
+            {kind === 'accel' && onAccelToggle && (
+              accel === 'OFF' ? (
+                <button
+                  type="button"
+                  onClick={handleAccelClick}
+                  disabled={accelBusy}
+                  style={{
+                    padding: '4px 12px',
+                    borderRadius: 5,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    color: '#f0eee9',
+                    background: C.ink,
+                    border: 'none',
+                    cursor: accelBusy ? 'wait' : 'pointer',
+                    fontFamily: 'inherit',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                  }}
+                >
+                  <svg width="9" height="9" viewBox="0 0 11 11" fill="#fff">
+                    <path d="M2 1l8 4.5L2 10z" />
+                  </svg>
+                  {accelBusy ? '启动中…' : '启动'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleAccelClick}
+                  disabled={accelBusy}
+                  title="停止 gameproxy.exe"
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    color: C.ink3,
+                    background: 'transparent',
+                    border: `1px solid ${C.border}`,
+                    cursor: accelBusy ? 'wait' : 'pointer',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  {accelBusy ? '…' : '停'}
+                </button>
+              )
+            )}
           </div>
         ))}
       </div>

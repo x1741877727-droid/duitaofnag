@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { useAppStore, type ConsoleView } from '@/lib/store'
 import { fmtUptime } from '@/lib/design-tokens'
@@ -63,7 +63,14 @@ export function Header({
   void tick // re-render every second
   const uptime = fmtUptime(runningDuration)
 
-  const completed = 0 // TODO: wire 本会话完成局数 from session API
+  // 估算: 本会话累计 phase 转换次数 / 平均 8 phase per round (保守).
+  // 准确数据等阶段 6 后端 /api/session/current 接上.
+  const phaseHistory = useAppStore((s) => s.phaseHistory)
+  const totalTransitions = useMemo(
+    () => Object.values(phaseHistory).reduce((a, arr) => a + arr.length, 0),
+    [phaseHistory],
+  )
+  const completed = isRunning ? Math.floor(totalTransitions / 8) : 0
 
   return (
     <header

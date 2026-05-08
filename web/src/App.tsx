@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useLiveStream } from '@/lib/useLiveStream'
 import { useAppStore, type TeamGroup, type TeamRole } from '@/lib/store'
@@ -11,12 +11,24 @@ import {
 } from '@/lib/demo-data'
 import { Header } from '@/components/header/Header'
 import { DashboardLayoutA } from '@/components/dashboard/DashboardLayoutA'
-import { SettingsView } from '@/components/settings-view'
 import { LogDrawer } from '@/components/log-panel'
-import { PerfView } from '@/components/perf/PerfView'
-import { AcceleratorView } from '@/components/accelerator-view'
-import { RecognitionView } from '@/components/recognition/RecognitionView'
-import { DataView } from '@/components/data/DataView'
+
+// 主页 (中控台) eager 加载, 其他子页 lazy split.
+// 减小首屏 bundle, 用户进特定页面才加载对应代码块.
+const SettingsView = lazy(() =>
+  import('@/components/settings-view').then((m) => ({ default: m.SettingsView })),
+)
+const PerfView = lazy(() =>
+  import('@/components/perf/PerfView').then((m) => ({ default: m.PerfView })),
+)
+const RecognitionShell = lazy(() =>
+  import('@/components/recognition/RecognitionShell').then((m) => ({
+    default: m.RecognitionShell,
+  })),
+)
+const DataShell = lazy(() =>
+  import('@/components/data/DataShell').then((m) => ({ default: m.DataShell })),
+)
 
 /** 派生: URL ?demo=running|standby 时注入 mock 数据直接看视觉. */
 type DemoMode = 'running' | 'standby' | null
@@ -65,7 +77,7 @@ function App() {
     }
   }, [demo, setAccounts, setEmulators, setInstances, setIsRunning])
 
-  // 启动时加载账号 + 模拟器
+  // 启动时加载账号 (一次)
   useEffect(() => {
     if (demo) return
     fetch('/api/accounts')
@@ -87,11 +99,17 @@ function App() {
         }
       })
       .catch(() => {})
+  }, [demo, setAccounts])
 
-    fetch('/api/emulators')
-      .then((r) => r.json())
-      .then((json) => {
-        if (json.instances) {
+  // emulator running 状态需要持续轮询 — 用户启停模拟器后 store 才能跟上
+  useEffect(() => {
+    if (demo) return
+    let alive = true
+    const load = () =>
+      fetch('/api/emulators')
+        .then((r) => r.json())
+        .then((json) => {
+          if (!alive || !json.instances) return
           setEmulators(
             json.instances.map((e: Record<string, unknown>) => ({
               index: e.index as number,
@@ -102,10 +120,15 @@ function App() {
                 `emulator-${5554 + (e.index as number) * 2}`,
             })),
           )
-        }
-      })
-      .catch(() => {})
-  }, [setAccounts, setEmulators])
+        })
+        .catch(() => {})
+    load()
+    const t = setInterval(load, 5000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [demo, setEmulators])
 
   const [actionLoading, setActionLoading] = useState(false)
   const onAction = async () => {
@@ -133,22 +156,39 @@ function App() {
 
       <div className="flex-1 flex min-h-0">
         <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-          {currentView === 'console' && (
+          {(currentView === 'console' || currentView === 'dashboard') && (
             <DashboardLayoutA onStart={onAction} onStop={onAction} />
           )}
-          {currentView === 'dashboard' && (
-            <DashboardLayoutA onStart={onAction} onStop={onAction} />
+          {currentView !== 'console' && currentView !== 'dashboard' && (
+            <Suspense fallback={<LazyFallback />}>
+              {currentView === 'data' && <DataShell />}
+              {currentView === 'recognition' && <RecognitionShell />}
+              {currentView === 'settings' && <SettingsView />}
+              {currentView === 'perf' && <PerfView />}
+            </Suspense>
           )}
-          {currentView === 'data' && <DataView />}
-          {currentView === 'recognition' && <RecognitionView />}
-          {currentView === 'settings' && <SettingsView />}
-          {/* 临时保留: perf / accelerator (阶段 5/6 删) */}
-          {currentView === 'perf' && <PerfView />}
-          {currentView === 'accelerator' && <AcceleratorView />}
         </main>
 
         {showLogPanel && <LogDrawer />}
       </div>
+    </div>
+  )
+}
+
+function LazyFallback() {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#7d7869',
+        fontSize: 13,
+        fontFamily: "'IBM Plex Mono', monospace",
+      }}
+    >
+      加载中…
     </div>
   )
 }

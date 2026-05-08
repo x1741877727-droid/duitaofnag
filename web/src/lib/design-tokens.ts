@@ -34,11 +34,12 @@ export const C = {
     "'IBM Plex Mono','JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace",
 } as const
 
-/** 5 层识别证据颜色 — 跟 [archive-view.jsx](/tmp/design_dl/gameautomation/project/archive-view.jsx) 实际代码锁死. */
+/** 5 层识别证据颜色.
+ *  T3 用 indigo 而非纯黑 — 真截图叠 bbox 时跟 letterbox 黑边能区分. */
 export const TIER_COLOR = {
   T1: { fg: '#16a34a', soft: '#dcfce7', label: '模板' },
   T2: { fg: '#d97706', soft: '#fef3c7', label: 'OCR' },
-  T3: { fg: '#1a1a17', soft: '#efece4', label: 'YOLO' },
+  T3: { fg: '#4338ca', soft: '#e0e7ff', label: 'YOLO' },
   T4: { fg: '#7d7869', soft: '#efece4', label: 'Memory' },
   T5: { fg: '#aca695', soft: '#f4f4f5', label: '兜底' },
 } as const

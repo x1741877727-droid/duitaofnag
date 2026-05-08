@@ -39,7 +39,7 @@ export function Header() {
           {([
             { key: 'dashboard',   label: '运行',    Icon: LayoutDashboard, title: '运行控制' },
             { key: 'console',     label: '中控台',  Icon: Activity,        title: '中控台' },
-            { key: 'accelerator', label: '加速器',  Icon: Zap,             title: '加速器: TUN/SOCKS5 状态 + 实时计数' },
+            { key: 'accelerator', label: '加速器',  Icon: Zap,             title: '加速器: TUN 状态 + 实时计数' },
             { key: 'recognition', label: '识别',    Icon: Eye,             title: '识别: 模版 / YOLO / OCR / 调试' },
             { key: 'data',        label: '数据',    Icon: Database,        title: '数据: 决策档案 / 记忆库 / Oracle' },
             { key: 'perf',        label: '性能',    Icon: BarChart3,       title: '性能监控' },

@@ -40,7 +40,7 @@ export function HeroSplash({
   greet: string
   count: number
   teamCount: number
-  accel: 'TUN' | 'SOCKS5' | 'OFF'
+  accel: 'TUN' | 'OFF'
   instances: Instance[]
   onStart: (picked: string[], effectiveTeams: TeamGroup[]) => void
   onReveal: () => void
@@ -188,7 +188,7 @@ function SplashStep({
   greet: string
   count: number
   teamCount: number
-  accel: 'TUN' | 'SOCKS5' | 'OFF'
+  accel: 'TUN' | 'OFF'
   teamKeys: string[]
   onNext: () => void
   onReveal: () => void

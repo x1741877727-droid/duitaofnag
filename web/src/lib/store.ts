@@ -73,13 +73,14 @@ export interface AccountAssignment {
   gameId: string
 }
 
+/** 加速器状态 — 只保留 TUN 模式 (本地虚拟网卡), 删 APK 时代的 3 层校验.
+ *  TUN 模式下校验 = wintun 适配器在跑 + gameproxy 转发健康. */
 export interface AcceleratorStatus {
   running: boolean
-  level1_proxy: boolean
-  level2_mitm: boolean
-  level3_rules: boolean
-  proxy_ip?: string
-  proxy_detail?: Record<string, unknown>
+  mode: 'TUN' | 'OFF'
+  uptime_seconds?: number
+  /** 累计改写包数 = rule1_hits + rule2_hits (gameproxy 转发统计). */
+  rewrites?: number
   pid?: number
   message?: string
 }
@@ -96,7 +97,7 @@ export interface AccelInstanceState {
 export type ConsoleView =
   | 'dashboard'      // 运行控制
   | 'console'        // 中控台
-  | 'accelerator'    // 加速器 (TUN / SOCKS5 状态 + 实时计数)
+  | 'accelerator'    // 加速器 (TUN 状态 + 实时计数)
   | 'recognition'    // 识别 (含 sub: templates / template-tuner / yolo / ocr)
   | 'data'           // 数据 (含 sub: archive / memory / oracle)
   | 'perf'           // 性能

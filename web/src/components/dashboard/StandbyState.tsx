@@ -7,7 +7,7 @@
  * 来源: states.jsx StandbyState (71-163)
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { C } from '@/lib/design-tokens'
 import { useAppStore, type AccountAssignment, type Instance } from '@/lib/store'
 import { PhaseTester } from './PhaseTester'
@@ -34,7 +34,45 @@ export function StandbyState({
 }) {
   const devMode = useAppStore((s) => s.devMode)
   const emulators = useAppStore((s) => s.emulators)
-  const tunMode: 'TUN' | 'SOCKS5' | 'OFF' = 'TUN' // TODO: read from /api/tun/state
+  // TUN-only: /api/tun/state 拉本地 wintun + gameproxy 状态.
+  // running && ok = TUN 模式; 其他都视为 OFF (失联/未启).
+  const [tunMode, setTunMode] = useState<'TUN' | 'OFF'>('OFF')
+  const refetchTun = async () => {
+    try {
+      const r = await fetch('/api/tun/state')
+      if (!r.ok) {
+        setTunMode('OFF')
+        return
+      }
+      const j = await r.json()
+      // gameproxy schema: { ok, mode: 'tun'|'offline', uptime_seconds, counters }
+      const isTun =
+        j && j.ok && (j.mode === 'tun' || (j.uptime_seconds || 0) > 0)
+      setTunMode(isTun ? 'TUN' : 'OFF')
+    } catch {
+      setTunMode('OFF')
+    }
+  }
+  useEffect(() => {
+    let alive = true
+    const tick = () => alive && refetchTun()
+    tick()
+    const t = setInterval(tick, 30_000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [])
+
+  const handleAccelToggle = async () => {
+    const path = tunMode === 'OFF' ? '/api/tun/start' : '/api/tun/stop'
+    try {
+      await fetch(path, { method: 'POST' })
+    } catch {
+      /* ignore — refetch will reflect actual state */
+    }
+    await refetchTun()
+  }
 
   // 派生 instance shape (从 accounts)
   const instances = useMemo<Instance[]>(
@@ -57,9 +95,10 @@ export function StandbyState({
     () => new Set(instances.map((i) => i.group)).size,
     [instances],
   )
+  // 真实 running 数; 没有 running 时返回 0 (不再 fallback 到 instances.length, 那是 demo bug).
   const emuReady = useMemo(
-    () => emulators.filter((e) => e.running).length || instances.length,
-    [emulators, instances.length],
+    () => emulators.filter((e) => e.running).length,
+    [emulators],
   )
 
   // PhaseTester 选中 — 复用 store.selectedInstances (主页 running 状态也用同字段)
@@ -143,10 +182,12 @@ export function StandbyState({
             emuReady={emuReady}
             accel={tunMode}
             onStart={onStart}
+            onAccelToggle={handleAccelToggle}
           />
 
           <PreviewPanel
             instances={instances}
+            emulators={emulators}
             testerSel={devMode ? testerSel : null}
             onToggleTester={devMode ? toggleTester : null}
           />
