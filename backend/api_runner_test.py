@@ -160,12 +160,18 @@ async def _execute_test_phase(req: TestPhaseReq) -> dict:
                 "error": f"P5 必须提供 expected_id (10 位数字), 收到 {req.expected_id!r}",
             }
 
+    # 调试用 — 看前端真传了 scheme 没
+    logger.info(
+        f"[test_phase] POST instance={req.instance} phase={phase} role={req.role} "
+        f"scheme={'[SET ' + req.scheme[:40] + '...]' if req.scheme else '[EMPTY]'}"
+    )
     if req.scheme:
         try:
             ctx = runner._build_v3_ctx()
             ctx.game_scheme_url = req.scheme
+            logger.info(f"[test_phase] ✓ 注入 ctx.game_scheme_url 成功 (instance={req.instance})")
         except Exception as e:
-            logger.debug(f"[test_phase] 注入 scheme 失败: {e}")
+            logger.warning(f"[test_phase] 注入 scheme 失败: {e}")
 
     # P5 注入 expected_id 到 ctx (校验过的)
     if phase == "P5" and req.expected_id:
