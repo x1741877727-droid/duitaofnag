@@ -127,7 +127,8 @@ export function OcrView() {
         ))
 
   const runOcr = async () => {
-    if (!src.instance && !src.decision_id) {
+    // src.instance === 0 时 !0 是 true → 误判没选, 用 == null 避坑
+    if (src.instance == null && !src.decision_id) {
       setHint('先选实例 (没有运行中的实例)')
       return
     }
