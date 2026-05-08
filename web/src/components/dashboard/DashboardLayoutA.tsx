@@ -68,6 +68,11 @@ export function DashboardLayoutA({
   onStop: () => void
 }) {
   const isRunning = useAppStore((s) => s.isRunning)
+  const phaseTester = useAppStore((s) => s.phaseTester)
+  // PhaseTester 跑中 / 跑完有结果 → 视觉也走监控墙 (用户能看大图 + 决策日志).
+  // PhaseTester clear results 后回 standby.
+  const phaseTesterActive = phaseTester.busy || phaseTester.results.length > 0
+  const showRunning = isRunning || phaseTesterActive
   const accounts = useAppStore((s) => s.accounts)
   const setCurrentView = useAppStore((s) => s.setCurrentView)
   const instancesRecord = useAppStore((s) => s.instances)
@@ -135,7 +140,9 @@ export function DashboardLayoutA({
   }
 
   // ── StandbyState ──
-  if (!isRunning) {
+  // 主 runner 在跑 (isRunning) / PhaseTester 在跑或刚跑完有 results → 都走监控墙.
+  // PhaseTester 用户清空 results 后回 standby.
+  if (!showRunning) {
     return (
       <StandbyState
         accounts={accounts as AccountAssignment[]}
@@ -178,8 +185,8 @@ export function DashboardLayoutA({
         <ExceptionBanner
           errors={errors}
           onView={(idx) => setSelectedInstances([idx])}
-          onRestart={() => {
-            // TODO: POST /api/start/{idx}
+          onRestart={(idx) => {
+            fetch(`/api/start/${idx}`, { method: 'POST' }).catch(() => {})
           }}
         />
       )}
@@ -260,8 +267,8 @@ export function DashboardLayoutA({
         <ExceptionToast
           errors={errors}
           onView={(idx) => setSelectedInstances([idx])}
-          onRestart={() => {
-            // TODO: POST /api/start/{idx}
+          onRestart={(idx) => {
+            fetch(`/api/start/${idx}`, { method: 'POST' }).catch(() => {})
           }}
         />
       )}
