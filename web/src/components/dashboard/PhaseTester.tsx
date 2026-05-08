@@ -306,13 +306,13 @@ export function PhaseTester() {
       }
 
       // P3a: 队长自己 P0/1/2 完立刻跑 (不等队员)
-      let p3aPromise: Promise<ResultRow> | null = null
+      let p3aPromise: Promise<RunOut> | null = null
       if (selKeys.includes('P3a') && sq.captain !== null) {
         const cap = sq.captain
         p3aPromise = (async () => {
           const ok = await preDone[cap]
           if (!ok && !keepGoing) {
-            const r: ResultRow = { phase: 'P3a', phase_name: `#${cap} 创建队伍`, ok: false, error: '队长前置失败' }
+            const r: RunOut = { phase: 'P3a', phase_name: `#${cap} 创建队伍`, ok: false, error: '队长前置失败' }
             addPhaseResult(r); failCount++; return r
           }
           return runPhase(cap, 'P3a', 'captain')
