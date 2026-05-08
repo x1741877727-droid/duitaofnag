@@ -36,6 +36,8 @@ export function Header({
   loading?: boolean
 }) {
   const isRunning = useAppStore((s) => s.isRunning)
+  const phaseTester = useAppStore((s) => s.phaseTester)
+  const setPhaseTester = useAppStore((s) => s.setPhaseTester)
   const currentView = useAppStore((s) => s.currentView)
   const setCurrentView = useAppStore((s) => s.setCurrentView)
   const instances = useAppStore((s) => s.instances)
@@ -45,13 +47,28 @@ export function Header({
   const setDevMode = useAppStore((s) => s.setDevMode)
   const visibleNav = NAV_ITEMS.filter((n) => devMode || !n.devOnly)
 
+  // 工作台测试 (phaseTester.busy) 也算"在跑", 让顶部按钮变"全部停止" (能终止测试)
+  const testerBusy = phaseTester.busy
+  const treatRunning = isRunning || testerBusy
+
   const total = accounts.length || Object.keys(instances).length
   const errors = Object.values(instances).filter((i) => i.state === 'error').length
   const pageState = (() => {
-    if (!total && !isRunning) return 'zero' as const
-    if (!isRunning) return 'standby' as const
+    if (!total && !treatRunning) return 'zero' as const
+    if (!treatRunning) return 'standby' as const
     return errors > 0 ? ('running-error' as const) : ('running' as const)
   })()
+
+  // 工作台测试态点"全部停止" → 不调 onAction (那是主 runner 的 stop), 走 PhaseTester cancel
+  const handleAction = () => {
+    if (testerBusy && !isRunning) {
+      // 仅 PhaseTester 在跑 → 调 cancel API + 立即 reset busy
+      fetch('/api/runner/cancel', { method: 'POST' }).catch(() => {})
+      setPhaseTester({ busy: false, progress: '已中止' })
+      return
+    }
+    onAction()
+  }
 
   // tick second uptime label (cosmetic)
   const [tick, setTick] = useState(0)
@@ -156,14 +173,14 @@ export function Header({
         </div>
       )}
 
-      {(isRunning || total > 0) && (
+      {(treatRunning || total > 0) && (
         <>
           <div className="w-px h-[26px] bg-border mx-1" />
           <EmergencyMenu />
           <PrimaryAction
             pageState={pageState}
             total={total}
-            onAction={onAction}
+            onAction={handleAction}
             loading={loading}
           />
         </>
