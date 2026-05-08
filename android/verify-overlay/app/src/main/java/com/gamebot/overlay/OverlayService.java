@@ -109,7 +109,7 @@ public class OverlayService extends Service {
         cat.setScaleType(ImageView.ScaleType.FIT_CENTER);
         cat.setAdjustViewBounds(true);
         LinearLayout.LayoutParams lpCat = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(18));
         col.addView(cat, lpCat);
 
         root = col;
