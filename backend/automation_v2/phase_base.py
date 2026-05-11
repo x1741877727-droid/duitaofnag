@@ -53,12 +53,12 @@ def step_retry(note: str = "", action: Optional[PhaseAction] = None,
                      outcome_hint=outcome_hint or ("tapped" if action else "no_target"))
 
 
-def step_fail(note: str = "") -> PhaseStep:
-    return PhaseStep(PhaseResult.FAIL, note=note, outcome_hint="fail")
+def step_fail(note: str = "", outcome_hint: str = "fail") -> PhaseStep:
+    return PhaseStep(PhaseResult.FAIL, note=note, outcome_hint=outcome_hint)
 
 
-def step_done(note: str = "") -> PhaseStep:
-    return PhaseStep(PhaseResult.DONE, note=note, outcome_hint="done")
+def step_done(note: str = "", outcome_hint: str = "done") -> PhaseStep:
+    return PhaseStep(PhaseResult.DONE, note=note, outcome_hint=outcome_hint)
 
 
 def step_wait(seconds: float, note: str = "") -> PhaseStep:
