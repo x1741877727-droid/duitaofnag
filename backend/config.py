@@ -137,6 +137,28 @@ class ConfigManager:
         for key, value in data.items():
             if hasattr(self.settings, key):
                 setattr(self.settings, key, value)
+        # ldplayer_path auto-detect: 配置里的路径不存在就 scan 常见盘符
+        # 解决 settings.example.json 默认 C:\, 但用户装 D:\E:\ 的情况
+        if self.settings.ldplayer_path and not os.path.exists(self.settings.ldplayer_path):
+            detected = self._detect_ldplayer_path()
+            if detected:
+                import logging
+                logging.getLogger(__name__).info(
+                    f"[config] ldplayer_path {self.settings.ldplayer_path!r} 不存在, "
+                    f"auto-detect → {detected!r}"
+                )
+                self.settings.ldplayer_path = detected
+                self.save_settings()
+
+    @staticmethod
+    def _detect_ldplayer_path() -> str:
+        """scan 常见盘符找 LDPlayer9 (含 adb.exe + ldconsole.exe). 找不到返空."""
+        for drive in ("C:", "D:", "E:", "F:"):
+            path = f"{drive}\\leidian\\LDPlayer9"
+            if (os.path.exists(os.path.join(path, "adb.exe"))
+                    and os.path.exists(os.path.join(path, "ldconsole.exe"))):
+                return path
+        return ""
 
     def _load_accounts(self):
         if not os.path.exists(ACCOUNTS_PATH):
