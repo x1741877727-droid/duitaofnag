@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,82 +132,90 @@ def _model_path() -> Path:
 class YoloDismisser:
     """YOLO 驱动的弹窗清理器.
 
-    v2-9: 多 session 池模式 - 每实例独立 ONNX session 实现真并发推理.
-    旧: 类级单 _session, 6 实例并发要排队 (实测推理时间 30→200ms 抖动)
-    新: 每实例 self._session, 真并发, 关键路径 (队长 P3a) 不被队员拖
-    用 intra_op_num_threads (默认 2) 防多 session 互抢 CPU 核.
+    2026-05-11 v2-day4-fix: 进程级共享 1 个 ONNX session + threading.Lock 串行化.
+
+    背景: v2-9 实测多 session 抢 D3D12 command queue, yolo_q p99 飙到 24s 死锁
+    (ORT issue #22867 DML 多 session 多线程已知问题).
+    DML 官方限制: "Only one thread may call Run at a time on a DirectML inference session".
+
+    新设计: 整进程 1 个 session, 所有实例共享; detect 内 Lock 串行 (Run() 串行).
+    单 inference 14ms × 12 实例 = 168ms 总 GPU 时间, 短队列 < 100ms p95.
     """
 
-    # 类级共享 _session 作为兼容路径 (谁第一个调 cls.detect/is_available 谁初始化)
-    # 实际生产: single_runner 每实例创建自己的 YoloDismisser, 用 instance 方法
+    # 进程级共享 session + lock (替代 v2-9 per-instance session)
     _shared_session = None
     _shared_input_name: Optional[str] = None
     _shared_input_shape = (640, 640)
+    _shared_load_failed = False
+    _shared_load_lock = threading.Lock()    # 防多线程并发加载 race
+    _infer_lock = threading.Lock()           # 推理串行化 (DML 要求)
 
     def __init__(self, max_rounds: int = 20, intra_threads: Optional[int] = None):
         self.max_rounds = max_rounds
-        # 每实例独立 session (v2-9 真并发关键)
-        self._session = None
-        self._input_name: Optional[str] = None
-        self._input_shape = (640, 640)
-        self._load_failed = False
-        # CPU intra-op 线程数: 默认 2 (6 实例 × 2 = 12 thread, 8 核接近饱和不打架)
+        # CPU intra-op 线程数: 默认 2
         self._intra_threads = intra_threads or int(
             os.environ.get("GAMEBOT_YOLO_INTRA_THREADS", "2")
         )
 
-    # ─────────── 模型加载 (v2-9: 实例级 session) ───────────
+    # ─────────── 模型加载 (进程级共享 session) ───────────
 
     def is_available(self) -> bool:
-        """有可用模型 → True; 触发实例级 session 懒加载"""
-        if self._session is not None:
+        """有可用模型 → True; 触发进程级 session 懒加载 (所有实例共享)"""
+        if YoloDismisser._shared_session is not None:
             return True
         return self._try_load()
 
     def _try_load(self) -> bool:
-        if self._session is not None:
+        if YoloDismisser._shared_session is not None:
             return True
-        if self._load_failed:
-            return False
-        path = _model_path()
-        if not path.is_file():
-            logger.info(f"[yolo] 模型文件不存在 ({path}), dismiss 走 OCR fallback")
-            self._load_failed = True
-            return False
-        try:
-            import onnxruntime as ort
-        except ImportError:
-            logger.warning("[yolo] onnxruntime 未安装, dismiss 走 OCR fallback")
-            self._load_failed = True
-            return False
-        try:
-            available = set(ort.get_available_providers())
-            providers = []
-            for p in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"):
-                if p in available:
-                    providers.append(p)
-            if not providers:
-                providers = ["CPUExecutionProvider"]
-            # SessionOptions 限制 intra-op 线程数, 防多 session 互抢 CPU 核
-            sess_options = ort.SessionOptions()
-            sess_options.intra_op_num_threads = self._intra_threads
-            sess_options.inter_op_num_threads = 1
-            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-            self._session = ort.InferenceSession(
-                str(path), sess_options=sess_options, providers=providers,
-            )
-            self._input_name = self._session.get_inputs()[0].name
-            shape = self._session.get_inputs()[0].shape
-            self._input_shape = (int(shape[2]), int(shape[3]))
-            logger.info(
-                f"[yolo] 加载 (instance) providers={self._session.get_providers()} "
-                f"input={self._input_shape} intra_threads={self._intra_threads}"
-            )
-            return True
-        except Exception as e:
-            logger.error(f"[yolo] 模型加载失败: {e}")
-            self._load_failed = True
-            return False
+        # 多线程加载 race 防御: 抢 lock 再次 check
+        with YoloDismisser._shared_load_lock:
+            if YoloDismisser._shared_session is not None:
+                return True
+            if YoloDismisser._shared_load_failed:
+                return False
+            path = _model_path()
+            if not path.is_file():
+                logger.info(f"[yolo] 模型文件不存在 ({path}), dismiss 走 OCR fallback")
+                YoloDismisser._shared_load_failed = True
+                return False
+            try:
+                import onnxruntime as ort
+            except ImportError:
+                logger.warning("[yolo] onnxruntime 未安装, dismiss 走 OCR fallback")
+                YoloDismisser._shared_load_failed = True
+                return False
+            try:
+                available = set(ort.get_available_providers())
+                providers = []
+                for p in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"):
+                    if p in available:
+                        providers.append(p)
+                if not providers:
+                    providers = ["CPUExecutionProvider"]
+                sess_options = ort.SessionOptions()
+                sess_options.intra_op_num_threads = self._intra_threads
+                sess_options.inter_op_num_threads = 1
+                sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                YoloDismisser._shared_session = ort.InferenceSession(
+                    str(path), sess_options=sess_options, providers=providers,
+                )
+                YoloDismisser._shared_input_name = (
+                    YoloDismisser._shared_session.get_inputs()[0].name
+                )
+                shape = YoloDismisser._shared_session.get_inputs()[0].shape
+                YoloDismisser._shared_input_shape = (int(shape[2]), int(shape[3]))
+                logger.info(
+                    f"[yolo] 加载 (shared) providers="
+                    f"{YoloDismisser._shared_session.get_providers()} "
+                    f"input={YoloDismisser._shared_input_shape} "
+                    f"intra_threads={self._intra_threads} (12 实例共享 1 session)"
+                )
+                return True
+            except Exception as e:
+                logger.error(f"[yolo] 模型加载失败: {e}")
+                YoloDismisser._shared_load_failed = True
+                return False
 
     def warmup(self) -> bool:
         """启动时调一次预热 (避免首次推理慢)"""
@@ -310,15 +319,20 @@ class YoloDismisser:
         return keep
 
     def _infer(self, frame: np.ndarray) -> list[Detection]:
-        if self._session is None and not self._try_load():
+        if YoloDismisser._shared_session is None and not self._try_load():
             return []
         h, w = frame.shape[:2]
-        tensor, scale, pad = self._preprocess(frame, input_shape=self._input_shape)
-        outputs = self._session.run(None, {self._input_name: tensor})
+        input_shape = YoloDismisser._shared_input_shape
+        input_name = YoloDismisser._shared_input_name
+        tensor, scale, pad = self._preprocess(frame, input_shape=input_shape)
+        # Lock 串行化 — DML 要求单 session 同一时刻只 1 个 Run().
+        # 防 D3D12 command queue race + #22867 deadlock.
+        with YoloDismisser._infer_lock:
+            outputs = YoloDismisser._shared_session.run(None, {input_name: tensor})
         return self._postprocess(outputs[0], scale, pad, h, w)
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
-        """对外暴露的检测方法 (实例级 session, v2-9 真并发)"""
+        """对外暴露的检测方法 (进程级共享 session, lock 串行化)"""
         return self._infer(frame)
 
     # ─── 兼容 classmethod (没 instance 时用, 共享一个 session) ───
