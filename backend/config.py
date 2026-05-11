@@ -124,8 +124,14 @@ class ConfigManager:
 
     def _load_settings(self):
         if not os.path.exists(SETTINGS_PATH):
-            self.save_settings()  # 生成默认配置
-            return
+            # 优先从 settings.example.json bootstrap (template 跟在 git, 不会被 reset 冲掉)
+            example_path = _resolve_config_path("settings.example.json")
+            if os.path.exists(example_path):
+                import shutil
+                shutil.copyfile(example_path, SETTINGS_PATH)
+            else:
+                self.save_settings()  # 都不存在生成 dataclass 默认
+                return
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         for key, value in data.items():

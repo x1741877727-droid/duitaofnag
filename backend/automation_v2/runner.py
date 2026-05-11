@@ -41,6 +41,7 @@ class SingleRunner:
         middlewares: Optional[list[Any]] = None,
         state_adapter: Optional[Any] = None,
         phase_order: Optional[list[str]] = None,
+        on_phase_change: Optional[Any] = None,
     ):
         self.ctx = ctx
         self.phases = phases             # {"P0": P0Accel(), ...}
@@ -48,6 +49,8 @@ class SingleRunner:
         self.state = state_adapter       # InstanceStateAdapter (None 时不持久化恢复)
         # phase_order: 显式传 → 用 (Day 4 灰度截短到 P4); 不传 → 按 role 默认全跑
         self.phase_order = phase_order
+        # on_phase_change: callable(phase_name: str) — runner_service 推 inst.state 用
+        self.on_phase_change = on_phase_change
 
     async def run(self) -> bool:
         """跑完整 session: P0 → P1 → ... → P5. 返 True = 成功, False = FAIL.
@@ -87,6 +90,11 @@ class SingleRunner:
                 return False
 
             logger.info(f"[runner/inst{self.ctx.instance_idx}] → {phase_name}")
+            if self.on_phase_change:
+                try:
+                    self.on_phase_change(phase_name)
+                except Exception as e:
+                    logger.debug(f"[runner/inst{self.ctx.instance_idx}] on_phase_change err: {e}")
             ok = await self._run_phase(handler)
             if not ok:
                 logger.warning(

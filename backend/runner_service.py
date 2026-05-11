@@ -918,10 +918,16 @@ class MultiRunnerService:
             if old != v1_label:
                 self._broadcast_state_change(idx, old, v1_label)
 
-        # 把 v2 phase 切换钩到 inst.state (打补丁: 改 v2 phase enter 包裹一层)
-        # 简化: 不改 v2 phase, 用 SingleRunner.run() 内部 logger 的 "→ Pn" 信息. inst.state 落最终值.
-        # Day 4 简单做: 仅推 done/error 终态; 中间 state 靠 v2 decision log 实时跟踪.
-        inst.state = "running_v2"
+        # phase 切换回调: v2 phase 名 (P0-P5) → v1 词汇 (前端 PHASE_LABELS 命中)
+        def _on_phase(phase_name: str):
+            v1_label = V2_PHASE_TO_V1.get(phase_name, phase_name)
+            old = inst.state
+            inst.state = v1_label
+            if old != v1_label:
+                self._broadcast_state_change(idx, old, v1_label)
+        v2_runner.on_phase_change = _on_phase
+
+        inst.state = "init"
         try:
             ok = await v2_runner.run()
         except asyncio.CancelledError:

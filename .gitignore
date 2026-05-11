@@ -44,3 +44,4 @@ cloudflared
 .DS_Store
 Thumbs.db
 config/runtime.json
+config/settings.json
