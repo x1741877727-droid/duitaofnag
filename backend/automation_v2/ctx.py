@@ -39,6 +39,12 @@ class RunContext:
     instance_idx: int = -1
     role: str = "unknown"                  # captain / member / unknown
     game_scheme_url: Optional[str] = None
+    runner_version: str = "v2"             # 落 decision entry, 灰度时 grep 区分
+
+    # ── v1 桥 ──
+    # flows/* 临时调 v1 single_runner.phase_team_create/phase_team_join/phase_map_setup.
+    # Day 5+ 真重构后砍掉. 现在 wrapper 转一层省 600 行重写.
+    v1_runner: Any = None
 
     # ── 每轮帧缓存 ──
     current_shot: Optional[Any] = None     # np.ndarray, 不强引用

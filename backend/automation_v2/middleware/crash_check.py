@@ -11,6 +11,7 @@ REVIEW_DAY3_WATCHDOG.md: PUBG 突然崩退到桌面 → P1-P5 业务永远跑不
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -60,12 +61,18 @@ class CrashCheckMiddleware:
     # ─────────── 业务接入点 (TODO) ───────────
 
     async def _check_pubg_alive(self, ctx: RunContext) -> bool:
-        """检查 PUBG 进程是否在跑.
+        """adb shell pidof <PUBG>. 拿到非空数字 = 活. v1 同款实现 (runner_service:476).
 
-        TODO (业务接入):
-            rc, out = await ctx.adb.shell(f"pidof {PUBG_PACKAGE}", timeout=2.0)
-            return rc == 0 and out.strip() != ""
-
-        当前 stub 返 True (默认活, 不影响业务).
+        不可达/异常时返 True 保守 (避免误报 crash 让业务空跑等待).
         """
-        return True
+        try:
+            raw_adb = getattr(ctx.adb, "_adb", ctx.adb)
+            cmd = getattr(raw_adb, "_cmd", None)
+            if cmd is None:
+                return True
+            loop = asyncio.get_event_loop()
+            out = await loop.run_in_executor(None, cmd, "shell", f"pidof {PUBG_PACKAGE}")
+            return bool((out or "").strip())
+        except Exception as e:
+            logger.debug(f"[middleware/crash] pidof err inst{ctx.instance_idx}: {e}")
+            return True

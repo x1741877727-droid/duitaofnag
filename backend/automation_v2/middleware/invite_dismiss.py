@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 _THROTTLE_S = 0.8
 
 
+class _V1CtxProxy:
+    """喂给 v1 dismiss_known_popups 的最小 ctx-like 对象.
+
+    v1 popup_dismiss 读 ctx.runner.{adb, yolo_dismisser, ocr_dismisser, _popup_tracker}.
+    我们只需把 v1 SingleInstanceRunner 包成 ctx.runner = v1_runner 形式.
+    """
+    def __init__(self, v1_runner, instance_idx: int):
+        self.runner = v1_runner
+        self.instance_idx = instance_idx
+
+
 class InviteDismissMiddleware:
     """所有 phase 启用. 每 round 检测邀请弹窗, 自动关闭."""
 
@@ -45,29 +56,42 @@ class InviteDismissMiddleware:
         return True
 
     async def before_round(self, ctx: RunContext, shot) -> BeforeRoundResult:
-        """每 round 检查邀请弹窗."""
-        if shot is None:
+        """每 round 委托 v1 dismiss_known_popups (跑友邀请/网络/account_squeezed 全在 KNOWN_POPUPS)."""
+        if shot is None or ctx.v1_runner is None:
             return BeforeRoundResult(intercept=False)
 
-        # 节流: 0.8s 内不重复
+        # 节流 0.8s
         now = time.time()
         last = self._last_dismiss_ts.get(ctx.instance_idx, 0)
         if now - last < _THROTTLE_S:
             return BeforeRoundResult(intercept=False)
 
-        # 检测邀请弹窗 (TODO 业务接入)
-        dialog = await self._detect_invite_dialog(ctx, shot)
-        if dialog is None:
+        # v1 dismiss_known_popups 读 ctx.runner. 用最小 proxy: 只需 .runner 指 v1.
+        proxy = _V1CtxProxy(v1_runner=ctx.v1_runner, instance_idx=ctx.instance_idx)
+        try:
+            from backend.automation.popup_dismiss import dismiss_known_popups
+            from backend.automation.popup_specs import PopupFatalEscalation
+        except ImportError as e:
+            logger.warning(f"[middleware/invite] v1 popup_dismiss 不可用: {e}")
             return BeforeRoundResult(intercept=False)
 
-        # 检测到 → 关掉
-        ok = await self._dismiss_invite(ctx, dialog)
-        self._last_dismiss_ts[ctx.instance_idx] = now
+        try:
+            dismissed = await dismiss_known_popups(
+                proxy, pre_shot=shot, current_phase="middleware",
+            )
+        except PopupFatalEscalation as e:
+            logger.warning(f"[middleware/invite] inst{ctx.instance_idx} FATAL: {e.spec_name}")
+            # Day 4: fatal 也仅记 log, 不破 phase. Day 5 再接 recovery.
+            return BeforeRoundResult(intercept=False, note=f"fatal_{e.spec_name}")
+        except Exception as e:
+            logger.debug(f"[middleware/invite] inst{ctx.instance_idx} dismiss err: {e}")
+            return BeforeRoundResult(intercept=False)
 
-        if ok:
-            logger.info(f"[middleware/invite] inst{ctx.instance_idx} 关闭邀请弹窗")
-            return BeforeRoundResult(intercept=True, note="invite dismissed")
-        return BeforeRoundResult(intercept=False, note="invite detected but dismiss failed")
+        if dismissed:
+            self._last_dismiss_ts[ctx.instance_idx] = now
+            logger.info(f"[middleware/invite] inst{ctx.instance_idx} dismissed: {dismissed}")
+            return BeforeRoundResult(intercept=True, note=f"dismissed:{dismissed}")
+        return BeforeRoundResult(intercept=False)
 
     async def after_phase(self, ctx: RunContext) -> None:
         """phase 切换时不清状态 (邀请节流跨 phase 仍有效)."""

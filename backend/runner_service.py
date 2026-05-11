@@ -26,6 +26,10 @@ from .config import AccountConfig, Settings
 
 logger = logging.getLogger(__name__)
 
+# v1 / v2 runner 灰度切换. Day 4: v2 跑 P0→P4 (P5 留 v1 path).
+# unset 或 ="v1" → 走老代码全路径; ="v2" → _run_instance 调 _run_instance_v2.
+RUNNER_VERSION = os.environ.get("GAMEBOT_RUNNER_VERSION", "v1").lower()
+
 # Phase → 中文标签
 PHASE_LABELS = {
     "init": "初始化",
@@ -414,6 +418,10 @@ class MultiRunnerService:
         - 队员等队长 → 事件驱动无限等（不再固定 60 秒）
         - 单实例崩溃不影响其他实例
         """
+        # Day 4 灰度: env GAMEBOT_RUNNER_VERSION=v2 走 v2 phase loop.
+        if RUNNER_VERSION == "v2":
+            return await self._run_instance_v2(idx, runner)
+
         _current_instance.set(idx)
         inst = self._instances[idx]
         group = inst.group
@@ -826,6 +834,121 @@ class MultiRunnerService:
                     _json.dump(summary, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
+
+
+    async def _run_instance_v2(self, idx: int, v1_runner: SingleInstanceRunner):
+        """v2 phase loop. Day 4 灰度: v2 跑 P0→P4 (captain) / P0→P3b (member), 不动 P5.
+
+        v2 SingleRunner 拿 v1 SingleInstanceRunner 的 adb/yolo, P3a/P3b/P4 走 flows wrapper
+        转 v1_runner.phase_team_create/join/map_setup (避免 600 行重写).
+        """
+        _current_instance.set(idx)
+        inst = self._instances[idx]
+        group = inst.group
+
+        try:
+            from .automation_v2.bridge import build_v2_ctx, V2_PHASE_TO_V1
+            from .automation_v2.runner import SingleRunner as V2Runner
+            from .automation_v2.phases import (
+                P0Accel, P1Launch, P2Dismiss,
+                P3aTeamCreate, P3bTeamJoin, P4MapSetup,
+            )
+            from .automation_v2.middleware.invite_dismiss import InviteDismissMiddleware
+            from .automation_v2.middleware.crash_check import CrashCheckMiddleware
+        except Exception as e:
+            logger.error(f"[v2/inst{idx}] import 失败, 回退 v1: {e}", exc_info=True)
+            return await self._run_instance(idx, v1_runner)    # 防御性回退
+
+        from pathlib import Path
+        session_dir = Path(self._session_dir)
+
+        # v2 ctx (含 v1 桥) + decision log
+        ctx, decision_log = build_v2_ctx(
+            instance_idx=idx,
+            role=v1_runner.role,
+            v1_runner=v1_runner,
+            session_dir=session_dir,
+        )
+
+        # phase dict — Day 4 不含 P5
+        phases = {
+            "P0":  P0Accel(),
+            "P1":  P1Launch(),
+            "P2":  P2Dismiss(),
+            "P3a": P3aTeamCreate(),
+            "P3b": P3bTeamJoin(),
+            "P4":  P4MapSetup(),
+        }
+        # Day 4 灰度截短: captain P0→P4, member P0→P3b. P5 留 Day 5
+        phase_order = (["P0", "P1", "P2", "P3a", "P4"] if v1_runner.role == "captain"
+                       else ["P0", "P1", "P2", "P3b"])
+
+        middlewares = [InviteDismissMiddleware(), CrashCheckMiddleware()]
+
+        # 队员加入前要有队长 scheme. v2 P3b 读 ctx.game_scheme_url, 主进程同步.
+        if v1_runner.role == "member":
+            # 等 captain 写完 self._team_schemes[group] (v1 path 也会写, 这里 reuse)
+            evt = self._team_events.setdefault(group, asyncio.Event())
+            try:
+                await asyncio.wait_for(evt.wait(), timeout=180.0)
+                ctx.game_scheme_url = self._team_schemes.get(group, "")
+            except asyncio.TimeoutError:
+                logger.warning(f"[v2/inst{idx}] member 等 scheme 超时, FAIL")
+                inst.state = "error"
+                inst.error = "v2 member 等 captain scheme 超时"
+                return
+
+        v2_runner = V2Runner(
+            ctx, phases,
+            middlewares=middlewares,
+            state_adapter=None,           # Day 4 不接 state, Day 5 接
+            phase_order=phase_order,
+        )
+
+        # 状态翻译 + 推送 (v2 phase → v1 词汇, 前端 PHASE_LABELS 命中)
+        def _push_state(v2_phase: str):
+            v1_label = V2_PHASE_TO_V1.get(v2_phase, v2_phase)
+            old = inst.state
+            inst.state = v1_label
+            if old != v1_label:
+                self._broadcast_state_change(idx, old, v1_label)
+
+        # 把 v2 phase 切换钩到 inst.state (打补丁: 改 v2 phase enter 包裹一层)
+        # 简化: 不改 v2 phase, 用 SingleRunner.run() 内部 logger 的 "→ Pn" 信息. inst.state 落最终值.
+        # Day 4 简单做: 仅推 done/error 终态; 中间 state 靠 v2 decision log 实时跟踪.
+        inst.state = "running_v2"
+        try:
+            ok = await v2_runner.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[v2/inst{idx}] run() 抛: {e}", exc_info=True)
+            inst.state = "error"
+            inst.error = f"v2 run exception: {e}"
+            return
+        finally:
+            try:
+                decision_log.close()
+            except Exception:
+                pass
+
+        if not ok:
+            inst.state = "error"
+            inst.error = "v2 phase 链 FAIL"
+            logger.warning(f"[v2/inst{idx}] FAIL")
+            return
+
+        # P3a 成功: 把 ctx.game_scheme_url 回填 _team_schemes, 队员能 unblock (CRITICAL §1.1 修复)
+        if v1_runner.role == "captain" and ctx.game_scheme_url:
+            self._team_schemes[group] = ctx.game_scheme_url
+            evt = self._team_events.get(group)
+            if evt:
+                evt.set()
+            logger.info(f"[v2/inst{idx}] 队长 scheme 回填 group={group}: "
+                        f"{ctx.game_scheme_url[:48]}")
+
+        inst.state = "done"
+        logger.info(f"[v2/inst{idx}] session done (Day 4 P5 未启)")
 
 
     def _on_phase_change(self, idx: int, phase: Phase):

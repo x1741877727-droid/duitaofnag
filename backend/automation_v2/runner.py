@@ -40,21 +40,27 @@ class SingleRunner:
         phases: dict[str, Any],
         middlewares: Optional[list[Any]] = None,
         state_adapter: Optional[Any] = None,
+        phase_order: Optional[list[str]] = None,
     ):
         self.ctx = ctx
         self.phases = phases             # {"P0": P0Accel(), ...}
         self.middlewares = middlewares or []
         self.state = state_adapter       # InstanceStateAdapter (None 时不持久化恢复)
+        # phase_order: 显式传 → 用 (Day 4 灰度截短到 P4); 不传 → 按 role 默认全跑
+        self.phase_order = phase_order
 
     async def run(self) -> bool:
         """跑完整 session: P0 → P1 → ... → P5. 返 True = 成功, False = FAIL.
 
         recovery: 启动时 state.get_recovery_phase() 决定从哪开始 (skip 已完成 phase).
         """
-        order = (
-            PHASE_ORDER_CAPTAIN if self.ctx.role == "captain"
-            else PHASE_ORDER_MEMBER
-        )
+        if self.phase_order is not None:
+            order = self.phase_order
+        else:
+            order = (
+                PHASE_ORDER_CAPTAIN if self.ctx.role == "captain"
+                else PHASE_ORDER_MEMBER
+            )
         # Recovery: 从上次中断的 phase 开始
         recovery_phase = None
         if self.state is not None:
