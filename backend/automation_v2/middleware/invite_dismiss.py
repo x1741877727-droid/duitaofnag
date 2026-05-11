@@ -28,8 +28,10 @@ from .base import BeforeRoundResult
 
 logger = logging.getLogger(__name__)
 
-# 节流: 同实例 0.8s 内不重复关 (防连发多次 tap 同位置)
-_THROTTLE_S = 0.8
+# 节流: 同实例 5s 内不重复调 dismiss_known_popups (邀请响应 5s 够用)
+# 之前 0.8s 太频繁, 4 实例 × 5/0.8 = 20 OCR/sec 撑爆 OcrPool 触发 worker crash 22s 卡死
+# 5s 后频率 ~3.2 OCR/sec, 跟 v1 同数量级安全
+_THROTTLE_S = 5.0
 
 
 class _V1CtxProxy:
@@ -52,15 +54,14 @@ class InviteDismissMiddleware:
         self._last_dismiss_ts: dict[int, float] = {}   # inst_idx → 上次关闭时间
 
     def enable_for(self, phase_name: str) -> bool:
-        """只在 P5 (等真人) 启用. 跟 v1 一致.
+        """业务需要每 phase 都能清邀请 (用户实测有些邀请只有"拒绝"按钮没 X, 必须 OCR).
 
-        v1 实测: 邀请弹窗主要在大厅等真人阶段冒, P0-P4 极少出现.
-        Day 4 灰度初始我设全 phase 启用, 实测撞 OcrPool 20 OCR/sec, 触发
-        RapidOCR worker BrokenProcessPool 偶发 crash, 阻塞 asyncio 22s.
+        但排除 P3a/P4: 这俩业务自己跑 OCR 找按钮 (建队/选地图面板就是 dialog,
+        middleware 又调 OCR 会重复扫 + 跟业务 OCR 抢 pool, 触发 worker crash 22s 卡死).
 
-        所以回退到 v1 同款策略: 只 P5 启用. P0-P4 邀请走 yolo close_x 关闭就行.
+        启用顺序: P0 ✓ P1 ✓ P2 ✓ P3a ✗ P3b ✓ P4 ✗ P5 ✓
         """
-        return phase_name == "P5"
+        return phase_name not in {"P3a", "P4"}
 
     async def before_round(self, ctx: RunContext, shot) -> BeforeRoundResult:
         """每 round 委托 v1 dismiss_known_popups (跑友邀请/网络/account_squeezed 全在 KNOWN_POPUPS)."""
