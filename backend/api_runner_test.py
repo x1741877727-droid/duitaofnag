@@ -141,6 +141,11 @@ async def _execute_test_phase(req: TestPhaseReq) -> dict:
             logger.warning(f"[test_phase] build_runner err: {e}", exc_info=True)
             return {"ok": False, "phase": phase, "error": f"构造测试 runner 失败: {e}"}
 
+    # ── v2 dev mode 分支 (Day 4 灰度) ──
+    from .runner_service import RUNNER_VERSION
+    if RUNNER_VERSION == "v2":
+        return await _execute_test_phase_v2(req, runner, svc)
+
     cls_name, _ = _HANDLER_MAP[phase]
     try:
         from .automation import phases as _p
@@ -238,6 +243,84 @@ def _gc_old_tasks() -> None:
         sorted_ids = sorted(_TASKS.keys(), key=lambda t: _TASKS[t].get("created_at", 0))
         for tid in sorted_ids[: len(_TASKS) - _TASKS_MAX]:
             _TASKS.pop(tid, None)
+
+
+async def _execute_test_phase_v2(req: TestPhaseReq, v1_runner, svc) -> dict:
+    """v2 dev mode test_phase. 跑 v2 phase + v2 ctx (借 v1 资源 via bridge).
+
+    跟 v1 _execute_test_phase 同样接口: 返 {ok, phase, duration_ms, error?, ...}.
+    P5 留 Day 5, 当前不支持.
+    """
+    phase = req.phase.strip()
+    t0 = time.perf_counter()
+    try:
+        from .automation_v2.bridge import build_v2_ctx
+        from .automation_v2.runner import SingleRunner as V2Runner
+        from .automation_v2 import phases as v2p
+    except Exception as e:
+        return {"ok": False, "phase": phase, "error": f"v2 import 失败: {e}",
+                "duration_ms": 0, "runner_version": "v2"}
+
+    v2_map = {
+        "P0":  v2p.P0Accel,
+        "P1":  v2p.P1Launch,
+        "P2":  v2p.P2Dismiss,
+        "P3a": v2p.P3aTeamCreate,
+        "P3b": v2p.P3bTeamJoin,
+        "P4":  v2p.P4MapSetup,
+    }
+    if phase not in v2_map:
+        return {"ok": False, "phase": phase, "error": f"v2 不支持 {phase} (P5 留 Day 5)",
+                "duration_ms": 0, "runner_version": "v2"}
+
+    from pathlib import Path
+    session_dir = Path(getattr(svc, "_session_dir", None) or ".") / "test_phase_v2"
+    try:
+        ctx, decision_log = build_v2_ctx(
+            instance_idx=int(req.instance),
+            role=req.role,
+            v1_runner=v1_runner,
+            session_dir=session_dir,
+        )
+    except Exception as e:
+        logger.warning(f"[test_phase/v2] build_v2_ctx err: {e}", exc_info=True)
+        return {"ok": False, "phase": phase, "error": f"v2 ctx 构造失败: {e}",
+                "duration_ms": 0, "runner_version": "v2"}
+
+    if req.scheme:
+        ctx.game_scheme_url = req.scheme
+
+    v2_phase = v2_map[phase]()
+    v2_runner = V2Runner(
+        ctx, {phase: v2_phase},
+        middlewares=[],            # 单 phase 测试不挂 middleware (减干扰)
+        state_adapter=None,
+        phase_order=[phase],       # 单 phase 跑完即退
+    )
+
+    error: Optional[str] = None
+    ok = False
+    try:
+        ok = await v2_runner.run()
+    except Exception as e:
+        error = str(e)
+        logger.warning(f"[test_phase/v2] run() err: {e}", exc_info=True)
+    finally:
+        try:
+            decision_log.close()
+        except Exception:
+            pass
+
+    dur_ms = round((time.perf_counter() - t0) * 1000, 2)
+    return {
+        "ok": bool(ok),
+        "phase": phase,
+        "duration_ms": dur_ms,
+        "runner_version": "v2",
+        "scheme_out": ctx.game_scheme_url or "",
+        "phase_round": ctx.phase_round,
+        "error": error,
+    }
 
 
 async def _run_test_phase_bg(task_id: str, req: TestPhaseReq) -> None:

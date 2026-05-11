@@ -661,13 +661,20 @@ def create_app(config: ConfigManager) -> FastAPI:
     # ── 控制 ──
 
     @app.post("/api/start")
-    async def start():
+    async def start(body: Optional[dict] = None):
+        """启动. body 可选 {"instances": [0,2,4]} 只起指定实例; 不传 = 启 accounts.json 全部."""
         if service.running or service._starting:
             return {"ok": False, "error": "已在运行中"}
         config.load()
+        accounts = config.accounts
+        if body and isinstance(body.get("instances"), list):
+            indices = set(int(i) for i in body["instances"])
+            accounts = [a for a in accounts if a.instance_index in indices]
+            if not accounts:
+                return {"ok": False, "error": f"instances={list(indices)} 在 accounts.json 里找不到"}
         try:
-            await service.start_all(config.settings, config.accounts)
-            return {"ok": True}
+            await service.start_all(config.settings, accounts)
+            return {"ok": True, "started": [a.instance_index for a in accounts]}
         except Exception as e:
             logger.error(f"启动失败: {e}", exc_info=True)
             return {"ok": False, "error": str(e)}

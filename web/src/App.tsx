@@ -137,7 +137,14 @@ function App() {
         setIsRunning(false)
         setInstances({})
       } else {
-        const r = await fetch('/api/start', { method: 'POST' })
+        // store.selectedInstances 勾选了几个就只起几个; 空 = 启全部 (兼容旧)
+        const selected = useAppStore.getState().selectedInstances
+        const init: RequestInit = { method: 'POST' }
+        if (selected.length > 0) {
+          init.headers = { 'Content-Type': 'application/json' }
+          init.body = JSON.stringify({ instances: selected })
+        }
+        const r = await fetch('/api/start', init)
         const json = await r.json()
         if (json.ok) setIsRunning(true)
       }

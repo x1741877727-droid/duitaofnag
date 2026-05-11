@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # v1 / v2 runner 灰度切换. Day 4: v2 跑 P0→P4 (P5 留 v1 path).
 # unset 或 ="v1" → 走老代码全路径; ="v2" → _run_instance 调 _run_instance_v2.
 RUNNER_VERSION = os.environ.get("GAMEBOT_RUNNER_VERSION", "v1").lower()
+# print() 强保证 stdout 有, logger.info 走正常 log handler
+print(f"[runner_service] RUNNER_VERSION={RUNNER_VERSION!r} "
+      f"(env GAMEBOT_RUNNER_VERSION={os.environ.get('GAMEBOT_RUNNER_VERSION')!r})",
+      flush=True)
+logger.info(f"[runner_service] RUNNER_VERSION={RUNNER_VERSION!r}")
 
 # Phase → 中文标签
 PHASE_LABELS = {
