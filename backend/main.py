@@ -15,11 +15,21 @@ import threading
 
 import uvicorn
 
-# native crash 保护: cv2 / OpenVINO / ONNX 偶发 segfault 时, faulthandler 把 C 栈
-# dump 到 stderr (我们的 exe.err.log), 让我们能定位 native 崩溃原因. 之前 backend
-# 莫名死掉 + err.log 无 traceback = 大概率是 native crash 没被 Python 捕获.
+# native crash 保护 — faulthandler 写到独立 crash.log (而不是 stderr).
+# stderr 在后台启动 (cmd hidden) 时不可见; 写文件就能看到 native 崩溃栈.
+# 同时: 每 60s 自动 dump 所有线程栈到 traceback_periodic.log, 即使 backend 卡住没崩
+# 也能拿到 "卡住瞬间所有线程在干啥".
 try:
-    faulthandler.enable(file=sys.stderr, all_threads=True)
+    if getattr(sys, 'frozen', False):
+        _log_dir = os.path.dirname(sys.executable)
+    else:
+        _log_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # crash.log: 行缓冲, 立刻 flush; mode='w' 每次启动覆盖
+    _crash_fh = open(os.path.join(_log_dir, "crash.log"), "w", buffering=1, encoding="utf-8")
+    faulthandler.enable(file=_crash_fh, all_threads=True)
+    # 每 60s dump 一次所有线程栈到独立文件 (轮询心跳 + 卡住时能看)
+    _trace_fh = open(os.path.join(_log_dir, "traceback_periodic.log"), "w", buffering=1, encoding="utf-8")
+    faulthandler.dump_traceback_later(60, repeat=True, file=_trace_fh)
 except Exception:
     pass
 
@@ -45,11 +55,45 @@ def find_free_port() -> int:
 
 def setup_logging(debug: bool = False):
     level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    datefmt = "%H:%M:%S"
+    formatter = logging.Formatter(fmt, datefmt=datefmt)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # 避免重复 add (主程序可能被 supervisor 多次 import)
+    root.handlers.clear()
+
+    # stdout handler (开发模式 console 看; 后台启动可能 None, 兜底跳过)
+    if sys.stdout is not None:
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(formatter)
+        root.addHandler(sh)
+
+    # 文件 handler — 后台启动 + cmd 重定向 buffer 失灵时的唯一可靠 log 源
+    # mode="w": 每次启动覆盖, 避免累积膨胀 (motion gate 每帧 log 涨得快)
+    # 历史 log 备份到 backend.log.prev
+    log_path = os.path.join(ROOT_DIR, "backend.log")
+    try:
+        if os.path.isfile(log_path):
+            try:
+                os.replace(log_path, log_path + ".prev")
+            except Exception:
+                pass
+        fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+        fh.setFormatter(formatter)
+        root.addHandler(fh)
+    except Exception as e:
+        if sys.stderr is not None:
+            print(f"[setup_logging] FileHandler 失败 ({log_path}): {e}", file=sys.stderr)
+
+    # Python 未捕获异常 hook → 也写到 logger (faulthandler 是 native crash, 这是 Python 异常)
+    def _except_hook(exc_type, exc_val, exc_tb):
+        logging.getLogger("uncaught").critical(
+            "Python 未捕获异常", exc_info=(exc_type, exc_val, exc_tb)
+        )
+    sys.excepthook = _except_hook
+
     # 降低第三方库日志级别
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
@@ -73,7 +117,10 @@ def run_dev_mode(port: int, host: str = ""):
         local_ip = _get_local_ip()
         logger.info(f"局域网访问: http://{local_ip}:{port}")
 
-    uvicorn.run(app, host=bind_host, port=port, log_level="info")
+    # log_config=None: 跳过 uvicorn 默认 dictConfig (会调 sys.stdout.isatty()),
+    # 后台启动 (sys.stdout=None) 时 isatty() 报 AttributeError 导致整个进程退出.
+    # 我们已经在 setup_logging() 里配过 root logger, uvicorn 的 access log 也会走过去.
+    uvicorn.run(app, host=bind_host, port=port, log_level="info", log_config=None)
 
 
 def run_desktop_mode(port: int, host: str = ""):
@@ -172,13 +219,24 @@ def main():
     args = parser.parse_args()
     setup_logging(args.debug)
 
-    # OCR pool 默认 3 worker — GPU OCR 实测 sweet spot：
-    #   1-2 worker: 队列堆积 (6 实例并发等 ~1.7s)
-    #   6 worker:   GPU contention (worker 抢同一 GPU,反而单次慢 6x)
-    #   3 worker:   队列适度 + GPU 利用充分
-    # 低显存机器可设 GAMEBOT_OCR_WORKERS=2 降低
+    # OCR pool worker 数自动按 CPU 物理核数算 (env 显式指定优先).
+    # GPU OCR 实测 sweet spot:
+    #   1-2 worker: 队列堆积
+    #   3 worker (笔记本/台式 i5-i7): 队列适度 + GPU 利用充分 (默认)
+    #   6 worker (E5 服务器 / Ryzen 多核): 队列消失, GPU 仍能撑
+    #   太多 worker 会争同一 GPU, 反而单次慢
+    # 公式: clamp(2, 6, physical_cores // 4)
+    #   4 核: 2     8 核: 2     12 核: 3     14 核: 3     16 核: 4     28 核: 6
     if not os.environ.get("GAMEBOT_OCR_WORKERS"):
-        os.environ["GAMEBOT_OCR_WORKERS"] = "3"
+        try:
+            import psutil
+            phys = psutil.cpu_count(logical=False) or 4
+        except Exception:
+            phys = os.cpu_count() or 4
+            # os.cpu_count() 是逻辑核, hybrid CPU 高估 → 砍半作物理核近似
+            phys = max(2, phys // 2)
+        workers = max(2, min(6, phys // 4))
+        os.environ["GAMEBOT_OCR_WORKERS"] = str(workers)
 
     port = args.port or find_free_port()
     host = args.host  # 传给 run_dev_mode / run_desktop_mode

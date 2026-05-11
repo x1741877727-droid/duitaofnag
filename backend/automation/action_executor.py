@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional
 
@@ -105,8 +106,38 @@ class ActionExecutor:
         if act.seconds > 0:
             # 调用方指定 (P3a 切 tab 等长动画)
             await asyncio.sleep(act.seconds)
-        else:
-            # 默认 50ms 让 UE4 动画启动 (典型 200-300ms 关闭动画, 50ms 已足够开始变)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # popup_dismissed 走 deferred verify, 不需要立刻 shot_after (下一轮 perceive
+        # 用 yolo dets 判定). 跳过 50ms sleep + 200-400ms shot_after screencap + phash.
+        # 同时 tap 后调 daemon.invalidate, 强制 daemon 下一轮抓帧不被 motion gate 拦.
+        # 一键回退: env GAMEBOT_TAP_FORCE_VERIFY=1
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        _skip_shot_after = (act.expectation == "popup_dismissed"
+                            and os.environ.get("GAMEBOT_TAP_FORCE_VERIFY", "0") != "1")
+        if _skip_shot_after:
+            # 通知 daemon: tap 了, 下一帧请强制重抓
+            try:
+                from .vision_daemon import VisionDaemon
+                VisionDaemon.get().invalidate(getattr(ctx, "instance_idx", -1))
+            except Exception:
+                pass
+            ctx.pending_verify = {
+                "kind": "popup_dismissed",
+                "xy": (cx, cy),
+                "label": act.label,
+                "shot_before": shot_before,
+                "phash_before": 0,  # deferred 用 yolo 判, 不再用 phash before
+            }
+            _perf["sleep"] = (_time.perf_counter() - _t) * 1000
+            _total = (_time.perf_counter() - _t0) * 1000
+            logger.info(
+                f"[PERF/exec/inst{inst_idx}] tap_fast total={_total:.0f}ms "
+                f"tap={_perf['tap']:.0f} (跳 sleep+shot_after+phash, daemon.invalidate)"
+            )
+            return True
+
+        # 其他 expectation 仍走原 sleep + shot_after 路径
+        if act.seconds <= 0:
             await asyncio.sleep(0.05)
         try:
             shot_after = await ctx.device.screenshot()

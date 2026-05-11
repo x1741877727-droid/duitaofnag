@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gamebot — 运行 (合并 mockup v1)</title>
+<style>
+:root {
+  --bg: #fafafa;
+  --bg-elevated: #ffffff;
+  --bg-subtle: #f5f5f5;
+  --fg: #171717;
+  --fg-muted: #737373;
+  --fg-subtle: #a3a3a3;
+  --border: #e5e5e5;
+  --border-strong: #d4d4d4;
+
+  --green: #10b981;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --blue: #3b82f6;
+
+  --team-A: #2563eb;
+  --team-B: #059669;
+  --team-C: #d97706;
+  --team-D: #db2777;
+  --team-E: #7c3aed;
+  --team-F: #dc2626;
+
+  --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Cascadia Mono", monospace;
+
+  --drawer-width: 460px;
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button { font-family: inherit; }
+
+/* ─── App layout ─── */
+.app {
+  display: grid;
+  grid-template-rows: 56px auto 1fr;
+  height: 100vh;
+}
+
+/* ─── Top bar ─── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  gap: 24px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-size: 15px;
+}
+.brand-mark {
+  width: 22px; height: 22px;
+  border: 1.5px solid var(--fg);
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+.brand-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-subtle);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.stat-group {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 13px;
+}
+.stat {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg-muted);
+}
+.stat-num {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.stat-num.error { color: var(--red); }
+.dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot.live { background: var(--green); animation: pulse 2.4s ease-in-out infinite; }
+.dot.error { background: var(--red); animation: pulse 1.6s ease-in-out infinite; }
+.dot.idle { background: var(--fg-subtle); }
+.dot.warn { background: var(--amber); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.9); }
+}
+
+.uptime {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--fg-muted);
+  letter-spacing: 0.3px;
+}
+.actions {
+  display: flex; gap: 8px;
+  align-items: center;
+}
+.btn {
+  font-size: 13px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+  font-weight: 500;
+}
+.btn:hover { border-color: var(--fg); }
+.btn-danger {
+  background: var(--fg);
+  color: var(--bg-elevated);
+  border-color: var(--fg);
+}
+.btn-danger:hover {
+  background: var(--red);
+  border-color: var(--red);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-muted);
+  padding: 0 10px;
+}
+.btn-ghost:hover {
+  color: var(--fg);
+  background: var(--bg-subtle);
+}
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-subtle);
+  background: var(--bg-subtle);
+}
+
+/* ─── Anomaly banner ─── */
+.anomaly {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 24px;
+  background: #fef7f7;
+  border-bottom: 1px solid #fecaca;
+  font-size: 13px;
+  color: #7f1d1d;
+}
+.anomaly.show { display: flex; }
+.anomaly-msg { flex: 1; }
+.anomaly-msg strong { font-weight: 600; }
+.anomaly-msg span { color: #991b1b; opacity: 0.7; margin-left: 8px; }
+
+/* ─── Sub bar (filters, squad chips) ─── */
+.subbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  gap: 16px;
+}
+.chips {
+  display: flex; gap: 6px;
+  align-items: center;
+}
+.chip {
+  font-size: 12px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--fg-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 120ms ease;
+  font-weight: 500;
+}
+.chip:hover { border-color: var(--border-strong); color: var(--fg); }
+.chip.active {
+  background: var(--fg);
+  color: var(--bg-elevated);
+  border-color: var(--fg);
+}
+.chip-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.subbar-right {
+  display: flex; gap: 8px; align-items: center;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* ─── Main area ─── */
+.main {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+}
+.grid-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 24px;
+  transition: width 280ms var(--ease-spring);
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+body.drawer-open .grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+
+/* ─── Card ─── */
+.card {
+  position: relative;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 12px 12px 14px;
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease;
+  overflow: hidden;
+}
+.card:hover { border-color: var(--border-strong); }
+.card:hover .card-snapshot { background: #ededed; }
+.card.selected {
+  border-color: var(--fg);
+  border-width: 1px;
+  box-shadow: inset 0 0 0 1px var(--fg);
+}
+.card.error {
+  border-color: var(--red);
+  background: #fffafa;
+}
+.card.error::before {
+  background: var(--red) !important;
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 12px; bottom: 12px; left: 0;
+  width: 2px;
+  background: var(--team-color, var(--border));
+  border-radius: 0 1px 1px 0;
+}
+.card-row1 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+.card-name-group {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.card-num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-subtle);
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.card-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-team {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--team-color);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.card-team.captain::after {
+  content: '·';
+  margin-left: 3px;
+  color: var(--fg-subtle);
+}
+.card-team.captain::before {
+  content: '★';
+  margin-right: 2px;
+  font-size: 9px;
+}
+.card-snapshot {
+  aspect-ratio: 16 / 9;
+  background: var(--bg-subtle);
+  border-radius: 4px;
+  margin-bottom: 10px;
+  position: relative;
+  overflow: hidden;
+  transition: background 120ms ease;
+}
+.card-snapshot::after {
+  /* faint scanline texture, no gradient */
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0,
+    transparent 3px,
+    rgba(0,0,0,0.015) 3px,
+    rgba(0,0,0,0.015) 4px
+  );
+  pointer-events: none;
+}
+.card-snapshot-label {
+  position: absolute;
+  top: 6px; right: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--fg-subtle);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.card-row2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+}
+.phase-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.phase-pill .dot { width: 5px; height: 5px; }
+.card-row3 {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+}
+
+/* ─── Drawer ─── */
+.drawer {
+  width: 0;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: width 280ms var(--ease-spring);
+  display: flex;
+  flex-direction: column;
+}
+body.drawer-open .drawer { width: var(--drawer-width); }
+
+.drawer-inner {
+  width: var(--drawer-width);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+}
+.drawer-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated);
+  z-index: 1;
+}
+.drawer-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.drawer-title-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-subtle);
+  font-weight: 600;
+}
+.drawer-title-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+.drawer-title-team {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.drawer-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  width: 28px; height: 28px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all 120ms ease;
+  font-size: 16px;
+  line-height: 1;
+}
+.drawer-close:hover {
+  border-color: var(--fg);
+  color: var(--fg);
+}
+
+.drawer-section {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-section:last-child { border-bottom: 0; }
+
+.section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: var(--fg-subtle);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.section-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-subtle);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* drawer snapshot */
+.drawer-snapshot {
+  aspect-ratio: 16 / 9;
+  background: #1a1a1a;
+  border-radius: 6px;
+  position: relative;
+  overflow: hidden;
+}
+.drawer-snapshot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0,
+    transparent 4px,
+    rgba(255,255,255,0.025) 4px,
+    rgba(255,255,255,0.025) 5px
+  );
+}
+.drawer-snapshot-label {
+  position: absolute;
+  bottom: 8px; right: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255,255,255,0.5);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.drawer-snapshot-fps {
+  position: absolute;
+  top: 8px; left: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--green);
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.drawer-phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.drawer-phase-dur {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* tier evidence */
+.tier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tier-row {
+  display: grid;
+  grid-template-columns: 18px 56px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  padding: 6px 0;
+}
+.tier-icon {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  text-align: center;
+  font-weight: 600;
+}
+.tier-icon.ok { color: var(--green); }
+.tier-icon.skip { color: var(--fg-subtle); }
+.tier-icon.fail { color: var(--red); }
+.tier-name {
+  color: var(--fg-muted);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+}
+.tier-detail {
+  font-size: 12px;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tier-conf {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* action log */
+.log-list {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 60px 60px 1fr 38px 30px;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.log-row:last-child { border-bottom: 0; }
+.log-time { color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+.log-type {
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.log-type.tap { color: var(--blue); }
+.log-type.fire { color: var(--red); }
+.log-type.ocr { color: var(--amber); }
+.log-type.yolo { color: #7c3aed; }
+.log-target {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.log-result {
+  font-size: 11px;
+  text-align: center;
+}
+.log-result.ok { color: var(--green); }
+.log-result.fail { color: var(--red); }
+.log-ms {
+  color: var(--fg-subtle);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* phase timeline */
+.timeline {
+  display: flex;
+  height: 22px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.timeline-seg {
+  position: relative;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: white;
+  letter-spacing: 0.3px;
+  cursor: default;
+}
+.timeline-seg::after {
+  content: attr(data-label);
+  position: absolute;
+  bottom: -18px;
+  font-size: 9px;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+.timeline-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 28px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.timeline-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.timeline-legend-swatch {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+}
+
+/* drawer hint when nothing selected */
+.drawer-empty {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+/* ─── Footer demo controls ─── */
+.demo-bar {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--fg);
+  color: var(--bg-elevated);
+  padding: 8px 14px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  z-index: 100;
+}
+.demo-bar code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: rgba(255,255,255,0.1);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.demo-bar button {
+  background: transparent;
+  color: white;
+  border: 1px solid rgba(255,255,255,0.25);
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.demo-bar button:hover { border-color: white; }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- 顶部控制条 -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">G</div>
+      <div>Gamebot</div>
+      <span class="brand-meta">运行 / Operations</span>
+    </div>
+
+    <div class="stat-group">
+      <div class="stat">
+        <span class="dot live"></span>
+        <span>在线</span>
+        <span class="stat-num"><span id="onlineCount">5</span><span style="color:var(--fg-subtle)">/6</span></span>
+      </div>
+      <div class="stat">
+        <span>本会话局数</span>
+        <span class="stat-num">12</span>
+      </div>
+      <div class="stat">
+        <span class="dot error"></span>
+        <span>异常</span>
+        <span class="stat-num error">1</span>
+      </div>
+      <div class="uptime">02:17:43</div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-ghost btn">应急 ▾</button>
+      <button class="btn btn-danger">全部停止</button>
+    </div>
+  </header>
+
+  <!-- 异常 banner (运行中有 error 时显示) -->
+  <div class="anomaly show">
+    <span class="dot error"></span>
+    <div class="anomaly-msg">
+      <strong>5 号已掉线 · B 队缺 1 人</strong>
+      <span>玩家5 · 2 分钟前断开 · 当前局结束后停止接新局</span>
+    </div>
+    <button class="btn-ghost btn" style="height:26px">查看</button>
+    <button class="btn-ghost btn" style="height:26px">尝试重启</button>
+  </div>
+
+  <!-- 子条: 大组 filter + 视图切换 -->
+  <div class="subbar">
+    <div class="chips">
+      <button class="chip active">
+        全部
+        <span class="chip-count">6</span>
+      </button>
+      <button class="chip">
+        大组 1
+        <span class="chip-count">A·B</span>
+      </button>
+      <button class="chip">
+        大组 2
+        <span class="chip-count">C·D</span>
+      </button>
+      <span style="color:var(--border-strong); margin: 0 6px">·</span>
+      <button class="chip">
+        <span class="dot error"></span>
+        异常
+        <span class="chip-count">1</span>
+      </button>
+    </div>
+    <div class="subbar-right">
+      <span>键盘: <span class="kbd">space</span> 选 · <span class="kbd">esc</span> 关抽屉</span>
+    </div>
+  </div>
+
+  <!-- 主区: 网格 + 抽屉 -->
+  <main class="main">
+    <div class="grid-area">
+      <div class="grid" id="grid">
+        <!-- 卡片 JS 注入 -->
+      </div>
+    </div>
+
+    <aside class="drawer" id="drawer">
+      <div class="drawer-inner" id="drawerContent">
+        <!-- 抽屉内容 JS 注入 -->
+      </div>
+    </aside>
+  </main>
+
+</div>
+
+<!-- demo bar -->
+<div class="demo-bar">
+  <span>Mockup v1 · 抽屉式</span>
+  <span style="opacity:0.5">点任一卡片打开详情</span>
+  <button onclick="closeDrawer()">esc 关</button>
+  <button onclick="cycleStates()">切状态</button>
+</div>
+
+<script>
+// ─── data ───
+const STATE_LABEL = {
+  init: '等待启动',
+  accelerator: '启动加速器',
+  launch_game: '启动游戏',
+  wait_login: '等待登录',
+  dismiss_popups: '清理弹窗',
+  lobby: '大厅就绪',
+  team_create: '创建队伍',
+  team_join: '加入队伍',
+  ready: '准备就绪',
+  in_game: '战斗中',
+  done: '完成',
+  error: '出错'
+};
+const STATE_TONE = {
+  in_game: 'live', lobby: 'live', ready: 'live', done: 'live',
+  init: 'idle', wait_login: 'idle', team_create: 'warn', team_join: 'warn',
+  dismiss_popups: 'warn', accelerator: 'warn', launch_game: 'warn',
+  error: 'error'
+};
+
+const instances = [
+  { idx: 0, name: '雷电模拟器', team: 'A', captain: true,  state: 'in_game', lastDecision: '8s 前', error: null },
+  { idx: 1, name: '雷电模拟器-1', team: 'A', captain: false, state: 'in_game', lastDecision: '4s 前', error: null },
+  { idx: 2, name: '雷电模拟器-2', team: 'A', captain: false, state: 'lobby', lastDecision: '12s 前', error: null },
+  { idx: 3, name: '雷电模拟器-3', team: 'B', captain: true,  state: 'in_game', lastDecision: '2s 前', error: null },
+  { idx: 4, name: '雷电模拟器-4', team: 'B', captain: false, state: 'in_game', lastDecision: '6s 前', error: null },
+  { idx: 5, name: '雷电模拟器-5', team: 'B', captain: false, state: 'error',   lastDecision: '2 分钟前', error: 'adb 断开' },
+];
+
+// ─── render grid ───
+function renderGrid() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  instances.forEach(inst => {
+    const tone = STATE_TONE[inst.state] || 'idle';
+    const isErr = inst.state === 'error';
+    const card = document.createElement('div');
+    card.className = `card ${isErr ? 'error' : ''}`;
+    card.style.setProperty('--team-color', `var(--team-${inst.team})`);
+    card.dataset.idx = inst.idx;
+    card.onclick = () => openDrawer(inst.idx);
+    card.innerHTML = `
+      <div class="card-row1">
+        <div class="card-name-group">
+          <span class="card-num">#${String(inst.idx).padStart(2,'0')}</span>
+          <span class="card-name">${inst.name}</span>
+        </div>
+        <span class="card-team ${inst.captain ? 'captain' : ''}" style="--team-color: var(--team-${inst.team})">${inst.team}</span>
+      </div>
+      <div class="card-snapshot">
+        <span class="card-snapshot-label">${isErr ? 'OFFLINE' : '~2 fps'}</span>
+      </div>
+      <div class="card-row2">
+        <span class="phase-pill">
+          <span class="dot ${tone}"></span>
+          ${STATE_LABEL[inst.state] || inst.state}
+        </span>
+      </div>
+      <div class="card-row3">${inst.error ? '⚠ ' + inst.error : '上次决策 · ' + inst.lastDecision}</div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+// ─── drawer ───
+let selectedIdx = null;
+function openDrawer(idx) {
+  selectedIdx = idx;
+  document.body.classList.add('drawer-open');
+  document.querySelectorAll('.card').forEach(c => {
+    c.classList.toggle('selected', Number(c.dataset.idx) === idx);
+  });
+  renderDrawer(idx);
+}
+function closeDrawer() {
+  selectedIdx = null;
+  document.body.classList.remove('drawer-open');
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+}
+function renderDrawer(idx) {
+  const inst = instances.find(i => i.idx === idx);
+  if (!inst) return;
+  const tone = STATE_TONE[inst.state] || 'idle';
+  const isErr = inst.state === 'error';
+
+  const tierEvidence = isErr
+    ? [
+        ['T1', '模版', 'fail', '尝试 5 次失败', '—'],
+        ['T2', 'OCR', 'skip', '跳过', '—'],
+        ['T3', 'YOLO', 'skip', '跳过', '—'],
+        ['T4', 'Memory', 'skip', '跳过', '—'],
+        ['T5', '兜底', 'fail', 'adb 断开 · 无可恢复路径', '—'],
+      ]
+    : [
+        ['T1', '模版', 'ok', 'lobby_btn_v3', '0.92'],
+        ['T2', 'OCR', 'ok', '"开始战斗"', '0.88'],
+        ['T3', 'YOLO', 'ok', 'enemy × 3', '0.71'],
+        ['T4', 'Memory', 'skip', '本 phase 无记忆', '—'],
+        ['T5', '兜底', 'skip', '无需兜底', '—'],
+      ];
+
+  const log = isErr
+    ? [
+        ['02:15:42', 'tap', 'lobby_btn @ (840, 580)', 'fail', '5000'],
+        ['02:15:37', 'tap', 'lobby_btn @ (840, 580)', 'fail', '5000'],
+        ['02:15:32', 'tap', 'lobby_btn @ (840, 580)', 'fail', '5000'],
+        ['02:15:30', 'ocr', '"开始战斗"', 'ok', '34'],
+      ]
+    : [
+        ['02:17:43', 'fire', 'enemy_left @ (920, 412)', 'ok', '23'],
+        ['02:17:41', 'tap', 'sprint @ (1140, 620)', 'ok', '18'],
+        ['02:17:39', 'fire', 'enemy_center', 'ok', '21'],
+        ['02:17:36', 'yolo', 'detect 3 enemies', 'ok', '47'],
+        ['02:17:33', 'tap', 'cover_node @ (740, 540)', 'ok', '15'],
+        ['02:17:31', 'ocr', 'kill_count → 4', 'ok', '38'],
+      ];
+
+  const phases = isErr
+    ? [
+        { name: 'lobby', ms: 28000, color: 'var(--green)' },
+        { name: 'in_game', ms: 380000, color: 'var(--blue)' },
+        { name: 'error', ms: 120000, color: 'var(--red)' },
+      ]
+    : [
+        { name: 'lobby', ms: 32000, color: 'var(--green)' },
+        { name: 'team_join', ms: 14000, color: 'var(--amber)' },
+        { name: 'ready', ms: 8000, color: 'var(--green)' },
+        { name: 'in_game', ms: 480000, color: 'var(--blue)' },
+      ];
+  const total = phases.reduce((s, p) => s + p.ms, 0);
+
+  document.getElementById('drawerContent').innerHTML = `
+    <div class="drawer-header">
+      <div class="drawer-title">
+        <span class="drawer-title-num">#${String(inst.idx).padStart(2,'0')}</span>
+        <span class="drawer-title-name">${inst.name}</span>
+        <span class="drawer-title-team" style="color: var(--team-${inst.team})">${inst.team}</span>
+      </div>
+      <button class="drawer-close" onclick="closeDrawer()" title="关闭 (Esc)">×</button>
+    </div>
+
+    <div class="drawer-section">
+      <div class="drawer-snapshot">
+        ${!isErr ? '<span class="drawer-snapshot-fps"><span class="dot live"></span>5 fps</span>' : ''}
+        <span class="drawer-snapshot-label">${isErr ? 'OFFLINE' : 'LIVE'}</span>
+      </div>
+      <div class="drawer-phase">
+        <span class="phase-pill">
+          <span class="dot ${tone}"></span>
+          ${STATE_LABEL[inst.state]}
+        </span>
+        <span class="drawer-phase-dur">${isErr ? '掉线 2m' : '已停留 8.2s'}</span>
+      </div>
+    </div>
+
+    <div class="drawer-section">
+      <div class="section-label">
+        <span>5 层识别证据</span>
+        <span class="section-meta">${isErr ? '0/5 命中' : '3/5 命中'}</span>
+      </div>
+      <div class="tier-list">
+        ${tierEvidence.map(([t, name, status, detail, conf]) => `
+          <div class="tier-row">
+            <span class="tier-icon ${status}">${status==='ok'?'✓':status==='fail'?'✗':'·'}</span>
+            <span class="tier-name">${t} ${name}</span>
+            <span class="tier-detail">${detail}</span>
+            <span class="tier-conf">${conf}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <div class="drawer-section">
+      <div class="section-label">
+        <span>决策日志</span>
+        <span class="section-meta">最近 ${log.length} 条 · 倒序</span>
+      </div>
+      <div class="log-list">
+        ${log.map(([t, type, target, result, ms]) => `
+          <div class="log-row">
+            <span class="log-time">${t}</span>
+            <span class="log-type ${type}">${type}</span>
+            <span class="log-target">${target}</span>
+            <span class="log-result ${result}">${result === 'ok' ? '✓' : '✗'}</span>
+            <span class="log-ms">${ms}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <div class="drawer-section">
+      <div class="section-label">
+        <span>Phase 时间线</span>
+        <span class="section-meta">本局 ${(total/60000).toFixed(1)} 分钟</span>
+      </div>
+      <div class="timeline">
+        ${phases.map(p => `
+          <div class="timeline-seg" style="flex: ${p.ms/total}; background: ${p.color};" title="${p.name} · ${(p.ms/1000).toFixed(0)}s">
+            ${p.ms/total > 0.12 ? p.name : ''}
+          </div>
+        `).join('')}
+      </div>
+      <div class="timeline-legend">
+        ${phases.map(p => `
+          <span class="timeline-legend-item">
+            <span class="timeline-legend-swatch" style="background: ${p.color}"></span>
+            ${p.name} <span style="font-family: var(--font-mono); color: var(--fg-subtle); margin-left: 2px">${(p.ms/1000).toFixed(0)}s</span>
+          </span>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ─── demo: cycle states ───
+let demoState = 0;
+function cycleStates() {
+  demoState = (demoState + 1) % 3;
+  if (demoState === 0) {
+    document.querySelector('.anomaly').classList.remove('show');
+    instances[5].state = 'in_game';
+    instances[5].error = null;
+  } else if (demoState === 1) {
+    document.querySelector('.anomaly').classList.add('show');
+    instances[5].state = 'error';
+    instances[5].error = 'adb 断开';
+  } else {
+    document.querySelector('.anomaly').classList.add('show');
+    instances[5].state = 'error';
+    instances[5].error = 'adb 断开';
+    openDrawer(5);
+    return;
+  }
+  renderGrid();
+  if (selectedIdx !== null) renderDrawer(selectedIdx);
+}
+
+// keyboard
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeDrawer();
+});
+
+renderGrid();
+
+</script>
+
+</body>
+</html>

@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 from . import metrics
+from .screencap_ldopengl import LdopenglManager
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,179 @@ _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows
 
 # screencap 回退用信号量
 _screenshot_semaphore: Optional[asyncio.Semaphore] = None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MaaTouch — minitouch 协议 Java 实现, 解决 subprocess fork 慢
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 实测 (2026-05-11):
+#   subprocess.run input tap 单实例 p50=125ms, 6 并发 p50=185ms (ADB server 串行)
+#   MaaTouch stdin write+flush p50=0.02ms, 端到端 ~15-30ms
+# 协议: minitouch text protocol (d/m/u/c/w/k/t)
+# ABI: Java app_process, 跑在 ART, 不需要 native binary, LDPlayer x86_64 直接 work
+
+import threading
+from pathlib import Path
+
+_MAATOUCH_REMOTE_PATH = "/data/local/tmp/maatouch"
+_MAATOUCH_LOCAL_PATH: Optional[Path] = None    # lazy 探测
+_MAATOUCH_PUSH_LOCK = threading.Lock()
+_MAATOUCH_PUSHED_SERIALS: set = set()           # 已经 push 过的 serial
+
+
+def _find_maatouch_jar() -> Optional[Path]:
+    """找仓库内 bin/maatouch jar. 找不到返回 None."""
+    global _MAATOUCH_LOCAL_PATH
+    if _MAATOUCH_LOCAL_PATH is not None:
+        return _MAATOUCH_LOCAL_PATH
+    here = Path(__file__).resolve()
+    # backend/automation/adb_lite.py -> repo root -> bin/maatouch
+    for cand in [
+        here.parent.parent.parent / "bin" / "maatouch",
+        here.parent.parent / "bin" / "maatouch",
+        Path.cwd() / "bin" / "maatouch",
+    ]:
+        if cand.is_file():
+            _MAATOUCH_LOCAL_PATH = cand
+            return cand
+    return None
+
+
+class MaaTouchController:
+    """每实例一个持久 MaaTouch process, stdin 发 tap 命令.
+
+    生命周期: lazy init (第一次 tap 启动), 死了自动重启.
+    """
+
+    def __init__(self, adb_path: str, serial: str):
+        self.adb_path = adb_path
+        self.serial = serial
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        self._banner: Optional[str] = None
+        self._consecutive_fails = 0
+
+    @staticmethod
+    def push_jar(adb_path: str, serial: str) -> bool:
+        """同步 push maatouch jar 到 LDPlayer (幂等). 返回是否 ready."""
+        with _MAATOUCH_PUSH_LOCK:
+            if serial in _MAATOUCH_PUSHED_SERIALS:
+                return True
+            local = _find_maatouch_jar()
+            if local is None:
+                logger.warning("[maatouch] bin/maatouch jar 找不到, 跳过 push")
+                return False
+            try:
+                # 先 ls 看是否已存在 + size 一致
+                check = subprocess.run(
+                    [adb_path, "-s", serial, "shell", f"ls -la {_MAATOUCH_REMOTE_PATH}"],
+                    capture_output=True, timeout=5, creationflags=_SUBPROCESS_FLAGS,
+                )
+                local_size = local.stat().st_size
+                if check.returncode == 0 and str(local_size).encode() in check.stdout:
+                    _MAATOUCH_PUSHED_SERIALS.add(serial)
+                    logger.debug(f"[maatouch] {serial} jar 已存在 size={local_size}")
+                    return True
+                # push
+                r = subprocess.run(
+                    [adb_path, "-s", serial, "push", str(local), _MAATOUCH_REMOTE_PATH],
+                    capture_output=True, timeout=15, creationflags=_SUBPROCESS_FLAGS,
+                )
+                if r.returncode != 0:
+                    logger.warning(f"[maatouch] {serial} push fail: {r.stderr.decode('utf-8','replace')[:200]}")
+                    return False
+                subprocess.run(
+                    [adb_path, "-s", serial, "shell", f"chmod 755 {_MAATOUCH_REMOTE_PATH}"],
+                    capture_output=True, timeout=5, creationflags=_SUBPROCESS_FLAGS,
+                )
+                _MAATOUCH_PUSHED_SERIALS.add(serial)
+                logger.info(f"[maatouch] {serial} pushed jar size={local_size}")
+                return True
+            except Exception as e:
+                logger.warning(f"[maatouch] {serial} push 异常: {e}")
+                return False
+
+    def _ensure_proc(self) -> bool:
+        """确保 maatouch process 在跑. 死了自动重启. 返回 True = ready."""
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return True
+            # push jar 幂等
+            if not MaaTouchController.push_jar(self.adb_path, self.serial):
+                self._consecutive_fails += 1
+                return False
+            try:
+                self._proc = subprocess.Popen(
+                    [self.adb_path, "-s", self.serial, "shell",
+                     f"CLASSPATH={_MAATOUCH_REMOTE_PATH} app_process / com.shxyke.MaaTouch.App"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    bufsize=0, creationflags=_SUBPROCESS_FLAGS,
+                )
+            except Exception as e:
+                logger.warning(f"[maatouch] {self.serial} Popen 失败: {e}")
+                self._consecutive_fails += 1
+                return False
+
+            # 异步读 banner (不阻塞 tap)
+            def _drain_banner():
+                try:
+                    for _ in range(3):
+                        line = self._proc.stdout.readline() if self._proc else b""
+                        if not line: break
+                        s = line.decode('utf-8', 'replace').strip()
+                        if s.startswith("^"):
+                            self._banner = s
+                            logger.info(f"[maatouch] {self.serial} banner: {s}")
+                except Exception:
+                    pass
+            threading.Thread(target=_drain_banner, daemon=True).start()
+            # 等 0.5s 让 process 起来 + 读 banner
+            time.sleep(0.5)
+            if self._proc.poll() is not None:
+                err = b""
+                try: err = self._proc.stderr.read(500) or b""
+                except Exception: pass
+                logger.warning(
+                    f"[maatouch] {self.serial} 启动后立刻死 rc={self._proc.returncode} "
+                    f"stderr={err.decode('utf-8','replace')[:300]}"
+                )
+                self._proc = None
+                self._consecutive_fails += 1
+                return False
+            self._consecutive_fails = 0
+            return True
+
+    def tap(self, x: int, y: int) -> bool:
+        """发 tap. 成功 True, 失败 False (调用方 fallback subprocess)."""
+        if self._consecutive_fails > 5:
+            return False  # 连续失败太多, 别再试了
+        if not self._ensure_proc():
+            return False
+        try:
+            cmd = f"d 0 {int(x)} {int(y)} 50\nc\nu 0\nc\n".encode()
+            self._proc.stdin.write(cmd)
+            self._proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError) as e:
+            logger.warning(f"[maatouch] {self.serial} stdin write fail: {e}")
+            with self._lock:
+                if self._proc is not None:
+                    try: self._proc.kill()
+                    except Exception: pass
+                    self._proc = None
+            self._consecutive_fails += 1
+            return False
+
+    def close(self):
+        with self._lock:
+            if self._proc is not None:
+                try:
+                    self._proc.stdin.close()
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    try: self._proc.kill()
+                    except Exception: pass
+                self._proc = None
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -242,7 +416,10 @@ class ADBController:
     def __init__(self, serial: str, adb_path: str = "adb"):
         self.serial = serial
         self.adb_path = adb_path
-        self._proc_timeout = 10
+        # 实测: am start 启游戏 + system_server 响应可达 3-5s, 太激进的 timeout 会误杀.
+        # 截图 (raw screencap) 在 6 实例并发时 1s+ 也常见.
+        # 取中庸 8s: 失败检测够早, 慢命令也容得下.
+        self._proc_timeout = 8
         self._stream: Optional[ScreenrecordStream] = None
         # Android display 尺寸 (来自 `wm size`). 用来把 dxhook 抓的 GL framebuffer
         # (可能是 LDPlayer 渲染缩放后的 606x341) resize 回 Android 显示空间 (960x540).
@@ -250,6 +427,9 @@ class ADBController:
         # lazy: 第一次 screenshot 时查并缓存.
         self._device_w: Optional[int] = None
         self._device_h: Optional[int] = None
+        # MaaTouch (持久 process tap, 实测端到端 ~25ms vs subprocess 125-185ms)
+        # env GAMEBOT_USE_MAATOUCH=0 一键回退 subprocess
+        self._maatouch = MaaTouchController(self.adb_path, self.serial)
 
     def setup_minicap(self) -> bool:
         """[向后兼容名] 初始化截图流。
@@ -332,13 +512,31 @@ class ADBController:
         return cv2.resize(frame, (dw, dh))
 
     async def screenshot(self) -> Optional[np.ndarray]:
-        """截图 — 默认 raw screencap (UE4 兼容 + 跟窗口完全解耦, ~80ms).
-        screenrecord 仅在显式 GAMEBOT_CAPTURE=screenrecord 时走 stream.
+        """截图 — 优先级: ldopengl > screenrecord (显式) > raw screencap.
+
+        ldopengl: Win + 雷电 9.0.78+ 时直读 host framebuffer, 6 并发 avg 2.8ms (vs adb 205ms).
+        screenrecord: 仅 GAMEBOT_CAPTURE=screenrecord 时走 stream.
+        raw screencap: 兜底 (~80ms 单实例, 6 并发 200ms+).
+
         所有路径返回的 frame 都 normalize 到 Android display 尺寸 (`wm size`)."""
-        use_stream = (self._stream is not None
-                      and os.environ.get("GAMEBOT_CAPTURE", "").lower() == "screenrecord")
+        capture_env = os.environ.get("GAMEBOT_CAPTURE", "").lower()
+        use_stream = self._stream is not None and capture_env == "screenrecord"
 
         with metrics.timed("screenshot") as tags:
+            # ── 优先 ldopengl (除非显式选别的 backend) ──
+            if capture_env != "screenrecord" and capture_env != "adb":
+                mgr = LdopenglManager.get()
+                if mgr.is_available():
+                    loop = asyncio.get_event_loop()
+                    frame = await loop.run_in_executor(None, mgr.capture, self.serial)
+                    if frame is not None:
+                        tags["backend"] = "ldopengl"
+                        frame = self._normalize_to_device(frame)
+                        tags["h"], tags["w"] = frame.shape[:2]
+                        return frame
+                    # ldopengl 失败 → 继续 fallback (实例没启动 / disabled / 异常)
+
+            # ── screenrecord stream (显式开启时) ──
             if use_stream:
                 frame = self._stream.get_frame()
                 stream_name = type(self._stream).__name__.replace("Stream", "").lower()
@@ -355,7 +553,7 @@ class ADBController:
                     tags["h"], tags["w"] = frame.shape[:2]
                     return frame
 
-            # 默认: raw screencap. 不再 _get_semaphore() 限流 — 6 实例真并发 OS 自己调度.
+            # ── 兜底: raw screencap ──
             loop = asyncio.get_event_loop()
             try:
                 frame = await loop.run_in_executor(None, self._screenshot_sync)
@@ -416,15 +614,61 @@ class ADBController:
         return img
 
     async def tap(self, x: int, y: int):
-        """点击（带随机抖动）"""
-        import random
-        jx = x + random.randint(-3, 3)
-        jy = y + random.randint(-3, 3)
+        """点击 (带随机抖动).
+
+        优先级:
+          1. MaaTouch 持久 process (env GAMEBOT_USE_MAATOUCH=1 默认开)
+             实测 stdin write+flush 0.02ms, 端到端 ~25ms
+          2. 持久 adb shell (env GAMEBOT_TAP_PERSISTENT=1, 默认关 — 之前撞 deadlock 撤回)
+          3. subprocess.run input tap (fallback, 80-150ms 单, 6 并发 185ms 排队)
+        """
+        # 用户要求固定点击不抖动 (之前抖动 ±3px 偶尔点错)
+        jx = int(x)
+        jy = int(y)
         with metrics.timed("tap", x=jx, y=jy):
+            # 1) MaaTouch (默认开). stdin write+flush ~0.02ms 不阻塞 event loop,
+            # 不走 to_thread (避免 default executor 排队 100-500ms)
+            if os.environ.get("GAMEBOT_USE_MAATOUCH", "1") != "0":
+                if self._maatouch.tap(jx, jy):
+                    return
+
+            # 2) 持久 shell (实测有 deadlock, 默认关)
+            if os.environ.get("GAMEBOT_TAP_PERSISTENT", "0") == "1":
+                if await self._tap_via_persistent_shell(jx, jy):
+                    return
+
+            # 3) fallback: fork-per-tap
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None, self._cmd, "shell", f"input tap {jx} {jy}"
             )
+
+    async def _tap_via_persistent_shell(self, x: int, y: int) -> bool:
+        """通过持久 adb shell stdin 发 tap. 成功返回 True, 失败返回 False (调用方 fallback)."""
+        proc = getattr(self, "_persistent_shell", None)
+        if proc is None or proc.returncode is not None:
+            try:
+                self._persistent_shell = await asyncio.create_subprocess_exec(
+                    self.adb_path, "-s", self.serial, "shell",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=_SUBPROCESS_FLAGS,
+                )
+                proc = self._persistent_shell
+            except Exception as e:
+                logger.warning(f"[adb] {self.serial} 启 persistent shell 失败: {e}")
+                return False
+        try:
+            proc.stdin.write(f"input tap {x} {y}\n".encode())
+            await proc.stdin.drain()
+            return True
+        except Exception as e:
+            logger.debug(f"[adb] {self.serial} persistent shell 写失败 ({e}), reset")
+            try: proc.terminate()
+            except Exception: pass
+            self._persistent_shell = None
+            return False
 
     async def key_event(self, key: str):
         """按键事件"""

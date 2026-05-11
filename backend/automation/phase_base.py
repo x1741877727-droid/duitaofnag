@@ -109,7 +109,7 @@ class RunContext:
     settings: Any = None
 
     # 跨 phase 数据 (只在特定 phase 写, 其他 phase 只读)
-    role: Literal["leader", "follower", "unknown"] = "unknown"
+    role: Literal["captain", "member", "unknown"] = "unknown"
     game_scheme_url: Optional[str] = None  # P3a 写, P3b 读
 
     # P5 owned (等待玩家阶段, 测试页 / 后续主 loop API 注入)

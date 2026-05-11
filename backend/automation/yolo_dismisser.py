@@ -47,7 +47,16 @@ def _load_classes() -> list[str]:
 
 
 CLASSES = _load_classes()
-CONF_THRESHOLD = 0.30   # 检测下限：低于此值丢弃
+CONF_THRESHOLD = 0.30   # 检测下限 fallback (优先用 runtime_profile.yolo_conf)
+
+
+def _conf_threshold() -> float:
+    """优先 runtime_profile.yolo_conf, fallback CONF_THRESHOLD."""
+    try:
+        from .runtime_profile import get_profile
+        return get_profile().yolo_conf
+    except Exception:
+        return CONF_THRESHOLD
 TAP_CONF_CLOSE = 0.50   # 点击 close_x 下限
 TAP_CONF_ACTION = 0.50  # 点击 action_btn 下限
 NMS_IOU = 0.45
@@ -242,7 +251,7 @@ class YoloDismisser:
         scores = preds[:, 4:]
         max_scores = scores.max(axis=1)
         max_classes = scores.argmax(axis=1)
-        mask = max_scores > CONF_THRESHOLD
+        mask = max_scores > _conf_threshold()
         if not mask.any():
             return []
         boxes = boxes[mask]
@@ -281,7 +290,7 @@ class YoloDismisser:
             )
             indices = cv2.dnn.NMSBoxes(
                 bboxes=xywh.tolist(), scores=sc.tolist(),
-                score_threshold=CONF_THRESHOLD, nms_threshold=NMS_IOU,
+                score_threshold=_conf_threshold(), nms_threshold=NMS_IOU,
             )
             if len(indices) == 0:
                 continue

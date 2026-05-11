@@ -40,9 +40,9 @@ class FsmState(Enum):
     P0_ACCELERATOR = auto()
     P1_LAUNCH = auto()
     P2_DISMISS = auto()
-    P3A_TEAM_CREATE = auto()      # leader only
-    P3B_TEAM_JOIN = auto()        # follower only
-    P4_MAP_SETUP = auto()         # leader only, after P3A
+    P3A_TEAM_CREATE = auto()      # captain only
+    P3B_TEAM_JOIN = auto()        # member only
+    P4_MAP_SETUP = auto()         # captain only, after P3A
     P5_WAIT_PLAYERS = auto()      # 等真人入队 (测试页可单独跑; 主 loop _TRANSITIONS 暂不接, 走 API 推 expected_id 后再开)
     DONE = auto()
     ERROR = auto()
@@ -304,8 +304,13 @@ class RunnerFSM:
             if step.result == PhaseResult.WAIT:
                 await asyncio.sleep(max(0.0, step.wait_seconds))
             else:
-                # RETRY 默认间隔
-                await asyncio.sleep(handler.round_interval_s)
+                # RETRY: round_interval 优先读 runtime_profile (mode 决定)
+                try:
+                    from .runtime_profile import resolve_round_interval
+                    _ri = resolve_round_interval(handler.name, fallback=handler.round_interval_s)
+                except Exception:
+                    _ri = handler.round_interval_s
+                await asyncio.sleep(_ri)
             _perf["sleep"] = (time.perf_counter() - _t_sleep) * 1000
 
         # max_rounds 用完 → FAIL
@@ -319,12 +324,12 @@ class RunnerFSM:
         if result == PhaseResult.DONE:
             return FsmState.DONE
 
-        # P2 → P3A (leader) / P3B (follower)
+        # P2 → P3A (captain) / P3B (member)
         if cur == FsmState.P2_DISMISS and result == PhaseResult.NEXT:
             role = self._ctx.role
-            if role == "leader":
+            if role == "captain":
                 return FsmState.P3A_TEAM_CREATE
-            elif role == "follower":
+            elif role == "member":
                 return FsmState.P3B_TEAM_JOIN
             else:
                 # role 未知 → 直接 DONE (单实例 / 测试场景)

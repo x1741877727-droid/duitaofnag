@@ -85,7 +85,7 @@ export function PhaseTester() {
 
   const [open, setOpen] = useState(true)
   const selKeys = phaseTester.selKeys
-  const expectedId = phaseTester.expectedId
+  const expectedIds = phaseTester.expectedIds
   const keepGoing = phaseTester.keepGoing
   const busy = phaseTester.busy
   const progress = phaseTester.progress
@@ -140,9 +140,28 @@ export function PhaseTester() {
     [selectedInstances],
   )
 
-  // 派生
+  // 派生: 选 P5 时, 拣出每个 squad 的 captain → 这些 group 都要各自一个 10 位 ID
   const needsId = useMemo(() => selKeys.includes('P5'), [selKeys])
-  const idOk = !needsId || /^\d{10}$/.test(expectedId)
+  const captainGroups = useMemo<string[]>(() => {
+    if (!needsId) return []
+    // 按 group 分组, 每组只取第一个 captain (跟 runTest 切组逻辑一致)
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const idx of targets) {
+      const acct = accounts.find((a) => a.index === idx)
+      const g = String(acct?.group ?? 'A')
+      const role = effRole(idx, (acct?.role || 'captain') as 'captain' | 'member')
+      if (role === 'captain' && !seen.has(g)) {
+        seen.add(g)
+        out.push(g)
+      }
+    }
+    return out.sort()
+  }, [needsId, targets, accounts, roleOver])
+
+  const idOk =
+    !needsId ||
+    captainGroups.every((g) => /^\d{10}$/.test(expectedIds[g] || ''))
 
   const canRun =
     !busy && !isRunning && selKeys.length > 0 && targets.length > 0 && idOk
@@ -157,14 +176,18 @@ export function PhaseTester() {
 
   // 单 (phase, target) 跑一次: POST + 轮询 task_id 直到 done. 失败抛 Error.
   // scheme: 仅 P3b 用 (队长 P3a 拿到的队伍 scheme URL, 注入 ctx.game_scheme_url)
+  // checkCancelled: 每轮 await 间隙调一下, 返回 true 则立即抛 'cancelled' 退出
   // 返回 { ok, scheme? (P3a 跑完返回的 game_scheme_url), phase_name, duration_ms, error? }
   const runOneTask = async (
     phase: string,
     tgt: number,
     role: 'captain' | 'member',
     onProgress: (elapsedMs: number) => void,
-    scheme?: string,
+    scheme: string | undefined,
+    checkCancelled: () => boolean,
+    expectedIdForP5?: string,
   ): Promise<{ ok: boolean; scheme?: string; phase_name?: string; duration_ms?: number; error?: string }> => {
+    if (checkCancelled()) throw new Error('cancelled')
     const startRes = await fetch('/api/runner/test_phase', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -172,7 +195,7 @@ export function PhaseTester() {
         instance: tgt,
         phase,
         role,
-        expected_id: phase === 'P5' ? expectedId : undefined,
+        expected_id: phase === 'P5' ? (expectedIdForP5 || '') : undefined,
         keep_going: keepGoing,
         scheme,
       }),
@@ -188,10 +211,16 @@ export function PhaseTester() {
     const tStart = Date.now()
     while (true) {
       await new Promise((r) => setTimeout(r, POLL_MS))
+      if (checkCancelled()) throw new Error('cancelled')
       if (Date.now() - tStart > MAX_WAIT_MS) {
         throw new Error(`轮询超时 ${MAX_WAIT_MS / 1000}s`)
       }
-      const stRes = await fetch(`/api/runner/test_phase/${tid}`)
+      // Chrome heuristic GET cache 会把 status:"running" 死缓存住, 后端切到 done 也读不到 →
+      // 加 cache:'no-store' + 时间戳 query, 双保险绕开缓存
+      const stRes = await fetch(`/api/runner/test_phase/${tid}?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' },
+      })
       // backend test_phase_status 用 **t.get('result', {}) 把 result 展开到**顶层**,
       // 不是嵌套在 .result 子对象 (我之前抄错路径导致 lr.scheme 永远 undefined → P3b skip)
       const st = (await stRes.json()) as {
@@ -218,9 +247,10 @@ export function PhaseTester() {
 
   const runTest = async () => {
     if (!canRun) return
-    // DEBUG: 打印 selKeys 跟 targets, 让用户能在 devtools console 看见自己实际选了什么
-    console.log('[PhaseTester] runTest selKeys=', selKeys, 'targets=', targets,
-                'accounts=', accounts.map(a => `#${a.index}/${a.group}/${a.role}`))
+    // 抓本次 run 的 cancelToken; 任意一次 await 前看到 store token 变了就立即抛 'cancelled' 退出
+    const startToken = useAppStore.getState().phaseTester.cancelToken
+    const isCancelled = () =>
+      useAppStore.getState().phaseTester.cancelToken !== startToken
     setPhaseTester({ busy: true, progress: '准备...', runningTargets: [...targets] })
     let okCount = 0
     let failCount = 0
@@ -238,8 +268,6 @@ export function PhaseTester() {
       else sq.members.push(idx)
     }
     const squads = Object.values(groups)
-    console.log('[PhaseTester] 切组结果 squads=',
-      squads.map(s => ({group: s.group, captain: s.captain, members: s.members})))
 
     // 进度面板: 各 instance 实时 elapsed
     const elapsedByTgt: Record<number, number> = {}
@@ -285,11 +313,17 @@ export function PhaseTester() {
       phase: string,
       role: 'captain' | 'member',
       scheme?: string,
+      expectedIdForP5?: string,
     ): Promise<RunOut> => {
       const meta = RUNNER_PHASES.find((p) => p.key === phase)
       if (!meta) {
         const r: RunOut = { phase, phase_name: `#${tgt} ${phase}`, ok: false, error: '未知 phase' }
         addPhaseResult(r); failCount++; return r
+      }
+      // 跑下一个 phase 前先检查是否已被全局停止 — 跳过整段 (避免被 cancel 后还继续推进 P3a→P3b→P4)
+      if (isCancelled()) {
+        const r: RunOut = { phase, phase_name: `#${tgt} ${meta.name}`, ok: false, error: 'cancelled' }
+        return r
       }
       // 前端立即把 instance 状态切成对应 phase, 监控墙卡片亮起 + MJPEG 开始接流
       setInstanceState(tgt, PHASE_TO_STATE[phase] || 'in_game')
@@ -298,7 +332,7 @@ export function PhaseTester() {
         const data = await runOneTask(phase, tgt, role, (ms) => {
           elapsedByTgt[tgt] = ms
           refreshProgress()
-        }, scheme)
+        }, scheme, isCancelled, expectedIdForP5)
         const r: RunOut = {
           phase,
           phase_name: `#${tgt} ${data.phase_name || meta.name}`,
@@ -326,7 +360,7 @@ export function PhaseTester() {
     // ── 3) 单大组的状态机
     //   per-instance pipeline: P0 → P1 → P2 (不等队友, 队长跑完立即 P3a)
     //   P3a (captain) → P3b (members 等队长 P3a done)
-    //   P4: 按 roleScope='both' 队长 + 队员都跑 (并发, 等齐)
+    //   P4 (captainOnly): 队长选模式 + 选地图 + 准备开打, 队员不跑
     //   P5: 只队长 (captainOnly)
     const ROLE_PHASE_KEYS = new Set(['P3a', 'P3b', 'P4', 'P5'])
     const preSquadPhases = selKeys.filter((k) => !ROLE_PHASE_KEYS.has(k))
@@ -413,7 +447,12 @@ export function PhaseTester() {
         }
       }
 
+      // 必须等所有 preDone IIFE (P0/P1/P2 链) 跑完, 否则 selKeys 没含 ROLE phase 时
+      // p3aPromise=null + p3bPromises=[] → Promise.allSettled([]) 立刻 resolve →
+      // runOneSquad 提前 return → 外层 finally 把 busy=false → UI 显示"完成"但 IIFE 还在跑.
+      // 用户感知: 选 P0+P1+P2 时跑没反馈, 误以为"卡 P0".
       await Promise.allSettled([
+        ...Object.values(preDone),
         ...(p3aPromise ? [p3aPromise] : []),
         ...p3bPromises,
       ])
@@ -423,9 +462,11 @@ export function PhaseTester() {
         await runPhase(sq.captain, 'P4', 'captain')
       }
 
-      // P5: 只队长 (业务约束 + RUNNER_PHASES.captainOnly)
+      // P5: 只队长 (业务约束 + RUNNER_PHASES.captainOnly).
+      // 每个 squad 的队长拿自己 squad 的 expectedId (按 group 字母索引).
       if (selKeys.includes('P5') && sq.captain !== null) {
-        await runPhase(sq.captain, 'P5', 'captain')
+        const eid = expectedIds[sq.group] || ''
+        await runPhase(sq.captain, 'P5', 'captain', undefined, eid)
       }
     }
 
@@ -433,10 +474,22 @@ export function PhaseTester() {
       // ── 4) 跨大组完全并发
       await Promise.allSettled(squads.map(runOneSquad))
     } finally {
-      setPhaseTester({
-        busy: false,
-        progress: `完成: ${okCount} 通过 / ${failCount} 失败`,
-      })
+      // 被全局停止过 → Header 已经 setPhaseTester({busy:false,progress:'已中止',...}); 这里不要再覆盖.
+      if (!isCancelled()) {
+        // 把每个 target 的 state 从最后一个 phase 切成 done (success 颜色), 否则 UI 一直停在最后那个 phase
+        // 上像没动. 已经是 error 的不动 (保留失败状态).
+        const cur = useAppStore.getState().instances
+        for (const idx of targets) {
+          const i = cur[String(idx)]
+          if (i && i.state !== 'error') {
+            updateInstance(String(idx), { state: 'done' })
+          }
+        }
+        setPhaseTester({
+          busy: false,
+          progress: `完成: ${okCount} 通过 / ${failCount} 失败`,
+        })
+      }
     }
   }
 
@@ -651,33 +704,46 @@ export function PhaseTester() {
               {/* CONFIG 行 — ROLE 切换在 chip 内部, 这里没全局 ROLE */}
               <SubHead tag="CONFIG" />
               <div className="flex flex-wrap gap-4 items-end mt-2">
-                {needsId && (
-                  <Field
-                    label="P5 PLAYER ID"
-                    sub={idOk ? '10 位数字' : '⚠ 必须 10 位数字'}
-                    warn={!idOk}
-                  >
-                    <input
-                      type="text"
-                      value={expectedId}
-                      onChange={(e) =>
-                        setPhaseTester({
-                          expectedId: e.target.value
-                            .replace(/\D/g, '')
-                            .slice(0, 10),
-                        })
-                      }
-                      placeholder="1234567890"
-                      className={cn(
-                        'gb-mono w-[150px] px-2.5 py-2 rounded-md outline-none',
-                        'text-[12.5px] tracking-[.06em] border',
-                        idOk
-                          ? 'bg-card border-border'
-                          : 'bg-[#fff5f5] border-[#fca5a5]',
-                      )}
-                    />
+                {needsId && captainGroups.length === 0 && (
+                  <Field label="P5 PLAYER ID" sub="⚠ 没选中任何队长 (P5 只跑队长)" warn>
+                    <span className="text-[11px] text-fainter">
+                      勾一个 captain 实例后输入框才出
+                    </span>
                   </Field>
                 )}
+                {needsId && captainGroups.map((g) => {
+                  const cur = expectedIds[g] || ''
+                  const ok = /^\d{10}$/.test(cur)
+                  return (
+                    <Field
+                      key={g}
+                      label={`大组 ${g} · P5 PLAYER ID`}
+                      sub={ok ? '10 位数字' : '⚠ 必须 10 位数字'}
+                      warn={!ok}
+                    >
+                      <input
+                        type="text"
+                        value={cur}
+                        onChange={(e) =>
+                          setPhaseTester({
+                            expectedIds: {
+                              ...expectedIds,
+                              [g]: e.target.value.replace(/\D/g, '').slice(0, 10),
+                            },
+                          })
+                        }
+                        placeholder="1234567890"
+                        className={cn(
+                          'gb-mono w-[150px] px-2.5 py-2 rounded-md outline-none',
+                          'text-[12.5px] tracking-[.06em] border',
+                          ok
+                            ? 'bg-card border-border'
+                            : 'bg-[#fff5f5] border-[#fca5a5]',
+                        )}
+                      />
+                    </Field>
+                  )
+                })}
 
                 <Field label="ON FAIL">
                   <KeepGoingToggle

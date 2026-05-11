@@ -24,11 +24,57 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 
 logger = logging.getLogger(__name__)
 
 _PATCHED = False
+
+# 同一 InferenceSession 多线程并发 run 在某些 EP (DML 共享 D3D12 / CPU 混用) 上会
+# 在 C 层段错 — faulthandler 能 dump 出栈, Python 没 traceback. 实测崩点:
+#   onnxruntime_inference_collection.py:321 → _safe_run → yolo_dismisser._infer
+#   3 instance 并发跑 P2 perception → ThreadPoolExecutor 同时进 session.run → SIGSEGV
+# 修复: 每个 session 挂一把 threading.Lock, 同 session 的 run 串行执行, 跨 session 仍并发.
+# Lock 直接挂 session 实例 (不能 weakref _thread.lock), 不阻止 session GC.
+_SESS_LOCK_ATTR = "_gb_run_lock"
+_SESS_LOCKS_GUARD = threading.Lock()
+
+# 2026-05-10 新增: 全局跨-session GPU lock. 只锁 GPU EP (DML/CUDA), CPU EP 不锁.
+# 触发: yolo_dismisser v2-9 每实例 1 个 session, 6 实例并发 6 个 DML session
+# 共享同一 D3D12 device, run() 时 device 状态 race → access violation.
+# 实测崩点 (2026-05-10): 6 实例并发 + 数据/档案页拉缩略图制造 IO 抖动 → 必崩.
+# Per-session lock 拦不住, 必须跨 session lock.
+# 副作用: GPU YOLO 推理变成串行 (单次 ~30ms * 6 实例 = ~180ms/轮), 业务 1-2 Hz 够用.
+_GPU_RUN_LOCK = threading.Lock()
+_GPU_PROVIDERS = {"DmlExecutionProvider", "CUDAExecutionProvider"}
+
+
+def _lock_for(session) -> threading.Lock:
+    lk = getattr(session, _SESS_LOCK_ATTR, None)
+    if lk is None:
+        with _SESS_LOCKS_GUARD:
+            lk = getattr(session, _SESS_LOCK_ATTR, None)
+            if lk is None:
+                lk = threading.Lock()
+                try:
+                    setattr(session, _SESS_LOCK_ATTR, lk)
+                except (AttributeError, TypeError):
+                    # InferenceSession 是 pybind 类, 个别版本禁止动态属性 — 退到 dict
+                    _FALLBACK_LOCKS[id(session)] = lk
+    return lk
+
+
+_FALLBACK_LOCKS: "dict[int, threading.Lock]" = {}
+
+
+class _NullCtx:
+    """空 context manager — CPU EP 跳过 GPU lock 时用"""
+    def __enter__(self): return None
+    def __exit__(self, *a): return False
+
+
+_NULL_CTX = _NullCtx()
 
 
 def apply() -> None:
@@ -57,27 +103,43 @@ def apply() -> None:
         _orig_run = ort.InferenceSession.run
 
         def _safe_run(self, output_names, input_feed, run_options=None):
-            try:
-                return _orig_run(self, output_names, input_feed, run_options)
-            except UnicodeDecodeError as e:
-                # C++ 端抛了异常或写了诊断文本, 字符串是 GBK, pybind 解码炸.
-                # 真因看不到, 但多数是瞬时驱动毛刺 → 重试 1 次.
-                logger.warning(
-                    f"[ort] UnicodeDecodeError (C++ msg GBK encoded): {e}; 重试 1 次"
-                )
-                time.sleep(0.03)
+            # 1) 同 session 串行 (防同 session 多 thread C 层 race)
+            # 2) GPU EP 全局 lock (防跨 session DML/CUDA D3D12/CUDA context race → SIGSEGV)
+            #    用 cached attr 避免每次 run 都查 providers (开销微但累积)
+            providers_cached = getattr(self, "_gb_providers_cached", None)
+            if providers_cached is None:
                 try:
-                    return _orig_run(self, output_names, input_feed, run_options)
-                except UnicodeDecodeError as e2:
-                    # 还是炸 → 抬成普通 RuntimeError, 调用方可以 except + fallback,
-                    # 不再让 UnicodeDecodeError 沿 traceback 上行污染上游.
-                    raise RuntimeError(
-                        f"onnxruntime DML 推理失败 (中文 Windows utf-8 解码 bug): "
-                        f"{e2}. 建议检查 GPU 驱动 / 显存 / 输入图像."
-                    ) from None
+                    providers_cached = set(self.get_providers())
+                except Exception:
+                    providers_cached = set()
+                try:
+                    setattr(self, "_gb_providers_cached", providers_cached)
+                except (AttributeError, TypeError):
+                    pass
+            need_gpu_lock = bool(providers_cached & _GPU_PROVIDERS)
+
+            lk = _lock_for(self)
+            with lk:
+                # 跨 session GPU lock (CPU EP 跳过, 不影响 CPU 并发)
+                gpu_ctx = _GPU_RUN_LOCK if need_gpu_lock else _NULL_CTX
+                with gpu_ctx:
+                    try:
+                        return _orig_run(self, output_names, input_feed, run_options)
+                    except UnicodeDecodeError as e:
+                        logger.warning(
+                            f"[ort] UnicodeDecodeError (C++ msg GBK encoded): {e}; 重试 1 次"
+                        )
+                        time.sleep(0.03)
+                        try:
+                            return _orig_run(self, output_names, input_feed, run_options)
+                        except UnicodeDecodeError as e2:
+                            raise RuntimeError(
+                                f"onnxruntime DML 推理失败 (中文 Windows utf-8 解码 bug): "
+                                f"{e2}. 建议检查 GPU 驱动 / 显存 / 输入图像."
+                            ) from None
 
         ort.InferenceSession.run = _safe_run
-        logger.info("[ort patch] InferenceSession.run 已包 utf-8 容错")
+        logger.debug("[ort patch] InferenceSession.run 已包 utf-8 容错 + per-session lock")
     except Exception as e:
         logger.warning(f"[ort patch] monkey-patch run() 失败 (不致命): {e}")
 

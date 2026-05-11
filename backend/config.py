@@ -42,11 +42,9 @@ class AccountConfig:
     qq: str                    # QQ 号
     nickname: str              # 游戏昵称
     game_id: str               # 游戏内 ID（用于校验）
-    group: str                 # "A" 或 "B"
-    role: str                  # "captain" 或 "member"
+    group: str                 # "A" / "B" / "C" / ...
+    role: str                  # "captain" / "member"
     instance_index: int        # 雷电模拟器实例编号（0-5）
-    # Step 2: per-instance 加速器模式覆盖 ("apk" | "tun"); None=用 settings.accelerator_default_mode
-    accel_mode: Optional[str] = None
 
 
 @dataclass
@@ -64,13 +62,6 @@ class Settings:
     state_timeout: int = 30                        # 通用状态超时（秒）
     screenshot_interval: float = 1.0               # 截图间隔（秒）
     normalize_resolution: list = field(default_factory=lambda: [1280, 720])  # 归一化分辨率
-    # 加速器（FightMaster VPN）目标 proxy 地址。空字符串=保持 vpn-app 内部默认（171.80.4.221）
-    accelerator_proxy_host: str = ""
-    accelerator_proxy_port: int = 9900
-    accelerator_proxy_token: str = ""              # 预留，gameproxy -tokens 鉴权用
-    # Step 2 脱 APK: 加速器模式 全局默认 / 紧急回滚 kill switch
-    accelerator_default_mode: str = "apk"          # "apk" | "tun"; per-account 可覆盖
-    accelerator_master_disable_tun: bool = False   # 紧急回滚: True 强制全部走 apk, 即使 mode=tun
 
 
 class ConfigManager:
@@ -100,20 +91,14 @@ class ConfigManager:
             "state_timeout": self.settings.state_timeout,
             "screenshot_interval": self.settings.screenshot_interval,
             "normalize_resolution": self.settings.normalize_resolution,
-            "accelerator_proxy_host": self.settings.accelerator_proxy_host,
-            "accelerator_proxy_port": self.settings.accelerator_proxy_port,
-            "accelerator_proxy_token": self.settings.accelerator_proxy_token,
-            "accelerator_default_mode": self.settings.accelerator_default_mode,
-            "accelerator_master_disable_tun": self.settings.accelerator_master_disable_tun,
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def save_accounts(self):
         """保存账号配置到文件"""
-        data = []
-        for acc in self.accounts:
-            item = {
+        data = [
+            {
                 "qq": acc.qq,
                 "nickname": acc.nickname,
                 "game_id": acc.game_id,
@@ -121,10 +106,8 @@ class ConfigManager:
                 "role": acc.role,
                 "instance_index": acc.instance_index,
             }
-            # accel_mode 只在显式设置时写出 (None=用全局 default, 不污染 JSON)
-            if acc.accel_mode is not None:
-                item["accel_mode"] = acc.accel_mode
-            data.append(item)
+            for acc in self.accounts
+        ]
         with open(ACCOUNTS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 

@@ -83,6 +83,7 @@ export function getDemoInstances(): Record<string, Instance> {
 export function getDemoAccounts(): AccountAssignment[] {
   return TEAM_LAYOUT.map(([team, captain], i) => ({
     index: i,
+    qq: '',
     name: NICKS[i],
     running: true,
     adbSerial: `emulator-${5554 + i * 2}`,

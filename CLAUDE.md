@@ -28,6 +28,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## 🔴 极简代码原则 (2026-05-10 用户硬性指令)
+
+**写代码时优先选最简方案, 但必要的复杂度要保留** (不是无脑删代码, 是减少不必要的复杂度).
+
+### 写代码前自问
+
+1. **能用 10 行解决吗?** — 复杂方案前先想最简实现. 真简单方案不够再加层
+2. **新增的复杂度有人受益吗?** — 只为"未来扩展" / "可配置" / "更优雅" 加的, 砍掉
+3. **跟现有架构能不能合并?** — 加新组件前先看现有的能否扩展
+4. **我加这个改动后, 项目总代码量增加多少?** — 200 行新文件 vs 改 5 行旧文件, 后者优先
+5. **必要的复杂度认得清** — 业务真需要的 (memory 学习 / decision_log / phase 切换) **保留**; 我自己加的"防护层" (motion gate v1 / race short-circuit / ...) 谨慎
+
+### 反例 (写代码前回想)
+
+❌ 加新组件 600 行 (Vision Daemon 单文件)
+✅ 改老组件 5 行 (业务 screencap 改读 daemon cache)
+
+❌ 多层 fallback + 多个 env flag (memory short-circuit + race + LRU 阈值 + ...)
+✅ 直接砍掉一路 gather, 1 行
+
+### 触发条件: 在以下情况停下来反思
+- 一次改动 > 200 行 → 重新设计
+- 一个 if-else 嵌套 > 3 层 → 重新设计
+- 一个文件 > 800 行 → 考虑拆分
+- 加 env flag 后没人开过 → 删
+- 用户问"为什么这么慢" 而你给的答案是"改了一堆参数" → 你做错方向了, 真问题在结构
+
+### 为什么 (2026-05-10 教训)
+
+用户简单脚本: 10 行 (`screencap → find_close_x → tap`), 200ms 一轮。
+我们项目: 10000+ 行 (phase machine + 5 路 perception + memory_l1 + decision_log + vision_daemon + ...), 2900ms 一轮, 13x 慢。
+
+每次"我改了 X 优化", 实际是**给已经过度复杂的代码再加一层**, 用户感受没变。真问题是底层做了太多业务不需要的事 (decision.json 写截图 / 5 tier 记录 / phash verify / quad lobby 检测 ...).
+
+### 反例 (写代码前回想)
+
+❌ "我加个 Vision Daemon 单文件 600 行, 后台 8 fps 跑 yolo, 业务读 cache"
+✅ "我把业务每 round screencap 改成读 daemon 已经抓的 frame, 1 行"
+
+❌ "memory short-circuit + race 模式 + 50ms timeout + LRU 命中检测..."
+✅ "把 memory 从 5 路 gather 删掉, 1 行"
+
+❌ "P1 motion gate + dHash 8x8 grid + hamming dist threshold + cache hit/miss 计数 ..."
+✅ "P1 直接读 daemon cache 见 popup → 退出, 不行就 sleep 0.2s 再来"
+
+### 触发条件: 在以下情况停下来反思代码量
+- 一个新功能 > 200 行 → 重新设计
+- 一个 if-else 嵌套 > 3 层 → 重新设计
+- 一个文件 > 500 行 → 拆分
+- 项目总代码 > 5000 行而**功能** < 简单脚本能做的 → 是不是过度设计了?
+
+---
+
 ## ⚠️ 写代码前必读：项目知识库
 
 **本项目的结构化知识在 ProjectHub Vault**（不只在这个仓库里）：

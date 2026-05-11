@@ -8,6 +8,7 @@ SingleInstanceRunner — 单实例自动化运行器
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -87,7 +88,6 @@ class Phase(str, Enum):
 # ====================================================================
 
 GAME_PACKAGE = "com.tencent.tmgp.pubgmhd"
-ACCELERATOR_PACKAGE = "com.fightmaster.vpn"
 
 
 class SingleInstanceRunner:
@@ -106,14 +106,12 @@ class SingleInstanceRunner:
         target_map: str = "狙击团竞",
         on_phase_change=None,  # 回调: (Phase) -> None
         log_dir: str = "",     # 实例日志目录（空字符串=禁用调试日志）
-        account=None,          # Step 2: 可选 AccountConfig, per-instance accel_mode
     ):
         self.adb = adb
         self.matcher = matcher
         self.role = role
         self.target_mode = target_mode
         self.target_map = target_map
-        self.account = account  # Step 2: 该 instance 对应的 AccountConfig (含 accel_mode)
         self._phase = Phase.INIT
         self._on_phase_change = on_phase_change
         self.ocr_dismisser = OcrDismisser(max_rounds=25)
@@ -165,7 +163,7 @@ class SingleInstanceRunner:
             instance_idx=-1,
             account=None,
             settings=None,
-            role="leader" if self.role == "captain" else "follower",
+            role=self.role,  # captain / member 直接传, 不再翻译为 leader/follower
         )
         return self._v3_ctx
 
@@ -190,8 +188,14 @@ class SingleInstanceRunner:
             logger.debug(f"[mem_remember {target_name}] err: {e}")
 
     async def _try_memory_first(self, shot, target_name: str, decision, target_class_zh: str = "") -> bool:
-        """memory 快速路径: 命中即 tap + remember + 写 decision tier. 返回 True=命中.
-        各 sub-decision 在 OCR/template 之前调一下, 命中则跳过 OCR 省 1-2s."""
+        """memory 快速路径: 命中即 tap + 写 decision tier. 返回 True=命中.
+        各 sub-decision 在 OCR/template 之前调一下, 命中则跳过 OCR 省 1-2s.
+
+        注意: 召回不再自动 remember(success=True). 原因: entry 的存在本身已经过
+        5 次蓄水池验证, 召回成功再 success++ 是无信息的自我反馈, 会让错记忆 (e.g.
+        anchor 假命中) 越用越自信永远跌不下置信度阈值 → 错召回循环不能自愈.
+        success_count 只由 OCR/template 路径独立确认时才涨.
+        """
         from .decision_log import TierRecord
         mem = self._mem_query(shot, target_name)
         if mem is None:
@@ -209,8 +213,6 @@ class SingleInstanceRunner:
             except Exception:
                 pass
         await self.adb.tap(mem.cx, mem.cy)
-        # 成功 tap → 累计学习 (蓄水池里)
-        self._mem_remember(shot, target_name, mem.cx, mem.cy, success=True)
         return True
 
     async def _run_v3_phase(self, handler, instance_idx: int = -1) -> bool:
@@ -265,10 +267,35 @@ class SingleInstanceRunner:
                     await handler.exit(ctx, PhaseResult.FAIL)
                     return False
             ctx.phase_round = rnd + 1
-            try:
-                shot = await self.adb.screenshot()
-            except Exception as _e:
-                shot = None
+            # PERF tracing: round 内每 stage 写到独立文件, 不依赖 backend.log
+            _round_t0 = time.perf_counter()
+            _round_perf = {}
+            def _mark(name):
+                _round_perf[name] = round((time.perf_counter() - _round_t0) * 1000, 1)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # screenshot 优先读 daemon cache (2026-05-10 真根因修复):
+            # 之前每 round 都自己 adb.screenshot() 200-400ms, 而 daemon 后台 8fps
+            # 抓的是同一个 ldopengl frame, 业务等于跑了 2 次 capture (业务 + daemon).
+            # 改: 业务读 daemon cache (1ms), miss 才 fallback 自己截图.
+            # 一键回退: env GAMEBOT_BIZ_USE_DAEMON_FRAME=0
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            shot = None
+            inst_idx_for_daemon = getattr(ctx, 'instance_idx', None)
+            if (os.environ.get("GAMEBOT_BIZ_USE_DAEMON_FRAME", "1") == "1"
+                    and inst_idx_for_daemon is not None):
+                try:
+                    from .vision_daemon import VisionDaemon
+                    slot = VisionDaemon.get().snapshot(inst_idx_for_daemon, max_age_ms=300)
+                    if slot is not None and slot.frame is not None:
+                        shot = slot.frame  # daemon 已 .copy()
+                except Exception:
+                    pass
+            if shot is None:
+                try:
+                    shot = await self.adb.screenshot()
+                except Exception as _e:
+                    shot = None
+            _mark("screenshot")
             ctx.current_shot = shot
             if shot is None:
                 await asyncio.sleep(0.3)
@@ -283,20 +310,21 @@ class SingleInstanceRunner:
                 ctx.current_phash = phash_str
             except Exception:
                 pass
+            _mark("phash")
             decision = None
             try:
-                # new_decision 同步 mkdir, Windows 上 6 实例并发 mkdir 累积 ~100-300ms
-                # 卡 main loop. 包 to_thread 让 mkdir 跑在线程里.
-                decision = await asyncio.to_thread(
-                    recorder.new_decision,
+                # 同步调 (mkdir < 1ms, 不该走 default executor 跟 cv2/yolo/ADB 抢 worker;
+                # 实测之前 to_thread 排队让这步从 1ms 飙到 100-2500ms).
+                decision = recorder.new_decision(
                     ctx.instance_idx,
                     handler.name,
                     ctx.phase_round,
                 )
-                decision.set_input(shot, phash_str, q=70)  # 内部已用 _async_imwrite
+                decision.set_input(shot, phash_str, q=70)
                 ctx.current_decision = decision
             except Exception as e:
                 logger.debug(f"[{handler.name}] new_decision err: {e}")
+            _mark("new_decision")
 
             handle_exc = None
             step = None
@@ -305,24 +333,33 @@ class SingleInstanceRunner:
             except Exception as e:
                 handle_exc = e
                 logger.warning(f"[{handler.name}/R{rnd+1}] handle_frame 异常: {e}", exc_info=True)
+            _mark("handle_frame")
+            # 把 perceive 内部拆解写进 round_perf.log (定位 perceive 1500ms 慢点)
+            _last_prc = getattr(ctx, "_last_perceive_perf", None)
+            if _last_prc:
+                for _k, _v in _last_prc.items():
+                    _round_perf[f"prc_{_k}"] = round(_v, 1)
+                ctx._last_perceive_perf = None
 
-            # 实施 action (set_tap/verify 在 ActionExecutor 里写 ctx.current_decision)
             if step is not None and step.action is not None:
                 try:
                     await ActionExecutor.apply(ctx, step.action)
                 except Exception as e:
                     logger.warning(f"[{handler.name}] ActionExecutor 异常: {e}")
+            _mark("action_exec")
 
             # finalize — 序列化 dict + json.dump 已 thread-pool, 但 _serialize_tier
             # + record_summary + _notify_listeners 仍在调用方线程执行. 包 to_thread.
             try:
                 if decision is not None:
+                    # finalize 内部 cv2.imwrite 已用 dlog_pool 异步, 主体只是 dict serialize + json.dump,
+                    # 同步执行 < 5ms, 不该走 default executor 跟业务 to_thread 抢 worker.
                     if step is not None:
                         outcome = step.outcome_hint or _result_to_outcome_str(step.result)
-                        await asyncio.to_thread(decision.finalize, outcome, step.note or "")
+                        decision.finalize(outcome, step.note or "")
                     else:
-                        await asyncio.to_thread(decision.finalize, "phase_exception",
-                                                repr(handle_exc) if handle_exc else "")
+                        decision.finalize("phase_exception",
+                                          repr(handle_exc) if handle_exc else "")
             except Exception as _e:
                 pass
             ctx.current_decision = None
@@ -344,7 +381,39 @@ class SingleInstanceRunner:
                 await handler.exit(ctx, step.result)
                 raise V3GameRestartRequested(handler.name)
             # 分段 sleep + cancel check (用户点'停止'后最长延迟 200ms)
-            sleep_s = max(0.0, step.wait_seconds) if step.result == PhaseResult.WAIT else handler.round_interval_s
+            # round_interval 优先读 runtime_profile (mode 切换生效), fallback 到 phase class attr
+            if step.result == PhaseResult.WAIT:
+                sleep_s = max(0.0, step.wait_seconds)
+            else:
+                try:
+                    from .runtime_profile import resolve_round_interval
+                    sleep_s = resolve_round_interval(handler.name, fallback=handler.round_interval_s)
+                except Exception:
+                    sleep_s = handler.round_interval_s
+            _mark("finalize")
+            # round perf 写文件 (轻量, 但 6 实例并发 file lock 竞争, 改异步写)
+            try:
+                _round_perf["sleep_s"] = round(sleep_s * 1000, 0)
+                _round_perf["round_total_ms"] = round((time.perf_counter() - _round_t0) * 1000, 1)
+                _perf_line = (
+                    f"[ROUND/{handler.name}/inst{ctx.instance_idx}/R{rnd+1}] "
+                    + " ".join(f"{k}={v}" for k, v in _round_perf.items())
+                    + "\n"
+                )
+                _perf_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                    "round_perf.log"
+                )
+                # 用 to_thread 异步写, 不阻塞 round loop
+                def _write_perf():
+                    try:
+                        with open(_perf_path, "a", encoding="utf-8") as _pf:
+                            _pf.write(_perf_line)
+                    except Exception:
+                        pass
+                asyncio.create_task(asyncio.to_thread(_write_perf))
+            except Exception:
+                pass
             if await _interruptible_sleep(sleep_s):
                 logger.info(f"[{handler.name}] 取消信号 (sleep 期间) → 中止 (R{rnd})")
                 await handler.exit(ctx, PhaseResult.FAIL)
@@ -366,246 +435,6 @@ class SingleInstanceRunner:
             self._on_phase_change(value)
 
     # ================================================================
-    # 阶段 0: 加速器
-    # ================================================================
-
-    async def _check_vpn_connected(self) -> bool:
-        """4 信号联合判定 VPN 真实连接状态（无 OCR，~200-400ms）
-
-        全部必须通过：
-        1. FightMaster 进程在跑（pgrep / ps）
-        2. VpnService 在 dumpsys 里
-        3. tun0 接口存在且 UP
-        4. 默认路由经过 tun0（流量真的走加速器）
-
-        修掉旧版的两个鸡肋：
-          - 旧：只查 VpnService 不查进程 → 进程没了 dumpsys 还可能误报
-          - 旧：要求 RX > 0 → 新建连接合法地 RX=0 时被误判失败
-        """
-        loop = asyncio.get_event_loop()
-        raw_adb = getattr(self.adb, '_adb', self.adb)
-
-        async def _shell(cmd: str) -> str:
-            return await loop.run_in_executor(None, raw_adb._cmd, "shell", cmd)
-
-        # 信号 1: FightMaster 进程在跑
-        # pgrep 在某些 Android 版本可能 missing → ps + grep 兜底
-        proc_out = await _shell(f"pgrep -f {ACCELERATOR_PACKAGE} 2>/dev/null")
-        if not proc_out.strip():
-            ps_out = await _shell(f"ps -A 2>/dev/null | grep {ACCELERATOR_PACKAGE}")
-            if ACCELERATOR_PACKAGE not in ps_out:
-                self.dbg.log_vpn(False, f"{ACCELERATOR_PACKAGE} 进程不存在")
-                return False
-
-        # 信号 2: VpnService 在 dumpsys 里
-        svc_out = await _shell(f"dumpsys activity services {ACCELERATOR_PACKAGE}")
-        if "FightMasterVpnService" not in svc_out:
-            self.dbg.log_vpn(False, "VpnService 未运行")
-            return False
-
-        # 信号 3: tun0 UP（ip addr 优先，ifconfig 兜底）
-        tun_out = await _shell("ip addr show tun0 2>/dev/null")
-        tun_up = "tun0" in tun_out and ("state UP" in tun_out or "UP," in tun_out)
-        if not tun_up:
-            tun_out2 = await _shell("ifconfig tun0 2>/dev/null")
-            if "UP" not in tun_out2:
-                self.dbg.log_vpn(False, "tun0 不存在或未 UP")
-                return False
-
-        # 信号 4: 默认路由经过 tun0（确保流量真的走加速器）
-        route_out = await _shell("ip route 2>/dev/null")
-        # 默认路由形如 "default via 10.0.0.1 dev tun0" 或 "0.0.0.0/0 dev tun0"
-        default_lines = [ln for ln in route_out.splitlines() if "default" in ln or "0.0.0.0/0" in ln]
-        if default_lines and not any("tun0" in ln for ln in default_lines):
-            self.dbg.log_vpn(False, f"默认路由不经过 tun0：{default_lines[0][:80]}")
-            return False
-
-        self.dbg.log_vpn(True, "4 信号全过 ✓")
-        return True
-
-    async def _wait_vpn_connected(self, timeout: int = 15) -> bool:
-        """轮询等待 VPN 连接建立并验证通过"""
-        for _ in range(timeout * 2):  # 每 0.5 秒检查一次
-            await asyncio.sleep(0.5)
-            if await self._check_vpn_connected():
-                return True
-        return False
-
-    def _resolve_accel_mode(self) -> str:
-        """决议当前 instance 的加速器模式: "apk" | "tun".
-
-        优先级 (高 → 低):
-          1. settings.accelerator_master_disable_tun=True  → 强制 "apk" (紧急回滚)
-          2. self.account.accel_mode (per-instance override)
-          3. settings.accelerator_default_mode (全局默认)
-        """
-        try:
-            from ..config import config as _cfg
-            if getattr(_cfg.settings, "accelerator_master_disable_tun", False):
-                return "apk"
-            if self.account is not None and getattr(self.account, "accel_mode", None):
-                return self.account.accel_mode
-            return getattr(_cfg.settings, "accelerator_default_mode", "apk")
-        except Exception:
-            return "apk"  # fail-safe: 任何异常退回 apk
-
-    async def _start_vpn(self):
-        """启动加速器 (按 accel_mode 分支).
-
-        mode=apk (默认): 通过 ADB 广播启动 FightMaster VPN APK; 若 settings.
-            accelerator_proxy_host 非空, 附带 --es proxy_host / --ei proxy_port.
-        mode=tun (Step 2 脱 APK): 跳过 vpn-app 广播; 流量走宿主机 gameproxy.exe
-            的 wintun TUN inbound (Round 4 接通). 模拟器内不需要任何 VPN 进程.
-        """
-        mode = self._resolve_accel_mode()
-        if mode == "tun":
-            logger.info("[阶段0] accel_mode=tun, 跳过 APK 广播 (流量走宿主机 wintun)")
-            return
-
-        logger.info("[阶段0] accel_mode=apk, 启动 FightMaster VPN")
-        loop = asyncio.get_event_loop()
-        raw_adb = getattr(self.adb, '_adb', self.adb)
-
-        extras = ""
-        try:
-            from ..config import config as _cfg
-            host = getattr(_cfg.settings, "accelerator_proxy_host", "").strip()
-            if host:
-                import shlex
-                port = int(getattr(_cfg.settings, "accelerator_proxy_port", 9900))
-                extras = f" --es proxy_host {shlex.quote(host)} --ei proxy_port {port}"
-        except Exception as e:
-            logger.warning(f"[阶段0] 读 accelerator_proxy_host 失败, 走默认: {e}")
-
-        await loop.run_in_executor(
-            None, raw_adb._cmd, "shell",
-            "am broadcast -a com.fightmaster.vpn.START "
-            "-n com.fightmaster.vpn/.CommandReceiver" + extras
-        )
-
-    async def _stop_vpn(self):
-        """通过 ADB 广播停止 FightMaster VPN"""
-        loop = asyncio.get_event_loop()
-        raw_adb = getattr(self.adb, '_adb', self.adb)
-        await loop.run_in_executor(
-            None, raw_adb._cmd, "shell",
-            "am broadcast -a com.fightmaster.vpn.STOP "
-            "-n com.fightmaster.vpn/.CommandReceiver"
-        )
-
-    async def _start_vpn_via_ui(self):
-        """通过拉起 FightMaster UI + OCR 点击连接按钮启动 VPN
-
-        广播 establish() 可能因未经 UI 初始化而失败，
-        从界面点击则走完整流程（prepare → consent → establish）
-        """
-        loop = asyncio.get_event_loop()
-        raw_adb = getattr(self.adb, '_adb', self.adb)
-
-        # 1. 拉起 FightMaster 主界面
-        logger.info("[阶段0] 拉起 FightMaster 界面")
-        await loop.run_in_executor(
-            None, raw_adb._cmd, "shell",
-            f"am start -n {ACCELERATOR_PACKAGE}/.MainActivity"
-        )
-        await asyncio.sleep(2)
-
-        # 2. 截图 + OCR
-        shot = await raw_adb.screenshot()
-        if shot is None:
-            logger.error("[阶段0] UI 模式截图失败")
-            return
-
-        # OCR 走 _ocr_all_async → OcrPool (worker 进程并行); pool 故障/禁用时 fallback ThreadPool.
-        hits = await self.ocr_dismisser._ocr_all_async(shot)
-        all_text = " ".join(h.text for h in hits)
-        logger.info(f"[阶段0] FightMaster UI OCR: {all_text[:100]}")
-
-        # 如果已连接，直接返回
-        if "已连接" in all_text:
-            logger.info("[阶段0] FightMaster 界面显示已连接 ✓")
-            await loop.run_in_executor(
-                None, raw_adb._cmd, "shell", "input keyevent KEYCODE_HOME"
-            )
-            return
-
-        # 3. OCR 找连接按钮（文字可能是 "连 接" "连接"）
-        connect_hit = None
-        for h in hits:
-            clean = h.text.replace(" ", "")
-            if clean in ("连接", "断开"):
-                connect_hit = h
-                break
-
-        if connect_hit is None:
-            logger.warning("[阶段0] OCR 未找到连接按钮")
-            return
-
-        if "断" in connect_hit.text:
-            # 按钮显示"断开"说明已连接
-            logger.info("[阶段0] 按钮显示断开，VPN 已连接 ✓")
-            await loop.run_in_executor(
-                None, raw_adb._cmd, "shell", "input keyevent KEYCODE_HOME"
-            )
-            return
-
-        # 4. 点击连接
-        logger.info(f"[阶段0] OCR 点击连接按钮 ({connect_hit.cx},{connect_hit.cy})")
-        await raw_adb.tap(connect_hit.cx, connect_hit.cy)
-        await asyncio.sleep(1.5)
-
-        # 5. 处理可能的 VPN 权限弹窗（仅首次安装时出现）
-        await self._dismiss_vpn_consent()
-
-        # 6. 回到桌面
-        await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "input keyevent KEYCODE_HOME"
-        )
-
-    async def _dismiss_vpn_consent(self):
-        """自动处理 Android VPN 权限弹窗（仅首次安装时出现）
-
-        弹窗来自 com.android.vpndialogs，包含"确定"按钮。
-        用 OCR 找到"确定"并点击，找不到则 ENTER 键兜底。
-        """
-        loop = asyncio.get_event_loop()
-        raw_adb = getattr(self.adb, '_adb', self.adb)
-
-        # 检查前台是否是 VPN 权限弹窗
-        output = await loop.run_in_executor(
-            None, raw_adb._cmd, "shell",
-            "dumpsys activity activities | grep mResumedActivity"
-        )
-        if "vpndialogs" not in output.lower():
-            return  # 无弹窗
-
-        logger.info("[阶段0] 检测到 VPN 权限弹窗，OCR 定位确定按钮")
-
-        shot = await raw_adb.screenshot()
-        if shot is None:
-            # 截图失败，用 ENTER 键兜底
-            await loop.run_in_executor(
-                None, raw_adb._cmd, "shell", "input keyevent KEYCODE_ENTER"
-            )
-            return
-
-        # OCR 走 _ocr_all_async → OcrPool (worker 进程并行); pool 故障/禁用时 fallback ThreadPool.
-        hits = await self.ocr_dismisser._ocr_all_async(shot)
-        for h in hits:
-            if "确定" in h.text or h.text.upper() == "OK":
-                logger.info(f"[阶段0] 点击 VPN 授权确定 ({h.cx},{h.cy})")
-                await raw_adb.tap(h.cx, h.cy)
-                await asyncio.sleep(1)
-                return
-
-        # OCR 没找到，ENTER 键兜底
-        logger.warning("[阶段0] OCR 未找到确定按钮，ENTER 键兜底")
-        await loop.run_in_executor(
-            None, raw_adb._cmd, "shell", "input keyevent KEYCODE_ENTER"
-        )
-        await asyncio.sleep(1)
-
-    # ================================================================
     # 阶段 1: 启动游戏
     # ================================================================
 
@@ -621,7 +450,8 @@ class SingleInstanceRunner:
         inst_idx = getattr(self._v3_ctx, "instance_idx", 0) if self._v3_ctx else 0
 
         def _slog(msg: str):
-            logger.info(msg)
+            # P4 stage log: info 级太吵, 改 debug; 还是会进 self._stage_log 落决策档案 note
+            logger.debug(msg)
             self._stage_log.append(msg)
 
         def _make_d(sub_name: str, shot_in=None):
@@ -1299,7 +1129,7 @@ class SingleInstanceRunner:
         for attempt in range(3):
             _pt_shot = _tm.perf_counter()
             shot = await self.adb.screenshot()
-            logger.info(f"[P3a-1 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
+            logger.debug(f"[P3a-1 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
             if shot is None:
                 await asyncio.sleep(0.5)
                 continue
@@ -1311,7 +1141,7 @@ class SingleInstanceRunner:
             self.dbg.log_screenshot(shot, f"attempt{attempt}")
             _pt_ocr = _tm.perf_counter()
             left_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "team_btn_left")
-            logger.info(f"[P3a-1 PERF] attempt {attempt+1}: OCR team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
+            logger.debug(f"[P3a-1 PERF] attempt {attempt+1}: OCR team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_left_hits = left_hits
             self.dbg.log_ocr(left_hits, "ROI=team_btn_left")
             # ② OCR 主匹配: 文字含 "组" 或 "队" 都算
@@ -1347,7 +1177,7 @@ class SingleInstanceRunner:
             if clicked:
                 break
             await asyncio.sleep(0.5)
-        logger.info(f"[P3a-1 PERF] 总 (找组队按钮): {(_tm.perf_counter()-_p3a_t0)*1000:.0f}ms, 尝试 {attempt+1} 次")
+        logger.debug(f"[P3a-1 PERF] 总 (找组队按钮): {(_tm.perf_counter()-_p3a_t0)*1000:.0f}ms, 尝试 {attempt+1} 次")
 
         if d1:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
@@ -1362,7 +1192,7 @@ class SingleInstanceRunner:
             d1.add_tier(tier1)
             d1.save_ocr_roi(tier1, shot, roi=_roi_pixels("team_btn_left", shot),
                             hits=_hits_d)
-            logger.info(f"[P3a-1 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
+            logger.debug(f"[P3a-1 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
             d1.finalize(outcome="opened" if clicked else "failed",
                         note="点开组队界面" if clicked else "找不到组队按钮")
         if not clicked:
@@ -1375,10 +1205,10 @@ class SingleInstanceRunner:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         _pt_sleep = _tm.perf_counter()
         await asyncio.sleep(0.3)  # 等面板动画 (从 0.8 改 0.3, 拍过渡帧也有 retry 兜底)
-        logger.info(f"[P3a-2 PERF] 等面板动画 sleep: {(_tm.perf_counter()-_pt_sleep)*1000:.0f}ms")
+        logger.debug(f"[P3a-2 PERF] 等面板动画 sleep: {(_tm.perf_counter()-_pt_sleep)*1000:.0f}ms")
         _pt_shot = _tm.perf_counter()
         shot_d2 = await self.adb.screenshot()
-        logger.info(f"[P3a-2 PERF] 入口 screenshot: {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
+        logger.debug(f"[P3a-2 PERF] 入口 screenshot: {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
         d2 = _make_d("2-tab", shot_in=shot_d2)
         _p3a2_t0 = _tm.perf_counter()
         tab_clicked = False
@@ -1386,7 +1216,7 @@ class SingleInstanceRunner:
         for attempt in range(5):
             _pt_shot = _tm.perf_counter()
             shot = await self.adb.screenshot() if attempt > 0 else shot_d2
-            logger.info(f"[P3a-2 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
+            logger.debug(f"[P3a-2 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
@@ -1400,7 +1230,7 @@ class SingleInstanceRunner:
             # ② OCR 底部"组队码" tab
             _pt_ocr = _tm.perf_counter()
             bottom_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "team_code_tab_bottom")
-            logger.info(f"[P3a-2 PERF] attempt {attempt+1}: OCR team_code_tab_bottom {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(bottom_hits)} 文字)")
+            logger.debug(f"[P3a-2 PERF] attempt {attempt+1}: OCR team_code_tab_bottom {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(bottom_hits)} 文字)")
             last_bottom_hits = bottom_hits
             for h in bottom_hits:
                 if OcrDismisser.fuzzy_match(h.text, "组队码"):
@@ -1416,7 +1246,7 @@ class SingleInstanceRunner:
             if tab_clicked:
                 break
             await asyncio.sleep(0.3)
-        logger.info(f"[P3a-2 PERF] 总 (loop): {(_tm.perf_counter()-_p3a2_t0)*1000:.0f}ms")
+        logger.debug(f"[P3a-2 PERF] 总 (loop): {(_tm.perf_counter()-_p3a2_t0)*1000:.0f}ms")
 
         if d2:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
@@ -1431,7 +1261,7 @@ class SingleInstanceRunner:
             d2.save_ocr_roi(tier2, shot,
                             roi=_roi_pixels("team_code_tab_bottom", shot),
                             hits=_hits_d)
-            logger.info(f"[P3a-2 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
+            logger.debug(f"[P3a-2 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
             d2.finalize(outcome="tab_switched" if tab_clicked else "failed",
                         note=note)
         if not tab_clicked:
@@ -1451,7 +1281,7 @@ class SingleInstanceRunner:
         for attempt in range(4):
             _pt_shot = _tm.perf_counter()
             shot = await self.adb.screenshot() if attempt > 0 else shot_d3
-            logger.info(f"[P3a-3 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
+            logger.debug(f"[P3a-3 PERF] attempt {attempt+1}: screenshot {(_tm.perf_counter()-_pt_shot)*1000:.0f}ms")
             if shot is None:
                 await asyncio.sleep(0.3)
                 continue
@@ -1463,7 +1293,7 @@ class SingleInstanceRunner:
             # ② OCR
             _pt_ocr = _tm.perf_counter()
             left_hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, "qr_team_btn_left")
-            logger.info(f"[P3a-3 PERF] attempt {attempt+1}: OCR qr_team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
+            logger.debug(f"[P3a-3 PERF] attempt {attempt+1}: OCR qr_team_btn_left {(_tm.perf_counter()-_pt_ocr)*1000:.0f}ms ({len(left_hits)} 文字)")
             last_qr_hits = left_hits
             for h in left_hits:
                 if OcrDismisser.fuzzy_match(h.text, "二维码"):
@@ -1479,7 +1309,7 @@ class SingleInstanceRunner:
             if qr_clicked:
                 break
             await asyncio.sleep(0.3)
-        logger.info(f"[P3a-3 PERF] 总 (找二维码组队): {(_tm.perf_counter()-_p3a3_t0)*1000:.0f}ms")
+        logger.debug(f"[P3a-3 PERF] 总 (找二维码组队): {(_tm.perf_counter()-_p3a3_t0)*1000:.0f}ms")
 
         if d3:
             _hits_d = [_OcrHit(text=h.text, bbox=[h.cx-20, h.cy-10, h.cx+20, h.cy+10],
@@ -1494,7 +1324,7 @@ class SingleInstanceRunner:
             d3.save_ocr_roi(tier3, shot,
                             roi=_roi_pixels("qr_team_btn_left", shot),
                             hits=_hits_d)
-            logger.info(f"[P3a-3 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
+            logger.debug(f"[P3a-3 PERF] add_tier+save_ocr_roi: {(_tm.perf_counter()-_pt_save)*1000:.0f}ms")
             d3.finalize(outcome="qr_opened" if qr_clicked else "failed",
                         note=tier3.note)
         if not qr_clicked:

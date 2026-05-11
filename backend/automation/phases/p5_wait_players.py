@@ -849,8 +849,8 @@ class P5WaitPlayersHandler(PhaseHandler):
             outcome="ocr_done" if got_id else "ocr_no_10digit",
             pre_shot=last_shot)
 
-        # ─── Step 4: 关闭详细面板 ───
-        close_xy = await self._roi_center_xy(ctx, ROI_CLOSE_BTN)
+        # ─── Step 4: 关闭详细面板 (mem-first) ───
+        close_xy = await self._mem_or_roi_center(ctx, "P5-close-btn", ROI_CLOSE_BTN)
         if close_xy is None:
             close_xy = (20, 20)  # 兜底 tap 左上空白
         await self._run_verify_step(
@@ -878,8 +878,8 @@ class P5WaitPlayersHandler(PhaseHandler):
         # ─── Step 2: OCR 找 "移出队伍" 按钮 ───
         kick_xy = await self._find_kick_button(ctx)
         if kick_xy is None:
-            # 非好友默认状态: 先 tap "更多" 展开菜单
-            more_xy = await self._roi_center_xy(ctx, ROI_MORE_BTN)
+            # 非好友默认状态: 先 tap "更多" 展开菜单 (mem-first)
+            more_xy = await self._mem_or_roi_center(ctx, "P5-more-btn", ROI_MORE_BTN)
             if more_xy is None:
                 await self._run_verify_step(
                     ctx, base_round + 2, "KickStep2·find_kick",
@@ -914,8 +914,8 @@ class P5WaitPlayersHandler(PhaseHandler):
     async def _find_info_button(self, ctx: RunContext) -> Optional[tuple[int, int]]:
         """在 player_card_info_btn ROI 内 OCR 找 '信息' 文字, 返回那个 hit 的 (cx, cy).
 
-        正确做法: ROI 是搜索范围, OCR 找到"信息"文字 → 返回它的精确中心,
-        不是直接 tap ROI 中心 (会偏到旁边的 赠送礼物/移出队伍/转让队长 上).
+        Memory-first: 先查 phash 记忆库 ("P5-info-btn"), 命中跳 OCR 直接返坐标.
+        OCR 走通后写回 mem, 下次小卡片画面 phash 接近就秒命中.
         """
         runner = ctx.runner
         from ..roi_config import all_names as _all_roi
@@ -925,6 +925,10 @@ class P5WaitPlayersHandler(PhaseHandler):
         shot = await runner.adb.screenshot()
         if shot is None:
             return None
+        # mem first — 小卡片画面 phash 命中过就跳 OCR
+        mem_hit = runner._mem_query(shot, "P5-info-btn", max_dist=5)
+        if mem_hit is not None:
+            return (mem_hit.cx, mem_hit.cy)
         ocr = runner.ocr_dismisser
         try:
             hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, ROI_INFO_BTN)
@@ -935,11 +939,16 @@ class P5WaitPlayersHandler(PhaseHandler):
         for h in hits:
             t = (getattr(h, "text", "") or "").strip()
             if t == "信息" or "信息" in t and "礼物" not in t:
+                runner._mem_remember(shot, "P5-info-btn", h.cx, h.cy, success=True)
                 return (h.cx, h.cy)
         return None
 
     async def _find_kick_button(self, ctx: RunContext) -> Optional[tuple[int, int]]:
-        """OCR player_card_kick_area 区域找含 '移出'+'队伍' 的 hit, 返回 (cx, cy)."""
+        """OCR player_card_kick_area 区域找含 '移出'+'队伍' 的 hit, 返回 (cx, cy).
+
+        Memory-first ("P5-kick-btn"): "更多" 弹出菜单后, '移出队伍' 在菜单内
+        位置稳定, phash 命中跳 OCR.
+        """
         runner = ctx.runner
         from ..roi_config import all_names as _all_roi
         if ROI_KICK_AREA not in set(_all_roi()):
@@ -948,6 +957,9 @@ class P5WaitPlayersHandler(PhaseHandler):
         shot = await runner.adb.screenshot()
         if shot is None:
             return None
+        mem_hit = runner._mem_query(shot, "P5-kick-btn", max_dist=5)
+        if mem_hit is not None:
+            return (mem_hit.cx, mem_hit.cy)
         ocr = runner.ocr_dismisser
         try:
             hits = await asyncio.to_thread(ocr._ocr_roi_named, shot, ROI_KICK_AREA)
@@ -956,18 +968,39 @@ class P5WaitPlayersHandler(PhaseHandler):
             return None
         for h in hits:
             if "移出" in h.text and "队伍" in h.text:
+                runner._mem_remember(shot, "P5-kick-btn", h.cx, h.cy, success=True)
                 return (h.cx, h.cy)
         return None
 
     async def _close_card(self, ctx: RunContext) -> None:
-        """关任何卡片. 优先 close_btn ROI, 兜底 tap 左上角. 帧差等关闭动画完成."""
+        """关任何卡片. mem-first → ROI 中心 → 兜底 tap 左上角. 帧差等关闭动画完成."""
         runner = ctx.runner
-        close_xy = await self._roi_center_xy(ctx, ROI_CLOSE_BTN)
+        close_xy = await self._mem_or_roi_center(ctx, "P5-close-btn", ROI_CLOSE_BTN)
         if close_xy is not None:
             await runner.adb.tap(*close_xy)
         else:
             await runner.adb.tap(20, 20)
         await self._wait_for_screen_stable(runner, timeout_ms=WAIT_TIMEOUT_CLOSE_MS)
+
+    async def _mem_or_roi_center(
+        self, ctx: RunContext, target_name: str, roi_name: str,
+    ) -> Optional[tuple[int, int]]:
+        """mem-first → ROI 中心 fallback. 适用稳定 UI 按钮 (信息/关闭/更多 etc).
+
+        target_name: mem db 里的 key (e.g. 'P5-more-btn')
+        roi_name: roi.yaml 里的 ROI 名 (e.g. 'player_card_more_btn')
+
+        注意: ROI 中心是配置常量, 不依赖 shot 内容. 不再 auto-remember (避免不同
+        卡片 phash 都被记成"同一坐标" → mem 失去判别力). mem 写入只走 OCR 路径
+        (e.g. _find_info_button 真正 OCR 找到文字后才记).
+        """
+        runner = ctx.runner
+        shot = await runner.adb.screenshot()
+        if shot is not None:
+            hit = runner._mem_query(shot, target_name, max_dist=5)
+            if hit is not None:
+                return (hit.cx, hit.cy)
+        return await self._roi_center_xy(ctx, roi_name)
 
     @staticmethod
     async def _roi_center_xy(ctx: RunContext, roi_name: str) -> Optional[tuple[int, int]]:

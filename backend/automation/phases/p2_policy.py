@@ -42,7 +42,9 @@ def decide(p: Perception, ctx: RunContext) -> Optional[PhaseAction]:
             return PhaseAction(
                 kind="tap",
                 x=cx, y=cy,
-                seconds=0.4,
+                # 0 sec: popup_dismissed 走 fast path 已经延迟 verify 到下一轮
+                # 不需要 sleep 等动画 (实测 sleep 0.4 让单 tap 拖 400ms+)
+                seconds=0,
                 label="memory_hit",
                 expectation="popup_dismissed",
                 payload={
@@ -57,7 +59,7 @@ def decide(p: Perception, ctx: RunContext) -> Optional[PhaseAction]:
             return PhaseAction(
                 kind="tap",
                 x=det.cx, y=det.cy,
-                seconds=0.4,
+                seconds=0,    # 同上, popup_dismissed 不需 sleep
                 label="close_x",
                 expectation="popup_dismissed",
                 payload={"yolo_before": p.yolo_dets_raw},
@@ -74,7 +76,7 @@ def decide(p: Perception, ctx: RunContext) -> Optional[PhaseAction]:
             return PhaseAction(
                 kind="tap",
                 x=det.cx, y=det.cy,
-                seconds=0.5,                  # action 类弹窗按掉后画面切换稍慢
+                seconds=0,                    # 同上, popup_dismissed fast path 不需 sleep
                 label="action_btn",
                 expectation="popup_dismissed",
                 payload={"yolo_before": p.yolo_dets_raw, "conf": det.conf},

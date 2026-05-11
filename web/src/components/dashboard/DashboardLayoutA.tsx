@@ -21,6 +21,8 @@ import { DetailBody } from './DetailBody'
 import { ZeroState } from './ZeroState'
 import { StandbyState } from './StandbyState'
 import { KbdHint } from './KbdHint'
+import { PerfOptimizeWizard } from '@/components/optimize/PerfOptimizeWizard'
+import { getPerfStatus } from '@/lib/perfApi'
 
 const MAX_SELECT = 4
 
@@ -118,6 +120,33 @@ export function DashboardLayoutA({
   const [viewFilter, setViewFilter] = useState<ViewFilter>('all')
   const [errorOnly, setErrorOnly] = useState(false)
 
+  // 性能优化向导: 进中控台第一次, 检查没优化过 → 自动浮 modal
+  // 已优化但硬件签名变了 (换电脑/加内存) → 也浮提示
+  const [perfWizardOpen, setPerfWizardOpen] = useState(false)
+  const [perfAutoTriggered, setPerfAutoTriggered] = useState(false)
+  useEffect(() => {
+    if (perfAutoTriggered) return
+    let alive = true
+    getPerfStatus()
+      .then((s) => {
+        if (!alive) return
+        const needShow =
+          !s.optimized || s.signature_state === 'changed'
+        if (needShow) {
+          setPerfWizardOpen(true)
+          setPerfAutoTriggered(true)
+        } else {
+          setPerfAutoTriggered(true)  // 已优化, 标记跑过, 不再检测
+        }
+      })
+      .catch(() => {
+        // backend 没接 /api/perf, 不阻塞主页
+        setPerfAutoTriggered(true)
+      })
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // tick for decisionAgo refresh
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -154,13 +183,25 @@ export function DashboardLayoutA({
     return () => window.removeEventListener('keydown', onKey)
   }, [clearInstanceSelection])
 
+  // 性能优化向导: 出现在所有 dashboard 子分支顶部, 不影响内容渲染
+  const wizardEl = (
+    <PerfOptimizeWizard
+      open={perfWizardOpen}
+      onClose={() => setPerfWizardOpen(false)}
+      autoTrigger={true}
+    />
+  )
+
   // ── ZeroState ──
   if (accounts.length === 0) {
     return (
-      <ZeroState
-        onAddAccount={() => setCurrentView('settings')}
-        onDocs={() => window.open('/docs/QUICK_START.md', '_blank')}
-      />
+      <>
+        {wizardEl}
+        <ZeroState
+          onAddAccount={() => setCurrentView('settings')}
+          onDocs={() => window.open('/docs/QUICK_START.md', '_blank')}
+        />
+      </>
     )
   }
 
@@ -169,11 +210,14 @@ export function DashboardLayoutA({
   // PhaseTester 用户清空 results 后回 standby.
   if (!showRunning) {
     return (
-      <StandbyState
-        accounts={accounts as AccountAssignment[]}
-        onStart={onStart}
-        onSettings={() => setCurrentView('settings')}
-      />
+      <>
+        {wizardEl}
+        <StandbyState
+          accounts={accounts as AccountAssignment[]}
+          onStart={onStart}
+          onSettings={() => setCurrentView('settings')}
+        />
+      </>
     )
   }
 
@@ -206,6 +250,8 @@ export function DashboardLayoutA({
   }
 
   return (
+    <>
+    {wizardEl}
     <div className="flex flex-col h-full bg-background overflow-hidden relative">
       {errors.length > 0 && (
         <ExceptionBanner
@@ -303,5 +349,6 @@ export function DashboardLayoutA({
       {/* onStop reference for future emergency menu wire */}
       <span hidden onClick={onStop} />
     </div>
+    </>
   )
 }

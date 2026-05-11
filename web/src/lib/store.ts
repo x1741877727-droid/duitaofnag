@@ -64,8 +64,13 @@ export interface Settings {
 
 export interface AccountAssignment {
   index: number
+  /** QQ 号 (后端 AccountConfig.qq); 前端 PUT 不能丢, 否则被覆盖成 '' */
+  qq: string
+  /** UI 标签 (派生自 nickname); 不持久化, 不发给后端 */
   name: string
+  /** 该模拟器是否在跑 (从 emulators 列表派生); 不持久化 */
   running: boolean
+  /** 派生: emulator-{5554+idx*2} */
   adbSerial: string
   group: TeamGroup
   role: TeamRole
@@ -93,21 +98,14 @@ export interface AccelInstanceState {
 
 // ─── 中控台 v3 — 实时事件 / 决策 ───
 
-// 顶层 nav (重构后 11→7)
-export type ConsoleView =
-  | 'dashboard'      // 运行控制
-  | 'console'        // 中控台
-  | 'accelerator'    // 加速器 (TUN 状态 + 实时计数)
-  | 'recognition'    // 识别 (含 sub: templates / template-tuner / yolo / ocr)
-  | 'data'           // 数据 (含 sub: archive / memory / oracle)
-  | 'perf'           // 性能
-  | 'settings'
+// 顶层 nav (4 项: 中控台 / 数据 / 识别(dev) / 设置)
+export type ConsoleView = 'console' | 'recognition' | 'data' | 'settings'
 
-// 识别页内的 4 个 sub-tab
+// 识别页内 sub-tab
 export type RecognitionSubView = 'templates' | 'template-tuner' | 'yolo' | 'ocr'
 
-// 数据页内的 3 个 sub-tab
-export type DataSubView = 'archive' | 'memory' | 'oracle'
+// 数据页内 sub-tab
+export type DataSubView = 'archive' | 'memory'
 
 export interface LiveDecisionEvent {
   // 单条决策摘要 (从 /ws/live decision 事件来)
@@ -220,13 +218,17 @@ interface AppState {
     selKeys: string[]               // 选中阶段 (按勾选顺序)
     selInst: number | null          // 没多选时的备用单实例
     selRole: 'captain' | 'member'
-    expectedId: string              // P5 用: 等待真人入队的 10 位玩家 ID
+    /** P5 用: 每个 squad (按 group 字母 'A'/'B'/...) 各等一个 10 位玩家 ID;
+     *  2 组测试时 UI 给两个输入框, 各 squad 的队长 P5 拿对应的 ID. */
+    expectedIds: Record<string, string>
     keepGoing: boolean
     busy: boolean
     progress: string
     results: { phase: string; phase_name: string; ok: boolean; duration_ms?: number; error?: string }[]
     /** 当前/最近一次跑的目标实例 (run 开始时快照, 不跟随后续选卡变化) — 监控墙用这个显示卡 */
     runningTargets: number[]
+    /** 取消令牌. 按"全部停止"会 +1; runTest 在 await 间隙比对 token, 不一致就立即抛 'cancelled' 退出整条 promise 链 */
+    cancelToken: number
   }
   setPhaseTester: (patch: Partial<AppState['phaseTester']>) => void
   addPhaseResult: (r: AppState['phaseTester']['results'][number]) => void
@@ -265,7 +267,7 @@ export const useAppStore = create<AppState>((set) => ({
     set({ devMode: b })
   },
 
-  currentView: 'dashboard',
+  currentView: 'console',
   setCurrentView: (view) => set({ currentView: view }),
 
   recognitionSubView: 'templates',
@@ -387,12 +389,13 @@ export const useAppStore = create<AppState>((set) => ({
     selKeys: [],
     selInst: null,
     selRole: 'captain',
-    expectedId: '',
+    expectedIds: {},
     keepGoing: false,
     busy: false,
     progress: '',
     results: [],
     runningTargets: [],
+    cancelToken: 0,
   },
   setPhaseTester: (patch) => set((state) => ({
     phaseTester: { ...state.phaseTester, ...patch },

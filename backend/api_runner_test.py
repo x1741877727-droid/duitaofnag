@@ -160,16 +160,14 @@ async def _execute_test_phase(req: TestPhaseReq) -> dict:
                 "error": f"P5 必须提供 expected_id (10 位数字), 收到 {req.expected_id!r}",
             }
 
-    # 调试用 — 看前端真传了 scheme 没
-    logger.info(
+    logger.debug(
         f"[test_phase] POST instance={req.instance} phase={phase} role={req.role} "
-        f"scheme={'[SET ' + req.scheme[:40] + '...]' if req.scheme else '[EMPTY]'}"
+        f"scheme={'[SET]' if req.scheme else '[EMPTY]'}"
     )
     if req.scheme:
         try:
             ctx = runner._build_v3_ctx()
             ctx.game_scheme_url = req.scheme
-            logger.info(f"[test_phase] ✓ 注入 ctx.game_scheme_url 成功 (instance={req.instance})")
         except Exception as e:
             logger.warning(f"[test_phase] 注入 scheme 失败: {e}")
 
@@ -201,9 +199,9 @@ async def _execute_test_phase(req: TestPhaseReq) -> dict:
     except Exception:
         pass
 
-    logger.info(
+    logger.debug(
         f"[test_phase] DONE instance={req.instance} phase={phase} ok={ok} "
-        f"scheme_out={'[' + scheme_out[:48] + '...]' if scheme_out else '[EMPTY]'}"
+        f"scheme_out={'[SET]' if scheme_out else '[EMPTY]'}"
     )
 
     try:
@@ -322,7 +320,7 @@ def stop_test_controllers(svc) -> int:
             try:
                 stream.stop()
                 n += 1
-                logger.info(f"[test_phase] 已 stop 截图流 inst{idx}")
+                logger.debug(f"[test_phase] 已 stop 截图流 inst{idx}")
             except Exception as e:
                 logger.debug(f"[test_phase] stop inst{idx} 异常: {e}")
         adb._stream = None
@@ -393,7 +391,7 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
     try:
         ok = await _aio.to_thread(adb.setup_minicap)
         if ok:
-            logger.info(f"[test_phase] {serial} 启 capture stream OK")
+            logger.debug(f"[test_phase] {serial} 启 capture stream OK")
     except Exception as e:
         logger.warning(f"[test_phase] {serial} setup_minicap 异常: {e}")
 
@@ -432,7 +430,7 @@ async def _build_test_runner(svc, cfg, instance_idx: int, role: str):
             session_dir = Path(proj_root) / "logs" / f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             session_dir.mkdir(parents=True, exist_ok=True)
             rec.init(session_dir)
-            logger.info(f"[test_phase] 临时 session: {session_dir}")
+            logger.debug(f"[test_phase] 临时 session: {session_dir}")
     except Exception as e:
         logger.debug(f"[test_phase] init recorder err: {e}")
 

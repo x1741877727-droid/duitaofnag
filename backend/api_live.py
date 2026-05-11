@@ -113,30 +113,6 @@ def install_listeners() -> None:
         logger.warning(f"[live] install_listeners err: {e}")
 
 
-# ─── 其他事件类型的便捷推送函数 ───
-
-
-def broadcast_phase_change(instance: int, frm: str, to: str) -> None:
-    _broadcaster.schedule_broadcast({
-        "type": "phase_change",
-        "instance": instance,
-        "from": frm,
-        "to": to,
-        "ts": time.time(),
-    })
-
-
-def broadcast_intervene_ack(command: str, instance: int, token: str, result: str) -> None:
-    _broadcaster.schedule_broadcast({
-        "type": "intervene_ack",
-        "command": command,
-        "instance": instance,
-        "token": token,
-        "result": result,
-        "ts": time.time(),
-    })
-
-
 def broadcast_perf(snapshot: dict) -> None:
     _broadcaster.schedule_broadcast({
         "type": "perf",

@@ -1,31 +1,229 @@
+/**
+ * SettingsView — 设置页, 跟 DataShell / RecognitionShell 同视觉风格.
+ *
+ * 三个 section 单页串列 (环境配置 / 模拟器扫描 / 队伍编排), 不用 sub-tab.
+ * 每个 section 用相同 card chrome (C.surface + C.border + 标题条), 无 lucide
+ * 图标 (跟数据/识别页一致, 都靠文字).
+ */
+
 import { useEffect, useState } from 'react'
-import { useAppStore, type TeamGroup, type TeamRole, type AccountAssignment } from '@/lib/store'
-import { cn } from '@/lib/utils'
 import {
-  FolderOpen,
-  RefreshCw,
-  Save,
-  Plus,
-  Trash2,
-  MonitorSmartphone,
-  ArrowDownToLine,
-  Settings,
-  Users,
-  Database
-} from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+  useAppStore,
+  type TeamGroup,
+  type TeamRole,
+  type AccountAssignment,
+} from '@/lib/store'
+import { C } from '@/lib/design-tokens'
 import { SquadBuilder } from './squad-builder'
+import { PerfOptimizeWizard } from './optimize/PerfOptimizeWizard'
+
+// ─── 共享 chrome ──────────────────────────────────────────────────
+
+function Section({
+  title,
+  hint,
+  rightSlot,
+  children,
+}: {
+  title: string
+  hint?: string
+  rightSlot?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <section
+      style={{
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+        borderRadius: 10,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '12px 18px',
+          borderBottom: `1px solid ${C.borderSoft}`,
+          background: C.surface,
+        }}
+      >
+        <h2
+          style={{
+            margin: 0,
+            fontSize: 13.5,
+            fontWeight: 600,
+            color: C.ink,
+            letterSpacing: '.01em',
+          }}
+        >
+          {title}
+        </h2>
+        {hint && (
+          <span style={{ fontSize: 11.5, color: C.ink3 }}>{hint}</span>
+        )}
+        <span style={{ flex: 1 }} />
+        {rightSlot}
+      </div>
+      <div style={{ padding: 18 }}>{children}</div>
+    </section>
+  )
+}
+
+function PrimaryButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick?: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: '6px 14px',
+        borderRadius: 6,
+        fontSize: 12.5,
+        fontWeight: 500,
+        color: '#fff',
+        background: disabled ? C.ink4 : C.ink,
+        border: 'none',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        fontFamily: 'inherit',
+        opacity: disabled ? 0.7 : 1,
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+function GhostButton({
+  onClick,
+  children,
+}: {
+  onClick?: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: '5px 12px',
+        borderRadius: 6,
+        fontSize: 12,
+        fontWeight: 500,
+        color: C.ink2,
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+function TextInput({
+  value,
+  onChange,
+  placeholder,
+  width,
+  mono,
+}: {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  width?: number | string
+  mono?: boolean
+}) {
+  return (
+    <input
+      type="text"
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        width: width ?? '100%',
+        padding: '7px 10px',
+        borderRadius: 6,
+        border: `1px solid ${C.border}`,
+        background: C.surface,
+        color: C.ink,
+        fontSize: 12.5,
+        fontFamily: mono ? C.fontMono : 'inherit',
+        outline: 'none',
+        boxSizing: 'border-box',
+      }}
+    />
+  )
+}
+
+// ─── 主入口 ──────────────────────────────────────────────────────
 
 export function SettingsView() {
+  const [perfWizardOpen, setPerfWizardOpen] = useState(false)
   return (
-    <div className="space-y-6 max-w-5xl">
-      <EnvConfig />
-      <EmulatorScan />
-      <SquadBuilder />
+    <div
+      style={{
+        width: '100%',
+        height: '100%',
+        background: C.bg,
+        color: C.ink,
+        fontFamily: C.fontUi,
+        overflow: 'auto',
+      }}
+    >
+      <PerfOptimizeWizard
+        open={perfWizardOpen}
+        onClose={() => setPerfWizardOpen(false)}
+        autoTrigger={false}
+      />
+      <div
+        style={{
+          maxWidth: 1200,
+          margin: '0 auto',
+          padding: '22px 22px 60px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 18,
+        }}
+      >
+        <PerfOptimizeButton onOpen={() => setPerfWizardOpen(true)} />
+        <EnvConfig />
+        <EmulatorScan />
+        <SquadBuilder />
+      </div>
     </div>
   )
 }
+
+function PerfOptimizeButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <Section
+      title="硬件性能优化"
+      hint="一键探测电脑 + 应用最优 LDPlayer / Android 配置"
+      rightSlot={
+        <PrimaryButton onClick={onOpen}>开启向导</PrimaryButton>
+      }
+    >
+      <div style={{ fontSize: 12, color: C.ink3, lineHeight: 1.7 }}>
+        ★ 首次使用会自动弹出。后续换硬件 / 加内存可手动重跑。
+        <br />
+        改动包括: LDPlayer 实例 RAM 上限 + CPU 绑核 + Android Doze 关 + 14 个无用系统包 disable + logcat 限流。
+      </div>
+    </Section>
+  )
+}
+
+// ─── Section 1: 环境配置 ─────────────────────────────────────────
 
 function EnvConfig() {
   const { settings, setSettings } = useAppStore()
@@ -33,108 +231,114 @@ function EnvConfig() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    fetch('/api/settings').then(r => r.json()).then(data => {
-      const s = { ...settings, ldPlayerPath: data.ldplayer_path || '', adbPath: data.adb_path || '',
-        gamePackage: data.game_package || settings.gamePackage, targetMap: data.game_map || '' }
-      setLocalSettings(s); setSettings(s)
-    }).catch(() => {})
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((data) => {
+        const s = {
+          ...settings,
+          ldPlayerPath: data.ldplayer_path || '',
+          adbPath: data.adb_path || '',
+          gamePackage: data.game_package || settings.gamePackage,
+          targetMap: data.game_map || '',
+        }
+        setLocalSettings(s)
+        setSettings(s)
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleSave = async () => {
     setSaving(true)
     setSettings(localSettings)
-    await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ldplayer_path: localSettings.ldPlayerPath, adb_path: localSettings.adbPath,
-        game_package: localSettings.gamePackage, game_map: localSettings.targetMap }) }).catch(() => {})
+    await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ldplayer_path: localSettings.ldPlayerPath,
+        adb_path: localSettings.adbPath,
+        game_package: localSettings.gamePackage,
+        game_map: localSettings.targetMap,
+      }),
+    }).catch(() => {})
     setSaving(false)
   }
 
+  const fields: Array<[string, string, string, (v: string) => void, boolean?]> = [
+    [
+      '雷电模拟器路径',
+      'D:\\leidian\\LDPlayer9',
+      localSettings.ldPlayerPath,
+      (v) => setLocalSettings({ ...localSettings, ldPlayerPath: v }),
+      true,
+    ],
+    [
+      'ADB 路径',
+      '留空 = 用模拟器自带',
+      localSettings.adbPath,
+      (v) => setLocalSettings({ ...localSettings, adbPath: v }),
+      true,
+    ],
+    [
+      '游戏包名',
+      'com.tencent.tmgp.pubgmhd',
+      localSettings.gamePackage,
+      (v) => setLocalSettings({ ...localSettings, gamePackage: v }),
+      true,
+    ],
+    [
+      '目标地图',
+      '狙击团竞',
+      localSettings.targetMap,
+      (v) => setLocalSettings({ ...localSettings, targetMap: v }),
+    ],
+  ]
+
   return (
-    <section className="bg-card border border-border rounded-lg">
-      <div className="flex items-center gap-2 p-4 border-b border-border">
-        <Settings className="w-4 h-4 text-muted-foreground" />
-        <h2 className="font-medium">环境配置</h2>
+    <Section
+      title="环境配置"
+      hint="路径 + 游戏包名 + 默认地图"
+      rightSlot={
+        <PrimaryButton onClick={handleSave} disabled={saving}>
+          {saving ? '保存中…' : '保存'}
+        </PrimaryButton>
+      }
+    >
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gap: 14,
+        }}
+      >
+        {fields.map(([label, ph, val, onChange, mono]) => (
+          <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 11.5, color: C.ink3, fontWeight: 500 }}>
+              {label}
+            </label>
+            <TextInput
+              value={val}
+              onChange={onChange}
+              placeholder={ph}
+              mono={mono}
+            />
+          </div>
+        ))}
       </div>
-      
-      <div className="p-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <SettingField
-            label="雷电模拟器路径"
-            placeholder="D:\leidian\LDPlayer9"
-            value={localSettings.ldPlayerPath}
-            onChange={(v) => setLocalSettings({ ...localSettings, ldPlayerPath: v })}
-            icon={<FolderOpen className="w-4 h-4" />}
-          />
-          <SettingField
-            label="ADB 路径"
-            placeholder="留空自动使用模拟器自带"
-            value={localSettings.adbPath}
-            onChange={(v) => setLocalSettings({ ...localSettings, adbPath: v })}
-            icon={<Database className="w-4 h-4" />}
-          />
-          <SettingField
-            label="游戏包名"
-            placeholder="com.tencent.tmgp.pubgmhd"
-            value={localSettings.gamePackage}
-            onChange={(v) => setLocalSettings({ ...localSettings, gamePackage: v })}
-          />
-          <SettingField
-            label="目标地图"
-            placeholder="狙击团竞"
-            value={localSettings.targetMap}
-            onChange={(v) => setLocalSettings({ ...localSettings, targetMap: v })}
-          />
-        </div>
-        
-        <div className="mt-4 flex justify-end">
-          <Button onClick={handleSave} size="sm" className="gap-2" disabled={saving}>
-            <Save className="w-4 h-4" />
-            {saving ? '保存中...' : '保存'}
-          </Button>
-        </div>
-      </div>
-    </section>
+    </Section>
   )
 }
 
-function SettingField({ 
-  label, 
-  placeholder, 
-  value, 
-  onChange,
-  icon
-}: { 
-  label: string
-  placeholder: string
-  value: string
-  onChange: (v: string) => void
-  icon?: React.ReactNode
-}) {
-  return (
-    <div className="space-y-1.5">
-      <label className="text-sm text-muted-foreground">{label}</label>
-      <div className="relative">
-        {icon && (
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-            {icon}
-          </div>
-        )}
-        <Input
-          placeholder={placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className={cn('bg-background', icon && 'pl-10')}
-        />
-      </div>
-    </div>
-  )
-}
+// ─── Section 2: 模拟器扫描 ───────────────────────────────────────
 
 function EmulatorScan() {
   const { emulators, setEmulators, setAccounts, accounts } = useAppStore()
   const [refreshing, setRefreshing] = useState(false)
 
-  useEffect(() => { handleRefresh() }, [])
+  useEffect(() => {
+    handleRefresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -142,10 +346,16 @@ function EmulatorScan() {
       const res = await fetch('/api/emulators')
       const json = await res.json()
       if (json.instances) {
-        setEmulators(json.instances.map((e: Record<string, unknown>) => ({
-          index: e.index as number, name: e.name as string, running: e.running as boolean,
-          adbSerial: (e.adb_serial as string) || `emulator-${5554 + (e.index as number) * 2}`,
-        })))
+        setEmulators(
+          json.instances.map((e: Record<string, unknown>) => ({
+            index: e.index as number,
+            name: e.name as string,
+            running: e.running as boolean,
+            adbSerial:
+              (e.adb_serial as string) ||
+              `emulator-${5554 + (e.index as number) * 2}`,
+          })),
+        )
       }
     } catch {}
     setRefreshing(false)
@@ -153,16 +363,19 @@ function EmulatorScan() {
 
   const handleSync = () => {
     const newAccounts: AccountAssignment[] = emulators.map((e, idx) => {
-      const existing = accounts.find(a => a.index === e.index)
+      const existing = accounts.find((a) => a.index === e.index)
       if (existing) return existing
-      
       return {
         index: e.index,
+        qq: '',
         name: e.name,
         running: e.running,
         adbSerial: e.adbSerial,
-        group: idx < 3 ? 'A' as TeamGroup : 'B' as TeamGroup,
-        role: (idx === 0 || idx === 3) ? 'captain' as TeamRole : 'member' as TeamRole,
+        group: idx < 3 ? ('A' as TeamGroup) : ('B' as TeamGroup),
+        role:
+          idx === 0 || idx === 3
+            ? ('captain' as TeamRole)
+            : ('member' as TeamRole),
         nickname: e.name,
         gameId: '',
       }
@@ -170,218 +383,117 @@ function EmulatorScan() {
     setAccounts(newAccounts)
   }
 
-  return (
-    <section className="bg-card border border-border rounded-lg">
-      <div className="flex items-center justify-between p-4 border-b border-border">
-        <div className="flex items-center gap-2">
-          <MonitorSmartphone className="w-4 h-4 text-muted-foreground" />
-          <h2 className="font-medium">模拟器检测</h2>
-          <span className="text-xs text-muted-foreground">检测到 {emulators.length} 个</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="gap-2" onClick={handleRefresh}>
-            <RefreshCw className={cn('w-4 h-4', refreshing && 'animate-spin')} />
-            刷新
-          </Button>
-          <Button variant="outline" size="sm" className="gap-2" onClick={handleSync}>
-            <ArrowDownToLine className="w-4 h-4" />
-            同步到分配表
-          </Button>
-        </div>
-      </div>
-
-      <div className="p-4">
-        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-          {emulators.map(emulator => (
-            <div 
-              key={emulator.index}
-              className={cn(
-                'rounded-lg p-3 border',
-                emulator.running 
-                  ? 'bg-success/5 border-success/20' 
-                  : 'bg-muted border-border opacity-60'
-              )}
-            >
-              <div className="font-medium text-sm mb-1">
-                #{emulator.index}
-              </div>
-              <div className="text-xs text-muted-foreground truncate">
-                {emulator.name}
-              </div>
-              <div className="flex items-center gap-1.5 text-xs mt-1">
-                <div className={cn(
-                  'w-1.5 h-1.5 rounded-full',
-                  emulator.running ? 'bg-success' : 'bg-muted-foreground'
-                )} />
-                <span className={emulator.running ? 'text-success' : 'text-muted-foreground'}>
-                  {emulator.running ? '运行中' : '已停止'}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function AccountTable() {
-  const { accounts, setAccounts } = useAppStore()
-  const [saving, setSaving] = useState(false)
-
-  useEffect(() => {
-    fetch('/api/accounts').then(r => r.json()).then((data: Record<string, unknown>[]) => {
-      if (Array.isArray(data) && data.length > 0) {
-        setAccounts(data.map(a => ({
-          index: (a.instance_index as number) ?? 0, name: (a.nickname as string) || '',
-          running: false, adbSerial: `emulator-${5554 + ((a.instance_index as number) ?? 0) * 2}`,
-          group: (a.group as TeamGroup) || 'A', role: (a.role as TeamRole) || 'member',
-          nickname: (a.nickname as string) || '', gameId: (a.game_id as string) || '',
-        })))
-      }
-    }).catch(() => {})
-  }, [])
-
-  const handleSaveAccounts = async () => {
-    setSaving(true)
-    await fetch('/api/accounts', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(accounts.map(a => ({
-        qq: '', nickname: a.nickname, game_id: a.gameId,
-        group: a.group, role: a.role, instance_index: a.index,
-      }))) }).catch(() => {})
-    setSaving(false)
-  }
-
-  const updateAccount = (index: number, field: keyof AccountAssignment, value: string) => {
-    const newAccounts = accounts.map(a => {
-      if (a.index === index) {
-        return { ...a, [field]: value }
-      }
-      return a
-    })
-    setAccounts(newAccounts)
-  }
-
-  const deleteAccount = (index: number) => {
-    setAccounts(accounts.filter(a => a.index !== index))
-  }
-
-  const addAccount = () => {
-    const maxIndex = Math.max(...accounts.map(a => a.index), -1)
-    const newAccount: AccountAssignment = {
-      index: maxIndex + 1,
-      name: `模拟器-${maxIndex + 1}`,
-      running: false,
-      adbSerial: `emulator-${5554 + (maxIndex + 1) * 2}`,
-      group: 'A',
-      role: 'member',
-      nickname: `模拟器-${maxIndex + 1}`,
-      gameId: '',
-    }
-    setAccounts([...accounts, newAccount])
-  }
+  const runningCount = emulators.filter((e) => e.running).length
 
   return (
-    <section className="bg-card border border-border rounded-lg">
-      <div className="flex items-center gap-2 p-4 border-b border-border">
-        <Users className="w-4 h-4 text-muted-foreground" />
-        <h2 className="font-medium">实例分配表</h2>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-border bg-muted/30">
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">序号</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">名称</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">状态</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">组</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">角色</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">昵称</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">游戏ID</th>
-              <th className="px-4 py-3 w-12"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {accounts.map(account => (
-              <tr key={account.index} className="border-b border-border hover:bg-muted/20">
-                <td className="px-4 py-2 font-mono">#{account.index}</td>
-                <td className="px-4 py-2">{account.name}</td>
-                <td className="px-4 py-2">
-                  <span className={cn(
-                    'inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs',
-                    account.running 
-                      ? 'bg-success/10 text-success' 
-                      : 'bg-muted text-muted-foreground'
-                  )}>
-                    <span className={cn(
-                      'w-1.5 h-1.5 rounded-full',
-                      account.running ? 'bg-success' : 'bg-muted-foreground'
-                    )} />
-                    {account.running ? '在线' : '离线'}
+    <Section
+      title="模拟器扫描"
+      hint={`检测到 ${emulators.length} 个 · ${runningCount} 在线`}
+      rightSlot={
+        <div style={{ display: 'flex', gap: 8 }}>
+          <GhostButton onClick={handleRefresh}>
+            {refreshing ? '刷新中…' : '刷新'}
+          </GhostButton>
+          <GhostButton onClick={handleSync}>同步到分配表</GhostButton>
+        </div>
+      }
+    >
+      {emulators.length === 0 ? (
+        <div
+          style={{
+            padding: '24px 16px',
+            textAlign: 'center',
+            color: C.ink4,
+            fontSize: 12.5,
+          }}
+        >
+          没扫到模拟器 — 检查雷电路径是否对, 或点"刷新"重试.
+        </div>
+      ) : (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+            gap: 10,
+          }}
+        >
+          {emulators.map((e) => {
+            const on = e.running
+            return (
+              <div
+                key={e.index}
+                style={{
+                  background: on ? C.surface : C.surface2,
+                  border: `1px solid ${on ? C.border : C.borderSoft}`,
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                  opacity: on ? 1 : 0.65,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    justifyContent: 'space-between',
+                    marginBottom: 4,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: C.fontMono,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: C.ink,
+                    }}
+                  >
+                    #{String(e.index).padStart(2, '0')}
                   </span>
-                </td>
-                <td className="px-4 py-2">
-                  <select
-                    value={account.group}
-                    onChange={(e) => updateAccount(account.index, 'group', e.target.value)}
-                    className="bg-background border border-border rounded px-2 py-1 text-sm"
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontSize: 10.5,
+                      color: on ? C.live : C.ink4,
+                    }}
                   >
-                    <option value="A">A</option>
-                    <option value="B">B</option>
-                  </select>
-                </td>
-                <td className="px-4 py-2">
-                  <select
-                    value={account.role}
-                    onChange={(e) => updateAccount(account.index, 'role', e.target.value)}
-                    className="bg-background border border-border rounded px-2 py-1 text-sm"
-                  >
-                    <option value="captain">队长</option>
-                    <option value="member">队员</option>
-                  </select>
-                </td>
-                <td className="px-4 py-2">
-                  <Input
-                    value={account.nickname}
-                    onChange={(e) => updateAccount(account.index, 'nickname', e.target.value)}
-                    className="h-8 bg-background w-24"
-                  />
-                </td>
-                <td className="px-4 py-2">
-                  <Input
-                    value={account.gameId}
-                    onChange={(e) => updateAccount(account.index, 'gameId', e.target.value)}
-                    placeholder="选填"
-                    className="h-8 bg-background w-24"
-                  />
-                </td>
-                <td className="px-4 py-2">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                    onClick={() => deleteAccount(account.index)}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="p-4 border-t border-border flex items-center justify-between">
-        <Button variant="outline" size="sm" className="gap-2" onClick={addAccount}>
-          <Plus className="w-4 h-4" />
-          添加实例
-        </Button>
-        <Button size="sm" className="gap-2" onClick={handleSaveAccounts} disabled={saving}>
-          <Save className="w-4 h-4" />
-          {saving ? '保存中...' : '保存'}
-        </Button>
-      </div>
-    </section>
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: '50%',
+                        background: on ? C.live : C.ink4,
+                      }}
+                    />
+                    {on ? '运行中' : '已停止'}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11.5,
+                    color: C.ink2,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {e.name}
+                </div>
+                <div
+                  style={{
+                    marginTop: 4,
+                    fontSize: 10,
+                    color: C.ink4,
+                    fontFamily: C.fontMono,
+                  }}
+                >
+                  {e.adbSerial}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </Section>
   )
 }

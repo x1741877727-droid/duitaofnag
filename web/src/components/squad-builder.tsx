@@ -159,6 +159,7 @@ export function SquadBuilder() {
         // 从未分配池拖入
         const newAccount: AccountAssignment = {
           index: emulator.index,
+          qq: '',
           name: emulator.name,
           running: emulator.running,
           adbSerial: emulator.adbSerial,
@@ -202,6 +203,7 @@ export function SquadBuilder() {
           const emu = onlineEmulators[idx]
           newAccounts.push({
             index: emu.index,
+            qq: '',
             name: emu.name,
             running: emu.running,
             adbSerial: emu.adbSerial,
@@ -225,7 +227,7 @@ export function SquadBuilder() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(localAccounts.map(a => ({
-        qq: '', nickname: a.nickname, game_id: a.gameId,
+        qq: a.qq, nickname: a.nickname, game_id: a.gameId,
         group: a.group, role: a.role, instance_index: a.index,
       }))),
     }).catch(() => {})

@@ -18,9 +18,6 @@ import { LogDrawer } from '@/components/log-panel'
 const SettingsView = lazy(() =>
   import('@/components/settings-view').then((m) => ({ default: m.SettingsView })),
 )
-const PerfView = lazy(() =>
-  import('@/components/perf/PerfView').then((m) => ({ default: m.PerfView })),
-)
 const RecognitionShell = lazy(() =>
   import('@/components/recognition/RecognitionShell').then((m) => ({
     default: m.RecognitionShell,
@@ -87,6 +84,7 @@ function App() {
           setAccounts(
             data.map((a) => ({
               index: (a.instance_index as number) ?? 0,
+              qq: (a.qq as string) || '',
               name: (a.nickname as string) || '',
               running: false,
               adbSerial: `emulator-${5554 + ((a.instance_index as number) ?? 0) * 2}`,
@@ -156,15 +154,14 @@ function App() {
 
       <div className="flex-1 flex min-h-0">
         <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
-          {(currentView === 'console' || currentView === 'dashboard') && (
+          {currentView === 'console' && (
             <DashboardLayoutA onStart={onAction} onStop={onAction} />
           )}
-          {currentView !== 'console' && currentView !== 'dashboard' && (
+          {currentView !== 'console' && (
             <Suspense fallback={<LazyFallback />}>
               {currentView === 'data' && <DataShell />}
               {currentView === 'recognition' && <RecognitionShell />}
               {currentView === 'settings' && <SettingsView />}
-              {currentView === 'perf' && <PerfView />}
             </Suspense>
           )}
         </main>

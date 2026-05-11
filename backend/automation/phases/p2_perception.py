@@ -137,6 +137,16 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
 
     matcher = ctx.matcher
 
+    # Day 1 改动 3 (2026-05-10): LDPlayer 实例固定 960×540, 模板按这个分辨率训的,
+    # 多 scale 匹配 (5 个 scale × 8 模板 = 40 次 matchTemplate) 是浪费.
+    # 启动时检测分辨率: 960×540 → 锁 scale=[1.0] (单次匹配快 5x)
+    # 其他分辨率 (客户改了 LDPlayer 设置) → 自动 fallback 多 scale
+    # 一键回退: env GAMEBOT_FORCE_MULTI_SCALE=1
+    _shot_h, _shot_w = shot.shape[:2]
+    _is_native_res = (_shot_w == 960 and _shot_h == 540)
+    _force_multi = os.environ.get("GAMEBOT_FORCE_MULTI_SCALE", "").lower() in ("1", "true")
+    _scales_native = None if (_force_multi or not _is_native_res) else [1.0]
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Block A 并发: lobby_tpl + login_tpl + YOLO + memory + phash
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -151,7 +161,7 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         if matcher is None: return None
         for tn in ("lobby_start_btn", "lobby_start_game"):
             try:
-                h = matcher.match_one(shot, tn, threshold=0.75, roi=LOBBY_ROI)
+                h = matcher.match_one(shot, tn, threshold=0.75, roi=LOBBY_ROI, scales=_scales_native)
             except Exception:
                 h = None
             if h is not None:
@@ -162,7 +172,7 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         if matcher is None: return None
         for tn in LOGIN_TEMPLATE_NAMES:
             try:
-                h = matcher.match_one(shot, tn, threshold=0.80, roi=LOGIN_ROI)
+                h = matcher.match_one(shot, tn, threshold=0.80, roi=LOGIN_ROI, scales=_scales_native)
             except Exception:
                 h = None
             if h is not None:
@@ -170,6 +180,22 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         return None
 
     def _run_yolo():
+        # Vision Daemon 接入 (2026-05-10): 优先读 daemon cache, miss 才同步跑.
+        # daemon cache age <= 200ms 算 fresh, daemon 后台 8 fps + motion gate 99% skip,
+        # 大部分调用秒拿到 cache (~1ms), 跳过 yolo session.run 700ms.
+        # 默认开 (跟 api.py 启动 daemon 一致); 显式 GAMEBOT_VISION_DAEMON=0 才关
+        if os.environ.get("GAMEBOT_VISION_DAEMON", "1") != "0":
+            try:
+                from ..vision_daemon import VisionDaemon
+                daemon = VisionDaemon.get()
+                # max_age 800ms — daemon 抓 8fps/inst (~125ms/帧), 业务允许 cache 偶尔老 800ms
+                # 弹窗不会瞬间消失, 800ms 老的 dets 仍然 actionable
+                slot = daemon.snapshot(inst_idx, max_age_ms=800)
+                if slot is not None:
+                    return slot.yolo_dets
+            except Exception as e:
+                logger.debug(f"[perceive] daemon snapshot err: {e}")
+        # cache miss / daemon 关 → 走原 yolo
         if ctx.yolo is None: return []
         try:
             return ctx.yolo.detect(shot)
@@ -190,14 +216,31 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         except Exception:
             return 0
 
+    # Memory 异步化 (2026-05-10): memory.query 实测 300-1162ms, 公告漂移 99% MISS,
+    # 拖累 perceive 5 路等齐. 改成: memory 不进 gather, 异步背景 fire-and-forget.
+    # 损失: 失去 P2 policy memory_hit 优先级 (走 yolo close_x 兜底, 坐标差 5px 无所谓).
+    # memory 学习不受影响 (commit_pending_memory 在 P2 success 时跑, 不依赖 query).
+    # 一键回退: env GAMEBOT_P2_MEMORY_SYNC=1 恢复同步 memory query
+    _memory_sync = os.environ.get("GAMEBOT_P2_MEMORY_SYNC", "0") == "1"
     _t = _time.perf_counter()
-    lobby_hit, login_hit, dets, mem_hit, ph_now = await asyncio.gather(
-        asyncio.to_thread(_run_lobby_tpl),
-        asyncio.to_thread(_run_login_tpl),
-        asyncio.to_thread(_run_yolo),
-        asyncio.to_thread(_run_memory),
-        asyncio.to_thread(_run_phash),
-    )
+    if _memory_sync:
+        # 旧路径: memory 同步在 5 路 gather 里
+        lobby_hit, login_hit, dets, mem_hit, ph_now = await asyncio.gather(
+            asyncio.to_thread(_run_lobby_tpl),
+            asyncio.to_thread(_run_login_tpl),
+            asyncio.to_thread(_run_yolo),
+            asyncio.to_thread(_run_memory),
+            asyncio.to_thread(_run_phash),
+        )
+    else:
+        # 新路径: 删 memory 出 gather, perceive 时间砍 200-300ms
+        lobby_hit, login_hit, dets, ph_now = await asyncio.gather(
+            asyncio.to_thread(_run_lobby_tpl),
+            asyncio.to_thread(_run_login_tpl),
+            asyncio.to_thread(_run_yolo),
+            asyncio.to_thread(_run_phash),
+        )
+        mem_hit = None  # memory 不在关键路径, P2 policy 走 yolo close_x
     _perf["parallel_block"] = (_time.perf_counter() - _t) * 1000
 
     p.lobby_template_hit = lobby_hit
@@ -250,17 +293,19 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         return p
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 模板 close_x_* — 总跑, 不依赖 YOLO 状态.
-    # 之前有 `not p.yolo_close_xs` 守卫: YOLO 一报 close_x (哪怕误识 486,49),
-    # 模板完全不算 → policy 落 yolo, blacklist 后无法回退到 template (因为
-    # template_close_x 一直 None). 现在改成无条件跑, ROI 限定后 ~10ms 可控成本.
-    # 阈值 0.70 (跟 find_close_button 一致). close_x_return 在公告右上 0.78 命中, 0.80 太紧.
+    # 模板 close_x_* / dismiss_btn_* (P2 dismiss 类) 默认关闭 (2026-05-10 用户决定)
+    # 用户实测模板易误报 (大厅按钮被识别为 close_x → tap 错位), 不如纯 YOLO 稳
+    # YOLO close_x conf > 0.87 实测 95% 命中, 漏报场景下一帧重 perceive 自动恢复
+    # 一键开回: env GAMEBOT_DISMISS_TEMPLATES=1 (启动时设)
+    _use_dismiss_tpl = os.environ.get("GAMEBOT_DISMISS_TEMPLATES", "0") == "1"
+
     _t = _time.perf_counter()
-    if matcher is not None:
+    if _use_dismiss_tpl and matcher is not None and not p.yolo_close_xs:
+        # 仅在显式开启 + YOLO 漏报 时跑模板兜底
         def _run_close_x():
             for tn in CLOSE_X_TEMPLATE_NAMES:
                 try:
-                    h = matcher.match_one(shot, tn, threshold=0.70, roi=CLOSE_X_ROI)
+                    h = matcher.match_one(shot, tn, threshold=0.70, roi=CLOSE_X_ROI, scales=_scales_native)
                 except Exception:
                     h = None
                 if h is not None:
@@ -269,13 +314,13 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
         p.template_close_x = await asyncio.to_thread(_run_close_x)
     _perf["close_x_tpl"] = (_time.perf_counter() - _t) * 1000
 
-    # 模板 btn_confirm_* 兜底 (没 X 但有"确定"按钮的弹窗)
+    # 模板 btn_confirm_* 兜底 (默认同样关)
     _t = _time.perf_counter()
-    if matcher is not None and p.template_close_x is None and not p.yolo_close_xs:
+    if _use_dismiss_tpl and matcher is not None and p.template_close_x is None and not p.yolo_close_xs:
         def _run_dismiss():
             for tn in DISMISS_BTN_TEMPLATE_NAMES:
                 try:
-                    h = matcher.match_one(shot, tn, threshold=0.80, roi=DISMISS_BTN_ROI)
+                    h = matcher.match_one(shot, tn, threshold=0.80, roi=DISMISS_BTN_ROI, scales=_scales_native)
                 except Exception:
                     h = None
                 if h is not None:
@@ -285,10 +330,17 @@ async def _perceive_locked(ctx: RunContext) -> Perception:
     _perf["dismiss_btn_tpl"] = (_time.perf_counter() - _t) * 1000
 
     _total = (_time.perf_counter() - _t0) * 1000
+    _perf["total"] = _total
     logger.info(
         f"[PERF/perceive/inst{inst_idx}] total={_total:.0f}ms "
         f"parallel={_perf['parallel_block']:.0f} quad={_perf['quad']:.0f} "
         f"close_x_tpl={_perf['close_x_tpl']:.0f} dismiss_tpl={_perf['dismiss_btn_tpl']:.0f}"
     )
+    # 挂 ctx 让 single_runner 写到 round_perf.log (logger.info 进 backend.log
+    # 但 uvicorn 配置覆盖 file handler, 直接写 round_perf 才能看到拆解)
+    try:
+        ctx._last_perceive_perf = dict(_perf)
+    except Exception:
+        pass
 
     return p

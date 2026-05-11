@@ -38,8 +38,49 @@ import cv2
 # 决策图片落盘用 — 主循环 fire-and-forget, JPEG 编码 + 写盘走后台线程,
 # 不阻塞 P2 round (单 round 节省 ~80-150ms).
 # imwrite 用 libjpeg, 内部 release GIL, 多 worker 真并行.
-# pool=8: 6 实例并发每帧 4-7 张, 旧 max_workers=2 队列堆积导致后续决策 IO 滞后.
-_io_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dlog-io")
+# pool size: stable=6 / balanced=8 / speed=12, 由 runtime_profile 决定.
+_io_executor: Optional[ThreadPoolExecutor] = None
+_pool_lock = threading.Lock()
+
+
+def _build_pool() -> ThreadPoolExecutor:
+    """按当前 runtime_profile 建池. mode 切换时调."""
+    try:
+        from .runtime_profile import get_profile
+        workers = get_profile().dlog_pool_workers
+    except Exception:
+        workers = 8
+    return ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dlog-io")
+
+
+def _ensure_pool() -> ThreadPoolExecutor:
+    global _io_executor
+    if _io_executor is None:
+        with _pool_lock:
+            if _io_executor is None:
+                _io_executor = _build_pool()
+    return _io_executor
+
+
+def _reload_pool() -> None:
+    """mode 切换后重建池. runtime_profile.register_dependent 会调."""
+    global _io_executor
+    with _pool_lock:
+        old = _io_executor
+        _io_executor = _build_pool()
+    if old is not None:
+        try:
+            old.shutdown(wait=False)
+        except Exception:
+            pass
+
+
+# 注册到 runtime_profile, mode 切换时自动 reload
+try:
+    from .runtime_profile import register_dependent
+    register_dependent(_reload_pool)
+except Exception:
+    pass
 
 
 def _async_imwrite(path: str, img, q: int = 70) -> None:
@@ -50,7 +91,7 @@ def _async_imwrite(path: str, img, q: int = 70) -> None:
         except Exception as e:
             logger.debug(f"[decision] async imwrite {path} 失败: {e}")
     try:
-        _io_executor.submit(_worker)
+        _ensure_pool().submit(_worker)
     except Exception as e:
         # 池已关 / 满 → 退到同步 (保证总能写)
         logger.debug(f"[decision] io pool 不可用, 退同步: {e}")

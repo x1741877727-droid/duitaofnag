@@ -467,10 +467,11 @@ class MultiRunnerService:
 
         # ── v2 横切 Watchdog: per-instance 后台任务 ──
         # 只观察 + 写状态, 不主动打断 phase (打断逻辑留到第 4 刀做)
+        # vpn 4-信号 watchdog 已退役 (2026-05-09 cleanup, 跟 APK 路径一起删).
+        # 现在 TUN 路径靠 P0 的 /api/tun/state HTTP 探针即可校验, 不需要 per-instance vpn watchdog.
         wd_state = WatchState(instance_idx=idx)
         wd_mgr = WatchdogManager(wd_state)
         try:
-            wd_mgr.start_vpn(runner._check_vpn_connected, interval_s=5.0)
 
             async def _pidof_game() -> int:
                 try:

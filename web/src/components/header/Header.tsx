@@ -59,15 +59,26 @@ export function Header({
     return errors > 0 ? ('running-error' as const) : ('running' as const)
   })()
 
-  // 工作台测试态点"全部停止" → 不调 onAction (那是主 runner 的 stop), 走 PhaseTester cancel
+  // "全部停止" 语义: 不论是 main runner / phaseTester / 两者一起跑, 都立即全部停, 然后回中控台.
+  // 1) 后端: 永远打 /api/runner/cancel (无副作用); 若 main runner 在跑, 也走 onAction → /api/stop.
+  // 2) 前端: bump cancelToken → PhaseTester 跑中的 promise 链会在下一个 await 比 token 不一致直接抛退出.
+  // 3) 视图: 清 results / runningTargets / busy → DashboardLayoutA.phaseTesterActive=false → 回 StandbyState.
+  // 4) 路由: 强制 setCurrentView('console') — 用户在数据/识别/设置页按停止也回中控台.
   const handleAction = () => {
-    if (testerBusy && !isRunning) {
-      // 仅 PhaseTester 在跑 → 调 cancel API + 立即 reset busy
+    if (treatRunning) {
       fetch('/api/runner/cancel', { method: 'POST' }).catch(() => {})
-      setPhaseTester({ busy: false, progress: '已中止' })
+      setPhaseTester({
+        busy: false,
+        progress: '已中止',
+        results: [],
+        runningTargets: [],
+        cancelToken: (phaseTester.cancelToken || 0) + 1,
+      })
+      setCurrentView('console')
+      if (isRunning) onAction() // /api/stop
       return
     }
-    onAction()
+    onAction() // /api/start
   }
 
   // tick second uptime label (cosmetic)

@@ -61,7 +61,8 @@ class Tier:
 PENDING_CONFIRMATION_COUNT = 5       # 蓄水池: 同 phash 累计 N 次 success 才落库
 PENDING_PHASH_TOL = 12               # 蓄水池中聚合时 phash 距离容差 (跨次运行能聚合)
 PENDING_XY_TOL = 30                  # 蓄水池中聚合时坐标容差
-PENDING_TTL_S = 600                  # 蓄水池条目最大留存时间 (10min 累计 5 次)
+PENDING_TTL_S = 0                    # 蓄水池条目最大留存时间 (秒). 0 = 不超时, 永远累积到 5 次毕业.
+                                     # 用户痛点: 测试间隔 >10min 旧 sample 被清, 学习被打断.
 PENDING_STD_MAX_PX = 15              # 5 次坐标 std > 此值视为不一致, 拒绝 (说明可能命中不同位置)
 PENDING_MIN_TIME_SPAN_S = 0          # 5 次确认间最小时间跨度 (0=不限, 防 1 秒爆学可设 30)
 
@@ -484,18 +485,27 @@ class FrameMemory:
 
     def _save_pending_snapshot(self, frame, target: str, x: int, y: int,
                                key: str, idx: int) -> str:
-        """每个 sample 存一张带红圈的快照, 文件名包含 key + sample idx."""
+        """每个 sample 存一张带红圈的快照. cv2.imwrite (~30-80ms) 拉到后台线程,
+        函数立刻返 filename — DB 锁不再被 I/O 卡住. 6 实例并发 remember 不再串行."""
+        if frame is None:
+            return ""
+        fname = f"{key}__{idx}.jpg"
+        fpath = self._pending_snap_dir / fname
         try:
             annot = frame.copy()
             cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
             cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
-            fname = f"{key}__{idx}.jpg"
-            fpath = self._pending_snap_dir / fname
-            if cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 60]):
-                return fname
         except Exception as e:
-            logger.debug(f"[memory_l1] pending snap 落盘失败: {e}")
-        return ""
+            logger.debug(f"[memory_l1] pending snap 预处理失败: {e}")
+            return ""
+        # 后台 fire-and-forget 写盘 — 不持锁
+        def _write():
+            try:
+                cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            except Exception as e:
+                logger.debug(f"[memory_l1] pending snap 落盘失败: {e}")
+        threading.Thread(target=_write, daemon=True).start()
+        return fname
 
     def _cleanup_pending_snaps(self, key: str) -> None:
         """删 pending 这条 key 的全部 sample 快照."""
@@ -583,7 +593,7 @@ class FrameMemory:
         for pkey, tgt, ph_str, samples_json, ts_first in rows:
             try:
                 age = now - float(ts_first)
-                if age >= PENDING_TTL_S:
+                if PENDING_TTL_S > 0 and age >= PENDING_TTL_S:
                     self._cleanup_pending_snaps(pkey)
                     self._remove_pending_entry(pkey)
                     n_expired += 1
@@ -643,12 +653,13 @@ class FrameMemory:
         返回 commit dict 或 None (待累计/被拒绝)."""
         now = time.time()
         bucket = self._pending[target]
-        # 清掉过期 entry (顺手清快照 + DB)
-        expired = [e for e in bucket if now - e["ts_first"] >= PENDING_TTL_S]
-        for e in expired:
-            self._cleanup_pending_snaps(e.get("key", ""))
-            self._remove_pending_entry(e.get("key", ""))
-        bucket[:] = [e for e in bucket if now - e["ts_first"] < PENDING_TTL_S]
+        # 清掉过期 entry (顺手清快照 + DB) — TTL=0 关掉超时, 永远累积到 5 次毕业
+        if PENDING_TTL_S > 0:
+            expired = [e for e in bucket if now - e["ts_first"] >= PENDING_TTL_S]
+            for e in expired:
+                self._cleanup_pending_snaps(e.get("key", ""))
+                self._remove_pending_entry(e.get("key", ""))
+            bucket[:] = [e for e in bucket if now - e["ts_first"] < PENDING_TTL_S]
         # 找接近 entry (按 phash + 中心点 mean 距离)
         for e in bucket:
             cx_mean = sum(s[0] for s in e["samples"]) / len(e["samples"])
@@ -980,17 +991,26 @@ class FrameMemory:
             )
 
     def _save_snapshot(self, frame: np.ndarray, target: str, x: int, y: int) -> str:
+        """正式 commit 后的快照. cv2.imwrite 拉到后台线程, 函数立刻返 filename —
+        DB 锁不再被 ~30-80ms I/O 卡住."""
+        if frame is None:
+            return ""
+        fname = f"{target}_{int(time.time() * 1000)}.jpg"
+        fpath = self._snap_dir / fname
         try:
             annot = frame.copy()
             cv2.circle(annot, (int(x), int(y)), 36, (0, 0, 255), 3)
             cv2.circle(annot, (int(x), int(y)), 6, (0, 0, 255), -1)
-            fname = f"{target}_{int(time.time() * 1000)}.jpg"
-            fpath = self._snap_dir / fname
-            if cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 70]):
-                return fname
         except Exception as e:
-            logger.debug(f"[memory_l1] snapshot 落盘失败: {e}")
-        return ""
+            logger.debug(f"[memory_l1] snapshot 预处理失败: {e}")
+            return ""
+        def _write():
+            try:
+                cv2.imwrite(str(fpath), annot, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            except Exception as e:
+                logger.debug(f"[memory_l1] snapshot 落盘失败: {e}")
+        threading.Thread(target=_write, daemon=True).start()
+        return fname
 
     # ──────── 后台维护 (Tier 1.3) ────────
 
@@ -1127,7 +1147,7 @@ class FrameMemory:
                     "std_x": round(std_x, 1),
                     "std_y": round(std_y, 1),
                     "max_std_allowed": PENDING_STD_MAX_PX,
-                    "ttl_s": int(PENDING_TTL_S - (now - e["ts_first"])),
+                    "ttl_s": int(PENDING_TTL_S - (now - e["ts_first"])) if PENDING_TTL_S > 0 else -1,
                     "age_s": round(now - e["ts_first"], 1),
                 })
         return out
