@@ -63,28 +63,42 @@ def _setup_logging(instance_idx: int) -> None:
     root.addHandler(handler)
 
 
-async def _stdin_listener(state: dict) -> None:
-    """监听 master 通过 stdin 发来的 JSON-line 命令."""
-    loop = asyncio.get_event_loop()
-    reader = asyncio.StreamReader()
-    proto = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: proto, sys.stdin)
+def _stdin_blocking_reader(state: dict) -> None:
+    """threading 同步读 stdin (Windows asyncio.connect_read_pipe 不支持 stdin).
+
+    在独立 thread 跑 sys.stdin.readline() 阻塞读, 解析 JSON 后写 state dict.
+    主 coroutine 通过 state dict poll (轮询 state["game_scheme_url"]).
+    """
+    import threading
     while True:
         try:
-            line = await reader.readline()
-            if not line:
+            line = sys.stdin.readline()
+            if not line:    # stdin closed
+                state["stop_requested"] = True
                 break
-            msg = json.loads(line.decode("utf-8").strip())
+            line = line.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
         except Exception:
             continue
-        mtype = msg.get("type")
+        mtype = msg.get("type", "")
         if mtype == "scheme":
             state["game_scheme_url"] = msg.get("scheme", "")
-            _emit_log("info", f"收到 scheme broadcast")
+            _emit_log("info", "stdin: scheme 收到")
         elif mtype == "stop":
             state["stop_requested"] = True
-            _emit_log("info", "收到 stop 请求")
+            _emit_log("info", "stdin: stop 收到")
             break
+
+
+def _start_stdin_thread(state: dict):
+    """thread daemon=True 跑 _stdin_blocking_reader, 不阻塞主进程退出."""
+    import threading
+    t = threading.Thread(target=_stdin_blocking_reader, args=(state,),
+                         daemon=True, name="stdin-reader")
+    t.start()
+    return t
 
 
 def _build_components(instance_idx: int, role: str):
@@ -130,8 +144,9 @@ async def _run_worker(args) -> int:
     """Worker 主流程. 返 exit code (0=success)."""
     state = {"stop_requested": False, "game_scheme_url": args.game_scheme or ""}
 
-    # stdin listener (后台监听 master 命令)
-    stdin_task = asyncio.create_task(_stdin_listener(state))
+    # stdin reader (Windows: 必须 threading 同步读, asyncio.connect_read_pipe 不支持 stdin)
+    _start_stdin_thread(state)
+    stdin_task = None    # 不再用 asyncio task
 
     # 加载组件
     try:
@@ -208,8 +223,6 @@ async def _run_worker(args) -> int:
     finally:
         if sync_task is not None and not sync_task.done():
             sync_task.cancel()
-        if not stdin_task.done():
-            stdin_task.cancel()
         try:
             decision_log.close()
         except Exception:
