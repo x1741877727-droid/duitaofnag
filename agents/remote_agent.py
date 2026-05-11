@@ -210,10 +210,12 @@ threading.Thread(target=_start_cloudflared_for,
 # 命令执行 (无白名单)
 # =====================
 
-async def run_command(cmd: str, cwd: str | None = None) -> dict:
+async def run_command(cmd: str, cwd: str | None = None,
+                      timeout: int | None = None, detached: bool = False) -> dict:
     global CURRENT_DIR
     if cwd is None:
         cwd = str(CURRENT_DIR)
+    actual_timeout = timeout if (timeout and timeout > 0) else COMMAND_TIMEOUT
 
     # cd 特殊处理（subprocess 不影响主进程目录）
     s = cmd.strip()
@@ -235,6 +237,26 @@ async def run_command(cmd: str, cwd: str | None = None) -> dict:
 
     start = time.time()
     try:
+        # detached 模式: 不等 process, 立刻返 PID. 用于长任务 (避免撞 cloudflare 30s timeout).
+        if detached:
+            if sys.platform == "win32":
+                # Windows: DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP, 不继承 stdin/stdout
+                creationflags = 0x00000008 | 0x00000200    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                proc = subprocess.Popen(cmd, shell=True, cwd=cwd,
+                                        stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                        creationflags=creationflags)
+            else:
+                proc = subprocess.Popen(cmd, shell=True, cwd=cwd,
+                                        stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                        start_new_session=True)
+            return {"ok": True, "stdout": f"detached PID={proc.pid}", "stderr": "",
+                    "returncode": 0, "cwd": cwd, "pid": proc.pid,
+                    "duration_ms": int((time.time()-start)*1000), "detached": True}
+
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -242,11 +264,11 @@ async def run_command(cmd: str, cwd: str | None = None) -> dict:
             cwd=cwd,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=actual_timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return {"ok": False, "stdout": "", "stderr": f"超时 ({COMMAND_TIMEOUT}s)",
+            return {"ok": False, "stdout": "", "stderr": f"超时 ({actual_timeout}s)",
                     "returncode": -1, "cwd": cwd, "duration_ms": int((time.time()-start)*1000)}
 
         def decode(b: bytes) -> str:
@@ -384,6 +406,7 @@ class ExecRequest(BaseModel):
     cmd: str
     cwd: str | None = None
     timeout: int | None = None
+    detached: bool = False    # True: 不等 process 完成, 立刻返 PID (避免长任务撞 cloudflare 30s timeout)
 
 
 def check_auth(x_auth: str | None):
@@ -421,8 +444,8 @@ async def ui():
 @app.post("/exec")
 async def execute(req: ExecRequest, x_auth: str | None = Header(None)):
     check_auth(x_auth)
-    logger.info(f"exec: {req.cmd}")
-    result = await run_command(req.cmd, req.cwd)
+    logger.info(f"exec: {req.cmd}{' [detached]' if req.detached else ''}")
+    result = await run_command(req.cmd, req.cwd, req.timeout, req.detached)
     result["cmd"] = req.cmd
     COMMAND_HISTORY.append({
         "timestamp": time.time(),
