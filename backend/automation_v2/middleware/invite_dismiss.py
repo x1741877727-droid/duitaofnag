@@ -52,8 +52,15 @@ class InviteDismissMiddleware:
         self._last_dismiss_ts: dict[int, float] = {}   # inst_idx → 上次关闭时间
 
     def enable_for(self, phase_name: str) -> bool:
-        """所有 phase 启用 (P0 也启用 — 启动加速器期间可能弹邀请)."""
-        return True
+        """只在 P5 (等真人) 启用. 跟 v1 一致.
+
+        v1 实测: 邀请弹窗主要在大厅等真人阶段冒, P0-P4 极少出现.
+        Day 4 灰度初始我设全 phase 启用, 实测撞 OcrPool 20 OCR/sec, 触发
+        RapidOCR worker BrokenProcessPool 偶发 crash, 阻塞 asyncio 22s.
+
+        所以回退到 v1 同款策略: 只 P5 启用. P0-P4 邀请走 yolo close_x 关闭就行.
+        """
+        return phase_name == "P5"
 
     async def before_round(self, ctx: RunContext, shot) -> BeforeRoundResult:
         """每 round 委托 v1 dismiss_known_popups (跑友邀请/网络/account_squeezed 全在 KNOWN_POPUPS)."""
