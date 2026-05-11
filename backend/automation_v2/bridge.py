@@ -70,17 +70,23 @@ class V1YoloAdapter:
 
 
 class V1AdbAdapter:
-    """v1 ADBController 已经有 async tap/screenshot, 直接转发. 提供 ._adb 给 crash_check 拿 _cmd."""
+    """v1 ADBController 转发. 暴露 v2 phase 用的 tap/screenshot/start_app. ._adb 给底层访问."""
 
     def __init__(self, v1_adb):
         self._adb = v1_adb
 
     async def tap(self, x: int, y: int) -> None:
-        # v1 ADBController.tap 是 async (单元 dispatch 已在 _cmd 内)
         return await self._adb.tap(x, y)
 
     async def screenshot(self):
         return await self._adb.screenshot()
+
+    async def start_app(self, package: str, activity: str = ""):
+        return await self._adb.start_app(package, activity)
+
+    def __getattr__(self, name):
+        """漏的方法转发到 v1 adb (e.g. shell / _cmd / pidof)."""
+        return getattr(self._adb, name)
 
 
 def build_v2_ctx(
