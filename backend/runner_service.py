@@ -892,6 +892,11 @@ class MultiRunnerService:
         # async recover 已防 worker crash 阻塞.
         worker_env["GAMEBOT_OCR_WORKERS"] = "1"
         worker_env.pop("GAMEBOT_OCR_POOL_DISABLE", None)
+        # 禁 MaaTouch — 用户记忆里 MaaTouch 失败过 + R1 实测 tap=566ms 是 MaaTouch
+        # push_jar 第一次失败 fallback 慢. 直接 subprocess: 实测 120ms 稳定.
+        # adbutils 实测 ~128ms 没快 (Windows adb.exe fork 已经接近物理极限).
+        worker_env["GAMEBOT_USE_MAATOUCH"] = "0"
+        worker_env["GAMEBOT_TAP_PERSISTENT"] = "0"
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
