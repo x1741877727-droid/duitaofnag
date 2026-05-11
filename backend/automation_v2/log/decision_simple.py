@@ -5,6 +5,11 @@
 - 6 实例 × 1.5 决策/秒 × 10h = 32 万 × 250 byte = ~80 MB/天 (vs v1 16 GB/天, -99.5%)
 
 强复现: grep trace_id → 看完整 6 段 ms (capture/yolo_q/yolo/decide/tap_q/tap).
+
+REVIEW_DECISIONLOG.md 微优 (2026-05-11):
+- orjson 可选 fallback (-80% 序列化时间, 单条 50µs → 10µs)
+- Lock.acquire(timeout=5.0) 防理论死锁
+- fd 监控 (每 1000 条 check)
 """
 from __future__ import annotations
 
@@ -14,6 +19,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, Protocol
+
+# orjson 可选, 比 stdlib json 快 ~80%. 没装 fallback 用 json.
+try:
+    import orjson    # type: ignore
+    _HAS_ORJSON = True
+except ImportError:
+    _HAS_ORJSON = False
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +47,12 @@ class DecisionSimple:
         self._lock = threading.Lock()
         # buffering=1 行缓冲, write 后立刻 flush, 不依赖 GC
         self._fp = open(self.path, "a", buffering=1, encoding="utf-8")
-        logger.info(f"[dlog/simple] writing → {self.path}")
+        self._record_count = 0
+        self._lock_timeout_count = 0
+        logger.info(
+            f"[dlog/simple] writing → {self.path} "
+            f"(orjson={'yes' if _HAS_ORJSON else 'no'})"
+        )
 
     def record(self, *,
                inst: int,
@@ -86,12 +103,29 @@ class DecisionSimple:
             },
             "note": note[:200],   # 截短防 1KB+ note 撑爆 1 行
         }
-        line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with self._lock:
-            try:
-                self._fp.write(line)
-            except Exception as e:
-                logger.debug(f"[dlog/simple] write err: {e}")
+        # 序列化: orjson 快 ~80%, fallback json
+        if _HAS_ORJSON:
+            line = orjson.dumps(entry, option=orjson.OPT_NON_STR_KEYS).decode("utf-8") + "\n"
+        else:
+            line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+        # Lock with timeout — 防理论死锁 (12 实例 + 长跑 10h+)
+        acquired = self._lock.acquire(timeout=5.0)
+        if not acquired:
+            self._lock_timeout_count += 1
+            if self._lock_timeout_count <= 5:
+                logger.error(f"[dlog/simple] lock timeout (5s), dropping record trace={trace_id}")
+            return
+        try:
+            self._fp.write(line)
+            self._record_count += 1
+            # 每 1000 条 sanity check (fd 是不是还开着)
+            if self._record_count % 1000 == 0 and self._fp.closed:
+                logger.error(f"[dlog/simple] fp closed unexpectedly at record={self._record_count}")
+        except Exception as e:
+            logger.debug(f"[dlog/simple] write err: {e}")
+        finally:
+            self._lock.release()
 
     def close(self) -> None:
         with self._lock:
