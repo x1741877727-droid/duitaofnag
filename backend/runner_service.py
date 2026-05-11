@@ -890,18 +890,23 @@ class MultiRunnerService:
 
         middlewares = [InviteDismissMiddleware(), CrashCheckMiddleware()]
 
-        # 队员加入前要有队长 scheme. v2 P3b 读 ctx.game_scheme_url, 主进程同步.
+        # 后台 watcher: member 跑到 P3b 之前, 从 _team_events 拿 scheme 写 ctx
+        # 跑 P0/P1/P2 不 block, 等 P3b 真用时 ctx.game_scheme_url 已就绪 (P3b 自己 retry)
+        watcher_task = None
         if v1_runner.role == "member":
-            # 等 captain 写完 self._team_schemes[group] (v1 path 也会写, 这里 reuse)
-            evt = self._team_events.setdefault(group, asyncio.Event())
-            try:
-                await asyncio.wait_for(evt.wait(), timeout=180.0)
-                ctx.game_scheme_url = self._team_schemes.get(group, "")
-            except asyncio.TimeoutError:
-                logger.warning(f"[v2/inst{idx}] member 等 scheme 超时, FAIL")
-                inst.state = "error"
-                inst.error = "v2 member 等 captain scheme 超时"
-                return
+            async def _watch_scheme():
+                evt = self._team_events.setdefault(group, asyncio.Event())
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=180.0)
+                    ctx.game_scheme_url = self._team_schemes.get(group, "")
+                    logger.info(f"[v2/inst{idx}] scheme 同步到 ctx: {ctx.game_scheme_url[:48]}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"[v2/inst{idx}] member 等 scheme 180s 超时")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"[v2/inst{idx}] watch_scheme err: {e}")
+            watcher_task = asyncio.create_task(_watch_scheme())
 
         v2_runner = V2Runner(
             ctx, phases,
@@ -938,6 +943,8 @@ class MultiRunnerService:
             inst.error = f"v2 run exception: {e}"
             return
         finally:
+            if watcher_task is not None and not watcher_task.done():
+                watcher_task.cancel()
             try:
                 decision_log.close()
             except Exception:

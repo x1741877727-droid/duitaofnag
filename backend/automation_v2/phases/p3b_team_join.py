@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from ..ctx import RunContext
-from ..phase_base import PhaseStep, step_done, step_fail
+from ..phase_base import PhaseStep, step_done, step_fail, step_retry
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +29,9 @@ class P3bTeamJoin:
 
         scheme = ctx.game_scheme_url
         if not scheme:
-            return step_fail(
-                note="game_scheme_url 为空 (队长还没创建 / runner_service 没同步)",
-                outcome_hint="team_join_no_scheme",
-            )
+            # runner_service 后台 watcher 会异步写 scheme. retry 等, 不直接 FAIL.
+            # max_seconds=30 (在 class 上设) 内拿不到才超时 FAIL.
+            return step_retry(note="等 captain scheme", outcome_hint="wait_scheme")
 
         # TODO 业务: am start scheme + UI 确认加入
         try:
