@@ -882,6 +882,14 @@ class MultiRunnerService:
         inst.state = "init"
         logger.info(f"[v2/inst{idx}] spawn worker subprocess: idx={idx} role={role} group={group}")
 
+        # 显式继承父 env + 强制设关键 flag
+        worker_env = os.environ.copy()
+        worker_env["GAMEBOT_RUNNER_VERSION"] = "v2"
+        worker_env["GAMEBOT_SESSION_DIR"] = str(session_dir)
+        worker_env["GAMEBOT_VISION_DAEMON"] = "0"      # worker 不启 vision daemon
+        # 关键: worker 内禁 OcrPool. L2 每 worker 独立进程, 不需要再 spawn 子进程 OCR worker
+        # (双重 spawn 在 Windows 慢 + 易 crash). worker 内 OCR 直接走主进程同步路径.
+        worker_env["GAMEBOT_OCR_POOL_DISABLE"] = "1"
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -889,6 +897,7 @@ class MultiRunnerService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                env=worker_env,
             )
         except Exception as e:
             logger.error(f"[v2/inst{idx}] spawn worker err: {e}", exc_info=True)
