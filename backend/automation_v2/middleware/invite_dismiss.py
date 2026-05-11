@@ -28,10 +28,8 @@ from .base import BeforeRoundResult
 
 logger = logging.getLogger(__name__)
 
-# 节流: 同实例 5s 内不重复调 dismiss_known_popups (邀请响应 5s 够用)
-# 之前 0.8s 太频繁, 4 实例 × 5/0.8 = 20 OCR/sec 撑爆 OcrPool 触发 worker crash 22s 卡死
-# 5s 后频率 ~3.2 OCR/sec, 跟 v1 同数量级安全
-_THROTTLE_S = 5.0
+# 节流: 同实例 3s (邀请响应 3s 内够用)
+_THROTTLE_S = 3.0
 
 
 class _V1CtxProxy:
@@ -54,14 +52,9 @@ class InviteDismissMiddleware:
         self._last_dismiss_ts: dict[int, float] = {}   # inst_idx → 上次关闭时间
 
     def enable_for(self, phase_name: str) -> bool:
-        """业务需要每 phase 都能清邀请 (用户实测有些邀请只有"拒绝"按钮没 X, 必须 OCR).
-
-        但排除 P3a/P4: 这俩业务自己跑 OCR 找按钮 (建队/选地图面板就是 dialog,
-        middleware 又调 OCR 会重复扫 + 跟业务 OCR 抢 pool, 触发 worker crash 22s 卡死).
-
-        启用顺序: P0 ✓ P1 ✓ P2 ✓ P3a ✗ P3b ✓ P4 ✗ P5 ✓
-        """
-        return phase_name not in {"P3a", "P4"}
+        """所有 phase 启用. 邀请可能任何 phase 冒 (用户实测).
+        OCR pool 压力靠节流 3s + OcrPool disable (走主进程) 兜底."""
+        return True
 
     async def before_round(self, ctx: RunContext, shot) -> BeforeRoundResult:
         """每 round 委托 v1 dismiss_known_popups (跑友邀请/网络/account_squeezed 全在 KNOWN_POPUPS)."""
