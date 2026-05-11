@@ -887,14 +887,15 @@ class MultiRunnerService:
         worker_env["GAMEBOT_RUNNER_VERSION"] = "v2"
         worker_env["GAMEBOT_SESSION_DIR"] = str(session_dir)
         worker_env["GAMEBOT_VISION_DAEMON"] = "0"      # worker 不启 vision daemon
-        # OcrPool: 每 worker 独立进程, 自己启 1 个 OCR 子进程加速 P3a OCR 调用.
-        # 避免主进程同步 OCR 500-2000ms 慢, OcrPool 子进程 80ms.
-        # async recover 已防 worker crash 阻塞.
-        worker_env["GAMEBOT_OCR_WORKERS"] = "1"
-        worker_env.pop("GAMEBOT_OCR_POOL_DISABLE", None)
-        # 禁 MaaTouch — 用户记忆里 MaaTouch 失败过 + R1 实测 tap=566ms 是 MaaTouch
-        # push_jar 第一次失败 fallback 慢. 直接 subprocess: 实测 120ms 稳定.
-        # adbutils 实测 ~128ms 没快 (Windows adb.exe fork 已经接近物理极限).
+        # 关键: worker 内禁 OcrPool. L2 每 worker 独立进程, 不再嵌套 spawn 子进程
+        # OCR worker (双重 spawn 在 Windows 上吃 2GB+ 内存 + 启动 10-20s 卡死).
+        # OCR 走 ocr_dismisser fallback (asyncio.to_thread + 主进程 RapidOCR 同步).
+        # 单 worker 进程内只有 1 个 asyncio task (自己), 同步 OCR 200-500ms 不阻塞其他实例
+        # (跨进程隔离). P3a 慢一点但 100% 稳.
+        worker_env["GAMEBOT_OCR_POOL_DISABLE"] = "1"
+        worker_env.pop("GAMEBOT_OCR_WORKERS", None)
+        # 禁 MaaTouch — 第一次 push_jar 失败 fallback 慢 (实测 R1 tap=566ms).
+        # adbutils POC ~128ms 不比 subprocess (~120ms) 快, 不引入新依赖.
         worker_env["GAMEBOT_USE_MAATOUCH"] = "0"
         worker_env["GAMEBOT_TAP_PERSISTENT"] = "0"
         try:
