@@ -887,9 +887,11 @@ class MultiRunnerService:
         worker_env["GAMEBOT_RUNNER_VERSION"] = "v2"
         worker_env["GAMEBOT_SESSION_DIR"] = str(session_dir)
         worker_env["GAMEBOT_VISION_DAEMON"] = "0"      # worker 不启 vision daemon
-        # 关键: worker 内禁 OcrPool. L2 每 worker 独立进程, 不需要再 spawn 子进程 OCR worker
-        # (双重 spawn 在 Windows 慢 + 易 crash). worker 内 OCR 直接走主进程同步路径.
-        worker_env["GAMEBOT_OCR_POOL_DISABLE"] = "1"
+        # OcrPool: 每 worker 独立进程, 自己启 1 个 OCR 子进程加速 P3a OCR 调用.
+        # 避免主进程同步 OCR 500-2000ms 慢, OcrPool 子进程 80ms.
+        # async recover 已防 worker crash 阻塞.
+        worker_env["GAMEBOT_OCR_WORKERS"] = "1"
+        worker_env.pop("GAMEBOT_OCR_POOL_DISABLE", None)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
