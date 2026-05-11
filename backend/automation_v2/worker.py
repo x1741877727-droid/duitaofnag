@@ -213,6 +213,18 @@ async def _run_worker(args) -> int:
     sync_task = asyncio.create_task(_sync_scheme()) if args.role == "member" else None
 
     _emit_log("info", f"worker idx={args.idx} role={args.role} 启动")
+
+    # YOLO warmup (跑 1 次 dummy 推理预热 ONNX session)
+    # 不 warmup 的话 R1 第一次 yolo 调用要 ~1 秒 cold start, popup→tap 慢.
+    # warmup 后 R1 yolo ~30ms, R1 popup→tap 整体 1.5s → 0.6s.
+    try:
+        yolo = getattr(v1_runner, "yolo_dismisser", None)
+        if yolo and hasattr(yolo, "warmup"):
+            await asyncio.to_thread(yolo.warmup)
+            _emit_log("info", "yolo warmup done")
+    except Exception as e:
+        _emit_log("warn", f"yolo warmup err: {e}")
+
     ok = False
     try:
         ok = await v2_runner.run()
