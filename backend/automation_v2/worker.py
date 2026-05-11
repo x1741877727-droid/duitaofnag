@@ -176,10 +176,15 @@ async def _run_worker(args) -> int:
                          phase_order=phase_order)
 
     # on_phase_change → stdout JSON
+    # 关键: captain 进 P4 时, P3a 已完成, ctx.game_scheme_url 已写好 → 立刻推 scheme_ready
+    # (不等整个 run() 结束才推, 否则 member 在 P3b 等到 timeout)
     def _on_phase(phase_name: str):
         v1_label = V2_PHASE_TO_V1.get(phase_name, phase_name)
         _emit({"type": "state", "phase": phase_name, "v1_label": v1_label,
                "round": ctx.phase_round})
+        # captain 跑完 P3a 进 P4 的瞬间 → scheme 已就绪 → 立即广播
+        if args.role == "captain" and phase_name == "P4" and ctx.game_scheme_url:
+            _emit({"type": "scheme_ready", "scheme": ctx.game_scheme_url})
     v2_runner.on_phase_change = _on_phase
 
     # member 等 scheme: 后台 watch state["game_scheme_url"], 同步到 ctx

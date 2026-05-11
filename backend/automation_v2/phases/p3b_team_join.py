@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 
 class P3bTeamJoin:
     name = "P3b"
-    max_seconds = 30.0
+    # member 进 P3b 时 captain 可能还在跑 P3a (OCR 找按钮慢/popup), 给 120s buffer.
+    # captain 进 P4 立刻 emit scheme_ready, master 即时 broadcast 给 member workers.
+    max_seconds = 120.0
     round_interval_s = 1.0
 
     async def enter(self, ctx: RunContext) -> None:
