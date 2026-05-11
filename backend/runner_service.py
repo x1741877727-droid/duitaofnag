@@ -880,6 +880,14 @@ class MultiRunnerService:
             cmd += ["--game-scheme", ""]
 
         inst.state = "init"
+
+        # 防多 worker 同时 import (cv2 + onnxruntime + rapidocr ~1GB lib) 撞 Windows IO.
+        # 实测 3 实例并发 spawn → 全部 23MB RSS 卡 import 4+ 分钟 (disk 抢锁).
+        # 错开 5s spawn (idx=0 不延迟, idx=1 5s, idx=2 10s, ...), max 30s.
+        # 12 实例总额外启动延迟 60s, 但每 worker 能正常加载.
+        if idx > 0:
+            await asyncio.sleep(min(idx * 5.0, 30.0))
+
         logger.info(f"[v2/inst{idx}] spawn worker subprocess: idx={idx} role={role} group={group}")
 
         # 显式继承父 env + 强制设关键 flag
