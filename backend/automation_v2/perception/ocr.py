@@ -44,8 +44,8 @@ class OcrProto(Protocol):
     async def recognize(
         self,
         shot: Any,
-        roi: Optional[Roi] = None,
         *,
+        roi: Optional[Roi] = None,
         mode: Literal['det+rec', 'rec_only', 'auto'] = 'auto',
     ) -> list[OcrHit]: ...
 
@@ -105,11 +105,11 @@ class OCR:
     async def recognize(
         self,
         shot: Any,                              # np.ndarray
-        roi: Optional[Roi] = None,
         *,
+        roi: Optional[Roi] = None,
         mode: Literal['det+rec', 'rec_only', 'auto'] = 'auto',
     ) -> list[OcrHit]:
-        """识别文字. ROI 可选, mode 决定 det+rec 还是 rec_only."""
+        """识别文字. ROI 可选 (keyword-only, 跟 yolo.detect 一致), mode 决定路径."""
         crop, ox, oy = self._crop(shot, roi)
         if mode == 'rec_only':
             return await asyncio.to_thread(self._rec_only_as_hit, crop, ox, oy)
@@ -190,11 +190,34 @@ class OCR:
         return r.transpose(2, 0, 1)[None]
 
     def _postprocess_det(self, out: Any, hw: tuple[int, int]) -> list[tuple[int, int, int, int]]:
-        """det head 后处理. 实际接 PaddleOCR det 时填具体 NMS + bbox 解码."""
-        # TODO: 接 PaddleOCR det head (实施时填), 这里返空避免 import 失败
-        return []
+        """det head 后处理. 实际接 PaddleOCR det 时填具体 NMS + bbox 解码.
+
+        R-H1: TODO 状态时 logger.warning 让业务知道 OCR 不可用, 不静默 return.
+        """
+        if out is None:
+            logger.warning("[ocr] _postprocess_det: out is None")
+            return []
+        try:
+            # TODO: 接 PaddleOCR det head 解码 (NMS + bbox decode)
+            # 临时 TODO stub, 业务收 [] → 失败处理由业务负责
+            logger.warning("[ocr] _postprocess_det: TODO stub, OCR det 路径不可用")
+            return []
+        except Exception as e:
+            logger.error(f"[ocr] _postprocess_det error: {e}", exc_info=True)
+            return []
 
     def _ctc_decode(self, out: Any) -> tuple[str, float]:
-        """rec head CTC 解码. 实际接 PaddleOCR rec + char dict 时填."""
-        # TODO: 接 PaddleOCR rec head + chardict, 这里返空
-        return "", 0.0
+        """rec head CTC 解码. 实际接 PaddleOCR rec + char dict 时填.
+
+        R-H1: TODO 状态时 logger.warning 让业务知道 OCR 不可用.
+        """
+        if out is None:
+            logger.warning("[ocr] _ctc_decode: out is None")
+            return "", 0.0
+        try:
+            # TODO: 接 PaddleOCR rec head + chardict (argmax + CTC decode)
+            logger.warning("[ocr] _ctc_decode: TODO stub, OCR rec 路径不可用")
+            return "", 0.0
+        except Exception as e:
+            logger.error(f"[ocr] _ctc_decode error: {e}", exc_info=True)
+            return "", 0.0

@@ -20,6 +20,7 @@ REVIEW_DECISIONLOG.md 推荐架构:
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -59,6 +60,7 @@ class DecisionDetailed:
 
         # JSONL 同步写
         self._lock = threading.Lock()
+        self._stat_lock = threading.Lock()       # R-H3 计数器原子保护
         self._fp = open(self.path, "a", buffering=1, encoding="utf-8")
 
         # 图异步池: 12 worker (足够 12 实例并发 imwrite, 不阻塞主 round)
@@ -71,8 +73,11 @@ class DecisionDetailed:
 
         # 监控状态
         self._record_count = 0
-        self._lock_timeout_count = 0
         self._imwrite_fail_count = 0
+        self._closed = False
+
+        # R-C2: atexit 进程退出自动 close (防 pool 泄漏)
+        atexit.register(self.close)
 
         logger.info(
             f"[dlog/detailed] writing → {self.path} "
@@ -147,6 +152,7 @@ class DecisionDetailed:
                 "tap":         seg(t_tap_done, t_tap_send),
                 "round_total": seg(t_tap_done or t_decide, base),
             },
+            "latency_ms": seg(t_tap_done or t_decide, base),   # R-M2: v1 兼容字段
             "note": note[:500],   # 详版允许更长 note
             # 详版独有
             "input_image": img_filename,
@@ -159,31 +165,25 @@ class DecisionDetailed:
         else:
             line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
 
-        # Lock with timeout 防理论死锁
-        acquired = self._lock.acquire(timeout=5.0)
-        if not acquired:
-            self._lock_timeout_count += 1
-            if self._lock_timeout_count <= 5:
-                logger.error(f"[dlog/detailed] lock timeout (5s), dropping trace={trace_id}")
-            return
+        # R-C1: context manager 无 timeout (数据完整性)
         try:
-            self._fp.write(line)
-            self._record_count += 1
-            # 每 1000 条 sanity check
-            if self._record_count % 1000 == 0:
-                if self._fp.closed:
-                    logger.error(f"[dlog/detailed] fp closed at record={self._record_count}")
-                # 监控 imwrite 失败率
-                fail_rate = self._imwrite_fail_count / self._record_count if self._record_count > 0 else 0
-                if fail_rate > 0.05:
-                    logger.warning(
-                        f"[dlog/detailed] imwrite 失败率高: "
-                        f"{self._imwrite_fail_count}/{self._record_count} ({fail_rate:.1%})"
-                    )
+            with self._lock:
+                self._fp.write(line)
+                with self._stat_lock:   # R-H3: 计数器原子保护
+                    self._record_count += 1
+                    record_count = self._record_count
+                # 每 1000 条 sanity check
+                if record_count % 1000 == 0:
+                    if self._fp.closed:
+                        logger.error(f"[dlog/detailed] fp closed at record={record_count}")
+                    fail_rate = self._imwrite_fail_count / record_count if record_count > 0 else 0
+                    if fail_rate > 0.05:
+                        logger.warning(
+                            f"[dlog/detailed] imwrite 失败率高: "
+                            f"{self._imwrite_fail_count}/{record_count} ({fail_rate:.1%})"
+                        )
         except Exception as e:
             logger.debug(f"[dlog/detailed] write err: {e}")
-        finally:
-            self._lock.release()
 
     def _write_image_safe(self, path: Path, img: Any) -> None:
         """imwrite with try-except + 失败计数. pool worker 中调用."""
@@ -191,27 +191,28 @@ class DecisionDetailed:
             import cv2
             cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, self.img_quality])
         except Exception as e:
-            self._imwrite_fail_count += 1
+            with self._stat_lock:        # R-H3: 计数器原子
+                self._imwrite_fail_count += 1
             logger.debug(f"[dlog/detailed] imwrite {path.name} fail: {e}")
 
     def close(self) -> None:
-        """退出时调. JSONL fd 关 + pool.shutdown 干净退出."""
+        """退出时调 (atexit 也会调). JSONL fd 关 + pool.shutdown(wait=False) 不卡 exit."""
+        if self._closed:
+            return
+        self._closed = True
         with self._lock:
             try:
                 self._fp.close()
             except Exception:
                 pass
+        # R-H4: shutdown(wait=False) 不卡 exit (有 task hang 死时)
         try:
-            self._img_pool.shutdown(wait=True)
-        except Exception:
-            try:
-                self._img_pool.shutdown(wait=False)
-            except Exception:
-                pass
+            self._img_pool.shutdown(wait=False)
+        except Exception as e:
+            logger.debug(f"[dlog/detailed] pool shutdown err: {e}")
         logger.info(
             f"[dlog/detailed] closed. records={self._record_count} "
-            f"imwrite_fails={self._imwrite_fail_count} "
-            f"lock_timeouts={self._lock_timeout_count}"
+            f"imwrite_fails={self._imwrite_fail_count}"
         )
 
 

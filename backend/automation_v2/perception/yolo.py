@@ -95,11 +95,18 @@ class Yolo:
         )
 
     async def warmup(self) -> None:
-        """启动时跑 1 次 dummy 推理避免 cold start. 主程序启动后调一次."""
-        import numpy as np
-        dummy = np.zeros((540, 960, 3), dtype=np.uint8)
-        await asyncio.to_thread(self._infer_full, dummy, 0.20)
-        logger.info(f"[yolo] warmup done")
+        """启动时跑 1 次 dummy 推理避免 cold start. 主程序启动后调一次.
+
+        R-H2: 异常处理 + raise — 启动 fail-fast, 上层决定是否 fatal.
+        """
+        try:
+            import numpy as np
+            dummy = np.zeros((540, 960, 3), dtype=np.uint8)
+            await asyncio.to_thread(self._infer_full, dummy, 0.20)
+            logger.info(f"[yolo] warmup done")
+        except Exception as e:
+            logger.error(f"[yolo] warmup failed: {e}", exc_info=True)
+            raise   # 上层 runner 启动时捕获, 决定 fatal / fallback
 
     async def detect(
         self,
