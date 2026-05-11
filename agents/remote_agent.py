@@ -396,6 +396,67 @@ connect();
 </html>"""
 
 # =====================
+# =====================
+# Windows Defender 排除 (agent 启动时自动调, 一次配永久生效)
+# 解决 Defender 实时保护扫描 python.exe 加载 ONNX/cv2 大 DLL 卡 worker import
+# 防客户机器 worker spawn 23s 卡 24MB RSS (实测原因)
+# =====================
+_DEFENDER_EXCLUSION_PATHS = []   # 启动时填: game-automation 项目目录 + LDPlayer + Python
+_DEFENDER_EXCLUSION_PROCESSES = ["python.exe", "cloudflared.exe", "Ld9BoxHeadless.exe",
+                                  "ldconsole.exe", "adb.exe"]
+
+
+def _setup_defender_exclusions():
+    """一次性给 Defender 加排除. 跑 PowerShell Add-MpPreference. idempotent (重复 add 不报错)."""
+    if sys.platform != 'win32':
+        return
+    # 收集要排除的路径
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    paths = [project_dir]
+    python_dir = os.path.dirname(sys.executable)
+    paths.append(python_dir)
+    # 找 LDPlayer (C:/D:/E:/F: 盘 leidian/LDPlayer9)
+    for drive in ("C:", "D:", "E:", "F:"):
+        ld = f"{drive}\\leidian\\LDPlayer9"
+        if os.path.exists(ld):
+            paths.append(ld)
+            break
+
+    _DEFENDER_EXCLUSION_PATHS[:] = paths
+
+    # 拼 PowerShell 命令: 一次性 add 全部
+    ps_cmd_parts = []
+    for p in paths:
+        ps_cmd_parts.append(f'Add-MpPreference -ExclusionPath "{p}" -ErrorAction SilentlyContinue')
+    for proc in _DEFENDER_EXCLUSION_PROCESSES:
+        ps_cmd_parts.append(f'Add-MpPreference -ExclusionProcess "{proc}" -ErrorAction SilentlyContinue')
+
+    ps_cmd = '; '.join(ps_cmd_parts)
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+        )
+        if result.returncode == 0:
+            print(f"[INFO] Defender 排除已配 ({len(paths)} 路径 + {len(_DEFENDER_EXCLUSION_PROCESSES)} 进程)",
+                  file=sys.stderr)
+        else:
+            print(f"[WARN] Defender 排除配置返回 rc={result.returncode}: {result.stderr.decode('gbk', errors='replace')[:200]}",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"[WARN] Defender 排除配置异常 (非致命): {e}", file=sys.stderr)
+
+
+# agent admin 启动时调用 (idempotent, 重启 agent 也只调一次)
+if sys.platform == 'win32':
+    try:
+        _setup_defender_exclusions()
+    except Exception as e:
+        print(f"[WARN] setup_defender_exclusions err: {e}", file=sys.stderr)
+
+
+# =====================
 # FastAPI 应用
 # =====================
 
