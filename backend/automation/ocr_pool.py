@@ -176,7 +176,12 @@ class OcrPool:
     async def ocr_async(cls, img: np.ndarray) -> List[OcrHit]:
         """异步 OCR。会被 asyncio loop 调度到空闲 worker，不阻塞主线程。
 
-        worker 崩 / BrokenProcessPool → 自动 disable，往后调用方走 fallback。
+        worker 崩 → 异步 shutdown 旧 pool + 后台 spawn 新 pool, main 不卡.
+        本次返 [] 让调用方走主进程 ThreadPool fallback (单次).
+        新 pool 2-5s 后 ready, 速度自动恢复.
+
+        2026-05-12 day4-fix 真根治: Python 3.12 Windows shutdown(wait=False)
+        实际同步阻塞 22s (pipe close), 把 main asyncio 锁死. 改异步 shutdown.
         """
         if not cls.is_enabled() or cls._executor is None:
             return []
@@ -185,15 +190,32 @@ class OcrPool:
         try:
             raw = await loop.run_in_executor(cls._executor, _worker_ocr, img)
         except Exception as e:
-            # BrokenProcessPool / EOFError / WorkerCrash → 永久禁用本会话的 pool
+            # 1. 立即 disable + 摘掉 executor 引用 (main 不阻塞)
+            old_executor = cls._executor
             cls._enabled = False
-            try:
-                cls._executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                pass
             cls._executor = None
-            logger.warning(f"OcrPool 故障，本会话禁用 pool 转 ThreadPool fallback: {e}")
-            return []
+
+            # 2. 后台异步 shutdown + reinit (不阻塞 asyncio loop)
+            import threading
+            def _bg_recover():
+                try:
+                    old_executor.shutdown(wait=True, cancel_futures=True)
+                except Exception:
+                    pass
+                # 2 秒等子进程清理
+                time.sleep(2)
+                # reinit 新 pool (复用 workers / params)
+                workers = cls._workers
+                params = cls._ocr_params
+                cls._enabled = True   # 允许 init 重跑
+                if cls.init(workers=workers, ocr_params=params):
+                    logger.info(f"OcrPool 自恢复 OK (workers={workers})")
+                else:
+                    logger.warning("OcrPool 自恢复失败, 本会话走主进程 fallback")
+            threading.Thread(target=_bg_recover, daemon=True, name="ocrpool-recover").start()
+
+            logger.warning(f"OcrPool worker crash, 异步重启 + 本次 fallback 主进程: {e}")
+            return []   # ocr_dismisser:302 自动 fallback ThreadPool
         dt = (time.perf_counter() - t0) * 1000
         cls._stats_calls += 1
         cls._stats_total_ms += dt
