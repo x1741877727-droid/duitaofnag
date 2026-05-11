@@ -6,11 +6,13 @@ MultiRunnerService — 多实例并行运行服务
 
 import asyncio
 import contextvars
+import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 # 当前运行实例标识 — asyncio task 级别隔离，WSLogHandler 用来过滤
 _current_instance: contextvars.ContextVar[int] = contextvars.ContextVar('_current_instance', default=-1)
@@ -842,131 +844,159 @@ class MultiRunnerService:
 
 
     async def _run_instance_v2(self, idx: int, v1_runner: SingleInstanceRunner):
-        """v2 phase loop. Day 4 灰度: v2 跑 P0→P4 (captain) / P0→P3b (member), 不动 P5.
+        """L2 subprocess 架构: 每实例独立 worker 子进程, 主进程只调度.
 
-        v2 SingleRunner 拿 v1 SingleInstanceRunner 的 adb/yolo, P3a/P3b/P4 走 flows wrapper
-        转 v1_runner.phase_team_create/join/map_setup (避免 600 行重写).
+        不在主进程跑 phase loop. 直接 spawn `python -m backend.automation_v2.worker --idx N ...`,
+        子进程内部独立加载 ONNX/RapidOCR/ldopengl, 跑完整 v2 phase chain.
+
+        主进程通过 stdin/stdout JSON-line IPC 收消息:
+          - {type: state, phase, round}        → 更新 inst.state + 前端推送
+          - {type: scheme_ready, scheme}        → broadcast 给同组 member
+          - {type: done, ok}                    → session 结束
+          - {type: error/log}                   → 转发 logger
         """
         _current_instance.set(idx)
         inst = self._instances[idx]
         group = inst.group
+        role = v1_runner.role
 
-        try:
-            from .automation_v2.bridge import build_v2_ctx, V2_PHASE_TO_V1
-            from .automation_v2.runner import SingleRunner as V2Runner
-            from .automation_v2.phases import (
-                P0Accel, P1Launch, P2Dismiss,
-                P3aTeamCreate, P3bTeamJoin, P4MapSetup,
-            )
-            from .automation_v2.middleware.invite_dismiss import InviteDismissMiddleware
-            from .automation_v2.middleware.crash_check import CrashCheckMiddleware
-        except Exception as e:
-            logger.error(f"[v2/inst{idx}] import 失败, 回退 v1: {e}", exc_info=True)
-            return await self._run_instance(idx, v1_runner)    # 防御性回退
+        # v1_runner 在此 path 不直接用 (worker 内部自己 init), 但 service 仍持有它
+        # 是因为 start_all 已经构造好了, 占用 list. worker 进程独立持有自己一套.
 
         from pathlib import Path
+        from .automation_v2.bridge import V2_PHASE_TO_V1
+
         session_dir = Path(self._session_dir)
+        cmd = [
+            sys.executable, "-u",
+            "-m", "backend.automation_v2.worker",
+            "--idx", str(idx),
+            "--role", role,
+            "--group", group,
+            "--session-dir", str(session_dir),
+        ]
+        if role == "member":
+            # member 初始 scheme 留空, 主进程跑 captain P3a 完成后通过 stdin broadcast
+            cmd += ["--game-scheme", ""]
 
-        # v2 ctx (含 v1 桥) + decision log
-        ctx, decision_log = build_v2_ctx(
-            instance_idx=idx,
-            role=v1_runner.role,
-            v1_runner=v1_runner,
-            session_dir=session_dir,
-        )
+        inst.state = "init"
+        logger.info(f"[v2/inst{idx}] spawn worker subprocess: idx={idx} role={role} group={group}")
 
-        # phase dict — Day 4 不含 P5
-        phases = {
-            "P0":  P0Accel(),
-            "P1":  P1Launch(),
-            "P2":  P2Dismiss(),
-            "P3a": P3aTeamCreate(),
-            "P3b": P3bTeamJoin(),
-            "P4":  P4MapSetup(),
-        }
-        # Day 4 灰度截短: captain P0→P4, member P0→P3b. P5 留 Day 5
-        phase_order = (["P0", "P1", "P2", "P3a", "P4"] if v1_runner.role == "captain"
-                       else ["P0", "P1", "P2", "P3b"])
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+        except Exception as e:
+            logger.error(f"[v2/inst{idx}] spawn worker err: {e}", exc_info=True)
+            inst.state = "error"
+            inst.error = f"spawn err: {e}"
+            return
 
-        middlewares = [InviteDismissMiddleware(), CrashCheckMiddleware()]
+        # 注册 worker 进程, 供 stop_all / scheme broker 用
+        if not hasattr(self, "_workers_v2"):
+            self._workers_v2: dict[int, Any] = {}
+        self._workers_v2[idx] = proc
 
-        # 后台 watcher: member 跑到 P3b 之前, 从 _team_events 拿 scheme 写 ctx
-        # 跑 P0/P1/P2 不 block, 等 P3b 真用时 ctx.game_scheme_url 已就绪 (P3b 自己 retry)
-        watcher_task = None
-        if v1_runner.role == "member":
-            async def _watch_scheme():
-                evt = self._team_events.setdefault(group, asyncio.Event())
+        # 读 worker stdout, 解析 JSON 消息
+        ok = False
+        try:
+            async for line in proc.stdout:
                 try:
-                    await asyncio.wait_for(evt.wait(), timeout=180.0)
-                    ctx.game_scheme_url = self._team_schemes.get(group, "")
-                    logger.info(f"[v2/inst{idx}] scheme 同步到 ctx: {ctx.game_scheme_url[:48]}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"[v2/inst{idx}] member 等 scheme 180s 超时")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.debug(f"[v2/inst{idx}] watch_scheme err: {e}")
-            watcher_task = asyncio.create_task(_watch_scheme())
+                    msg = json.loads(line.decode("utf-8", errors="replace").strip())
+                except Exception:
+                    continue
+                await self._handle_worker_msg(idx, group, role, msg, inst)
+                if msg.get("type") == "done":
+                    ok = bool(msg.get("ok"))
+                    break
+        except asyncio.CancelledError:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            self._workers_v2.pop(idx, None)
 
-        v2_runner = V2Runner(
-            ctx, phases,
-            middlewares=middlewares,
-            state_adapter=None,           # Day 4 不接 state, Day 5 接
-            phase_order=phase_order,
-        )
+        if not ok:
+            inst.state = "error"
+            inst.error = inst.error or "v2 worker FAIL"
+            logger.warning(f"[v2/inst{idx}] worker FAIL")
+            return
 
-        # 状态翻译 + 推送 (v2 phase → v1 词汇, 前端 PHASE_LABELS 命中)
-        def _push_state(v2_phase: str):
+        inst.state = "done"
+        logger.info(f"[v2/inst{idx}] worker done")
+
+    async def _handle_worker_msg(self, idx: int, group: str, role: str,
+                                 msg: dict, inst: 'InstanceStatus') -> None:
+        """处理 worker stdout JSON 消息: state 更新 / scheme broadcast / log 转发."""
+        from .automation_v2.bridge import V2_PHASE_TO_V1
+        mtype = msg.get("type", "")
+
+        if mtype == "state":
+            v2_phase = msg.get("phase", "")
             v1_label = V2_PHASE_TO_V1.get(v2_phase, v2_phase)
             old = inst.state
             inst.state = v1_label
             if old != v1_label:
                 self._broadcast_state_change(idx, old, v1_label)
 
-        # phase 切换回调: v2 phase 名 (P0-P5) → v1 词汇 (前端 PHASE_LABELS 命中)
-        def _on_phase(phase_name: str):
-            v1_label = V2_PHASE_TO_V1.get(phase_name, phase_name)
-            old = inst.state
-            inst.state = v1_label
-            if old != v1_label:
-                self._broadcast_state_change(idx, old, v1_label)
-        v2_runner.on_phase_change = _on_phase
+        elif mtype == "scheme_ready":
+            scheme = msg.get("scheme", "")
+            if scheme and role == "captain":
+                self._team_schemes[group] = scheme
+                evt = self._team_events.get(group)
+                if evt:
+                    evt.set()
+                # broadcast scheme 给同组 member workers
+                await self._broadcast_scheme_to_members(group, scheme)
+                logger.info(f"[v2/inst{idx}] 队长 scheme 同步 group={group}: {scheme[:48]}")
 
-        inst.state = "init"
-        try:
-            ok = await v2_runner.run()
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"[v2/inst{idx}] run() 抛: {e}", exc_info=True)
-            inst.state = "error"
-            inst.error = f"v2 run exception: {e}"
+        elif mtype == "log":
+            level = msg.get("level", "info")
+            log_msg = msg.get("msg", "")
+            if level in ("error", "err"):
+                logger.error(f"[v2/inst{idx}/w] {log_msg}")
+            elif level in ("warning", "warn"):
+                logger.warning(f"[v2/inst{idx}/w] {log_msg}")
+            else:
+                logger.info(f"[v2/inst{idx}/w] {log_msg}")
+
+        elif mtype == "error":
+            err_msg = msg.get("msg", "unknown")
+            inst.error = err_msg[:300]
+            logger.warning(f"[v2/inst{idx}] worker error: {err_msg[:200]}")
+
+        elif mtype == "done":
+            # 调用方处理
+            pass
+
+    async def _broadcast_scheme_to_members(self, group: str, scheme: str) -> None:
+        """captain 报 scheme_ready 后, 主进程把 scheme 推 stdin 到同组 member workers."""
+        if not hasattr(self, "_workers_v2"):
             return
-        finally:
-            if watcher_task is not None and not watcher_task.done():
-                watcher_task.cancel()
+        for idx, proc in list(self._workers_v2.items()):
+            inst = self._instances.get(idx)
+            if inst is None or inst.group != group or inst.role != "member":
+                continue
             try:
-                decision_log.close()
-            except Exception:
-                pass
-
-        if not ok:
-            inst.state = "error"
-            inst.error = "v2 phase 链 FAIL"
-            logger.warning(f"[v2/inst{idx}] FAIL")
-            return
-
-        # P3a 成功: 把 ctx.game_scheme_url 回填 _team_schemes, 队员能 unblock (CRITICAL §1.1 修复)
-        if v1_runner.role == "captain" and ctx.game_scheme_url:
-            self._team_schemes[group] = ctx.game_scheme_url
-            evt = self._team_events.get(group)
-            if evt:
-                evt.set()
-            logger.info(f"[v2/inst{idx}] 队长 scheme 回填 group={group}: "
-                        f"{ctx.game_scheme_url[:48]}")
-
-        inst.state = "done"
-        logger.info(f"[v2/inst{idx}] session done (Day 4 P5 未启)")
+                line = json.dumps({"type": "scheme", "scheme": scheme},
+                                  ensure_ascii=False) + "\n"
+                proc.stdin.write(line.encode("utf-8"))
+                await proc.stdin.drain()
+            except Exception as e:
+                logger.debug(f"[v2/inst{idx}] 推 scheme stdin err: {e}")
 
 
     def _on_phase_change(self, idx: int, phase: Phase):
