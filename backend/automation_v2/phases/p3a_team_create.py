@@ -206,20 +206,50 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext) -> PhaseStep:
-        """关 panel — 多重兜底: 点空白 + yolo close_x tap 直到 panel 关掉.
+        """关 panel: 优先 team_list_kill 模板, miss 再点空白.
 
-        策略 (event-driven):
-          1. tap 空白 (720, 270) 第一次试 (用户实测能关 panel)
-          2. 等 200ms, 截图 yolo 检测: 还有 close_x?
-             - 没 → panel 关了, done
-             - 有 → tap close_x, 重复 (最多 3 次)
-          3. 仍有 close_x → 试别的空白位置 (480, 400)
-          4. 还失败 → 强制 done, P4 自己兜底
+        策略:
+          1. 截图, 模板匹配 `team_list_kill` (用户裁的好友/邀请面板关闭按钮)
+             - 命中 → tap 模板位置, done
+          2. miss → tap (720, 270) 屏幕右下空白
+             - 等 200ms, 直接 done (信赖空白生效)
+
+        team_list_kill 模板需要用户后续裁图加到 fixtures/templates/.
+        没这个模板时自动 fallback 到点空白, 不会破业务.
         """
-        ctx.mark("yolo_start")
+        ctx.mark("yolo_start"); ctx.mark("yolo_done")
 
-        # ─ 第一步: tap 空白 ─
+        try:
+            shot = await ctx.adb.screenshot()
+        except Exception:
+            shot = None
+
+        # ─ 第一步: 模板 team_list_kill ─
+        hit = None
+        if shot is not None and ctx.matcher is not None:
+            try:
+                hit = ctx.matcher.match_one(shot, "team_list_kill", threshold=0.7)
+            except Exception as e:
+                logger.debug(f"P3a[close] template team_list_kill err: {e}")
+                hit = None
+
         ctx.mark("tap_send")
+        if hit is not None:
+            # 模板命中 → tap 那个位置
+            try:
+                await ctx.adb.tap(int(hit.cx), int(hit.cy))
+            except Exception as e:
+                logger.debug(f"P3a[close] template tap err: {e}")
+            ctx.mark("tap_done")
+            await asyncio.sleep(0.2)
+            ctx.mark("decide")
+            ctx._p3a["sub_step"] = "done"
+            return step_retry(
+                note=f"P3a[close] 模板 team_list_kill@({hit.cx},{hit.cy}) → done",
+                outcome_hint="closed_by_template",
+            )
+
+        # ─ 第二步: miss → 点空白 ─
         try:
             await ctx.adb.tap(720, 270)
         except Exception as e:
@@ -227,50 +257,11 @@ class P3aTeamCreate:
         ctx.mark("tap_done")
         await asyncio.sleep(0.2)
 
-        # ─ 第二步: 检测 panel 是否还在 ─
-        attempts_log = ["tap blank (720,270)"]
-        for attempt in range(3):
-            try:
-                shot = await ctx.adb.screenshot()
-                dets = await ctx.yolo.detect(shot, conf_thresh=0.40) if shot is not None else []
-            except Exception:
-                dets = []
-
-            close_xs = sorted(
-                (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
-                key=lambda d: -d.conf,
-            )
-            if not close_xs:
-                # 没 close_x = panel 关掉了
-                ctx.mark("yolo_done"); ctx.mark("decide")
-                ctx._p3a["sub_step"] = "done"
-                return step_retry(
-                    note=f"P3a[close] panel 关掉 ({'/'.join(attempts_log)})",
-                    outcome_hint="closed",
-                )
-
-            # 还有 close_x, tap conf 最高的
-            d = close_xs[0]
-            attempts_log.append(f"tap close_x@({d.cx},{d.cy})")
-            try:
-                await ctx.adb.tap(d.cx, d.cy)
-            except Exception:
-                pass
-            await asyncio.sleep(0.25)
-
-        # ─ 第三步: 还失败 → 试另一个空白位置 (480, 400 中下) ─
-        try:
-            await ctx.adb.tap(480, 400)
-            attempts_log.append("tap blank2 (480,400)")
-        except Exception:
-            pass
-        await asyncio.sleep(0.2)
-
-        ctx.mark("yolo_done"); ctx.mark("decide")
+        ctx.mark("decide")
         ctx._p3a["sub_step"] = "done"
         return step_retry(
-            note=f"P3a[close] 强制 done ({'/'.join(attempts_log)})",
-            outcome_hint="close_force_done",
+            note="P3a[close] team_list_kill miss → tap 空白 (720,270) → done",
+            outcome_hint="closed_by_blank",
         )
 
     # ════════════════════════════════════════
