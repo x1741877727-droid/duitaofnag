@@ -112,27 +112,10 @@ class P4MapSetup:
         st = ctx._p4
         sub = st["sub_step"]
 
-        # ── 1. Tap 前弹窗检查: 只在 "open" 子步 (主菜单状态, panel 未打开) 跑.
-        # mode/map/fill 在 panel 内, confirm 时 panel 还开着 — 这些状态 yolo
-        # 看到的 close_x 多半是 panel 自带, 误识 popup 会把 panel 关掉.
-        if sub == "open":
-            ctx.mark("yolo_start")
-            popup_tap = await self._find_popup(ctx, shot)
-            ctx.mark("yolo_done")
-            if popup_tap and st["popup_intercept_count"] < POPUP_INTERCEPT_LIMIT:
-                x, y = popup_tap
-                ctx.add_blacklist(x, y, ttl=3.0)
-                st["popup_intercept_count"] += 1
-                st["tap_done"] = False
-                ctx.mark("decide")
-                return step_retry(
-                    note=f"P4[open]: popup intercept @({x},{y}) "
-                         f"({st['popup_intercept_count']}/{POPUP_INTERCEPT_LIMIT})",
-                    outcome_hint="popup_intercept",
-                    action=PhaseAction(kind="tap", x=x, y=y, target="popup_close"),
-                )
-        else:
-            ctx.mark("yolo_start"); ctx.mark("yolo_done")
+        # 不查 yolo close_x: 实测 yolo 在 7 周年活动 banner / 右上角图标区
+        # 误识 close_x@(729, 122), 误关. 邀请类 popup 已由 InviteDismiss
+        # middleware 管 (它用 OCR anchor 区分, 不会被 yolo 误识误导).
+        ctx.mark("yolo_start"); ctx.mark("yolo_done")
 
         # ── 2. 分支 ──
         if sub == "open":
