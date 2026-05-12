@@ -206,147 +206,30 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext) -> PhaseStep:
-        """关 P3a 打开的 panel — Hybrid V1 + V2: 第 1 轮固定坐标快, 失败走 v1 完整 fallback.
+        """关 P3a 打开的 panel — 极简: tap (720, 270) 等动画就 done.
 
-        Round 1 (快, 0.6s, 80% case):
-          直接 tap (731, 127) dialog X + tap (720, 270) 空白 (v1 历史成功坐标)
-          → verify lobby_start_btn → 通过 done
-          → 不通过 → 走 Round 2-4
+        历史教训:
+          - lobby_start_btn 模板在 7 周年活动 UI 下 conf 仅 0.375 (远低 0.7),
+            无法用模板 verify "已回大厅"
+          - 用户实测 + 手动 ADB tap 确认: tap (720, 270) 100% 关掉 panel
+          - 复杂多层 fallback 反而拖慢, 没收益
 
-        Round 2-4 (慢, v1 完整 fallback):
-          verify lobby → find_dialog_close 模板族 → yolo close_x → team_list_kill → 空白
+        现在做法: 信赖 tap, 不 verify. P4 自己处理屏幕状态.
         """
-        notes = []
-
-        # ━━━━━━━━━━ ROUND 1: 固定坐标快速尝试 (跟 V2 思路一致) ━━━━━━━━━━
         ctx.mark("yolo_start"); ctx.mark("yolo_done")
         ctx.mark("tap_send")
         try:
-            await ctx.adb.tap(731, 127)   # v1 历史 28% dialog X 真实位置
-        except Exception:
-            pass
-        await asyncio.sleep(0.15)
-        try:
-            await ctx.adb.tap(720, 270)   # v1 历史 60% 空白兜底
-        except Exception:
-            pass
+            await ctx.adb.tap(720, 270)
+        except Exception as e:
+            logger.debug(f"P3a[close] tap err: {e}")
         ctx.mark("tap_done")
-        await asyncio.sleep(0.2)          # 等关闭动画
-        notes.append("R1 fast: (731,127)+(720,270)")
+        await asyncio.sleep(0.4)   # 等 panel 关闭动画
 
-        # 立即 verify (lobby 模板)
-        try:
-            shot = await ctx.adb.screenshot()
-        except Exception:
-            shot = None
-        if shot is not None and ctx.matcher is not None:
-            try:
-                h = ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7) \
-                    or ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
-                if h is not None:
-                    ctx.mark("decide")
-                    ctx._p3a["sub_step"] = "done"
-                    notes.append("verify lobby OK")
-                    return step_retry(
-                        note=f"P3a[close] {' | '.join(notes)} → done",
-                        outcome_hint="closed_fast",
-                    )
-            except Exception:
-                pass
-
-        # ━━━━━━━━━━ ROUND 2-4: V1 完整 fallback ━━━━━━━━━━
-        for attempt in range(3):   # 已经 R1 占了 1 次, 这里 3 次 ≈ v1 4 轮
-            try:
-                shot = await ctx.adb.screenshot()
-            except Exception:
-                shot = None
-
-            if shot is None:
-                await asyncio.sleep(0.2)
-                continue
-
-            # ── Step 0: verify 是否已回大厅 (lobby 模板命中即 done) ──
-            if ctx.matcher is not None:
-                try:
-                    h = ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7) \
-                        or ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
-                    if h is not None:
-                        ctx.mark("yolo_start"); ctx.mark("yolo_done")
-                        ctx.mark("tap_send"); ctx.mark("tap_done"); ctx.mark("decide")
-                        ctx._p3a["sub_step"] = "done"
-                        notes.append(f"F{attempt+1} lobby_start_btn 命中, 已回大厅")
-                        return step_retry(
-                            note=f"P3a[close] {' | '.join(notes)} → done",
-                            outcome_hint="lobby_confirmed",
-                        )
-                except Exception:
-                    pass
-
-            # ── Step 1: find_dialog_close 模板族 (v1 真正干活的层) ──
-            close_hit = None
-            close_method = ""
-            if ctx.matcher is not None:
-                try:
-                    close_hit = ctx.matcher.find_dialog_close(shot)
-                    if close_hit is not None:
-                        close_method = "find_dialog_close"
-                except Exception as e:
-                    logger.debug(f"P3a[close] find_dialog_close err: {e}")
-
-            # ── Step 2: yolo close_x (放后, 因为会误识) ──
-            if close_hit is None:
-                ctx.mark("yolo_start")
-                try:
-                    dets = await ctx.yolo.detect(shot, conf_thresh=0.40)
-                except Exception:
-                    dets = []
-                ctx.mark("yolo_done")
-                close_xs = sorted(
-                    (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
-                    key=lambda d: -d.conf,
-                )
-                if close_xs:
-                    d = close_xs[0]
-                    # 包成 hit-like 对象 (.cx/.cy)
-                    class _YoloHit:
-                        def __init__(s, cx, cy, conf):
-                            s.cx, s.cy, s.confidence = cx, cy, conf
-                    close_hit = _YoloHit(d.cx, d.cy, d.conf)
-                    close_method = f"yolo close_x conf={d.conf:.2f}"
-            else:
-                ctx.mark("yolo_start"); ctx.mark("yolo_done")
-
-            # ── Step 3: team_list_kill 模板 (好友 panel `<` 收起箭头) ──
-            if close_hit is None and ctx.matcher is not None:
-                try:
-                    h = ctx.matcher.match_one(shot, "team_list_kill", threshold=0.7)
-                    if h is not None:
-                        close_hit = h
-                        close_method = "team_list_kill"
-                except Exception:
-                    pass
-
-            # ── Step 4: tap (close_hit 或 空白 720,270) ──
-            ctx.mark("tap_send")
-            if close_hit is not None:
-                tx, ty = int(close_hit.cx), int(close_hit.cy)
-                notes.append(f"F{attempt+1} {close_method}@({tx},{ty})")
-            else:
-                tx, ty = 720, 270
-                notes.append(f"F{attempt+1} blank@(720,270)")
-            try:
-                await ctx.adb.tap(tx, ty)
-            except Exception:
-                pass
-            ctx.mark("tap_done")
-            ctx.mark("decide")
-            await asyncio.sleep(0.3)   # 等关闭动画
-
-        # 4 轮都没回大厅 — 强制 done, P4 自己兜底
         ctx._p3a["sub_step"] = "done"
+        ctx.mark("decide")
         return step_retry(
-            note=f"P3a[close] 4 轮: {' | '.join(notes)} → force done",
-            outcome_hint="closed_force_done",
+            note="P3a[close] tap (720,270) → done",
+            outcome_hint="closed_simple",
         )
 
     # ════════════════════════════════════════

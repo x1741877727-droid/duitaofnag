@@ -119,10 +119,17 @@ class P4MapSetup:
 
         # ── 2. 分支 ──
         if sub == "open":
-            # P4-1 改 OCR 找"开始游戏" → tap 下方 60px (跟 v1 一致).
-            # 实测固定坐标 (90, 92) 历史 v1 数据只有 36% 一致, 现版本游戏 UI
-            # 模式名 cy 漂移. OCR 找"开始游戏"文字 + cy+60 一直可靠.
-            return await self._step_open_via_ocr(ctx, shot)
+            # P4-1 直接固定坐标 (90, 92) tap 模式名按钮.
+            # 实测 (after_tap1.png 手动验证): P3a 关 panel 后大厅干净,
+            # 左上 "开始游戏"标签下方模式名按钮在 (90, 92) 附近.
+            # 不用 OCR 找"开始游戏"文字 — 7周年活动 UI 可能改了, 文字识别不出.
+            return await self._step_fixed_tap_with_verify(
+                ctx, shot, "open",
+                tap_coord=(90, 92),
+                verify_keywords=MODE_MENU_KEYWORDS,
+                verify_roi=MODE_OCR_ROI,
+                next_sub="mode",
+            )
         if sub == "mode":
             # mode 优先找用户配置 game_mode, 找不到任意模式名兜底 (说明菜单出来了)
             return await self._step_search_and_tap(
