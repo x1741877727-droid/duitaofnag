@@ -179,6 +179,11 @@ func startTunDispatch(srv *Socks5Server, dev tun.Device, mtu uint32) (*stack.Sta
 		srv.ipHealth.StartProber()
 	}
 
+	// 标记 TUN ready, /api/tun/state mode 从 "tun-pending" 切到 "tun".
+	// 历史代码这行丢了 (跟 /api/tun/state handler 一起), 导致 backend P0 phase
+	// poll 永远等不到 mode=tun, 走超时退化路径.
+	stats.TunReady.Store(true)
+
 	return s, nil
 }
 
