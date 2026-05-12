@@ -244,103 +244,37 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext, shot) -> PhaseStep:
-        """关闭组队面板 + 所有挂着的 panel (好友列表 / 邀请等).
+        """关闭组队面板. 简单粗暴: 点 1 次空白 → done (不严格验证).
 
-        用户实测: yolo 'lobby' class 看到右侧人物画面就命中, 即使左侧好友 panel
-        挂着也算 lobby — 不可信. 改用 **模板 lobby_start_game/lobby_start_btn**
-        判 lobby (跟 v1 line 1499-1502 一致, 严格: panel 挡住 → 模板 miss → 继续关).
+        历史教训:
+        - yolo 'lobby' class 看到角色画面就命中 — 误判 (panel 挂着也算)
+        - 模板 lobby_start_btn 用户实测不可靠 — UI 版本 / 像素差异
+        - 强行严格验证 → 永远 done 不了, 卡死
 
-        必经流程:
-          1. 第一次进 close: 强制点屏幕右下空白 (720, 270) — 无论怎样
-          2. 之后每 round:
-             - 模板 lobby_start_game/btn 命中 → 连续 2 帧 → done
-             - 模板 miss → 看 yolo close_x → 有就 tap
-             - 都没 → 继续点空白
+        用户原话: '我代码点空白已经把 panel 关掉了, 你一直不点击模式切换'.
+        采纳: 点空白 1 次 = panel 关掉 = done. P4 接手, 自己 tap 模式名.
         """
         st = ctx._p3a
+        ctx.mark("yolo_start"); ctx.mark("yolo_done")
 
-        # ── 1. 第一次进 close: 强制点空白 (用户要求"无论怎样都要点击空白") ──
         if not st.get("blank_done", False):
             st["blank_done"] = True
-            ctx.mark("yolo_start"); ctx.mark("yolo_done"); ctx.mark("decide")
+            ctx.mark("decide")
             return step_retry(
-                note="P3a[close] 强制点屏幕右下空白 (1st)",
-                outcome_hint="tap_blank_force",
+                note="P3a[close] tap 空白 (720, 270) 关 panel",
+                outcome_hint="tap_blank",
                 action=PhaseAction(
                     kind="tap", x=720, y=270,
-                    target="blank_force", conf=0.5,
+                    target="blank_close_panel", conf=0.5,
                 ),
             )
 
-        # ── 2. 已点过空白, 严格判 lobby (用模板, 不用 yolo lobby class) ──
-        ctx.mark("yolo_start")
-        has_lobby = False
-        if ctx.matcher is not None:
-            try:
-                if (ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
-                        or ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)):
-                    has_lobby = True
-            except Exception as e:
-                logger.debug(f"P3a[close] matcher err: {e}")
-
-        # 同时也跑 yolo, 拿 close_x 做兜底
-        try:
-            dets = await ctx.yolo.detect(shot, conf_thresh=0.40)
-        except Exception as e:
-            logger.debug(f"P3a[close] yolo err: {e}")
-            dets = []
-        ctx.mark("yolo_done")
-
-        if has_lobby:
-            ctx.lobby_streak += 1
-            ctx.mark("decide")
-            if ctx.lobby_streak >= 2:
-                st["sub_step"] = "done"
-                return step_retry(
-                    note="P3a[close] lobby_start_btn ×2 帧, panel 真关掉",
-                    outcome_hint="back_to_lobby",
-                )
-            return step_retry(
-                note=f"P3a[close] lobby streak {ctx.lobby_streak}/2",
-                outcome_hint="lobby_pending",
-            )
-        ctx.lobby_streak = 0
-
-        # ── 3. 不在大厅 → 看 close_x → 关 ──
-        close_xs = sorted(
-            (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
-            key=lambda d: -d.conf,
-        )
-        for d in close_xs:
-            if not ctx.is_blacklisted(d.cx, d.cy):
-                ctx.add_blacklist(d.cx, d.cy, ttl=3.0)
-                ctx.mark("decide")
-                return step_retry(
-                    note=f"P3a[close] tap close_x@({d.cx},{d.cy}) conf={d.conf:.2f}",
-                    outcome_hint="tap_close",
-                    action=PhaseAction(
-                        kind="tap", x=d.cx, y=d.cy,
-                        target="panel_close_x", conf=d.conf,
-                    ),
-                )
-
-        # ── 4. 没 close_x → 再点空白 ──
-        if not ctx.is_blacklisted(720, 270):
-            ctx.add_blacklist(720, 270, ttl=2.0)
-            ctx.mark("decide")
-            return step_retry(
-                note="P3a[close] 无 close_x 无 lobby → 再点空白",
-                outcome_hint="tap_blank_retry",
-                action=PhaseAction(
-                    kind="tap", x=720, y=270,
-                    target="blank_retry", conf=0.5,
-                ),
-            )
-
+        # 已点过空白, 直接 done. P4 接手.
+        st["sub_step"] = "done"
         ctx.mark("decide")
         return step_retry(
-            note="P3a[close] 等画面变化",
-            outcome_hint="close_pending",
+            note="P3a[close] 空白点过, panel 关掉, → P4",
+            outcome_hint="back_to_lobby",
         )
 
     # ════════════════════════════════════════
