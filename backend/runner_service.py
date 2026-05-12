@@ -908,6 +908,12 @@ class MultiRunnerService:
         worker_env["GAMEBOT_TAP_PERSISTENT"] = "0"
         # 死锁诊断 tracer
         worker_env["GAMEBOT_WORKER_TRACE"] = str(session_dir / f"worker_trace_inst{idx}.log")
+        # numpy/OpenBLAS DllMain 多进程死锁修复 (实测 worker 卡 multiarray init):
+        # OpenBLAS DllMain 在父进程线程池已活跃时, 子进程 init 死等. 单线程模式解锁.
+        worker_env["OPENBLAS_NUM_THREADS"] = "1"
+        worker_env["OPENBLAS_MAIN_FREE"] = "1"
+        worker_env["OMP_NUM_THREADS"] = "1"
+        worker_env["MKL_NUM_THREADS"] = "1"
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
