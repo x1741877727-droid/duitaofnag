@@ -227,6 +227,15 @@ func StartAPIServer(addr string, server *Socks5Server) {
 		_ = json.NewEncoder(w).Encode(server.GetVerifyJSON())
 	})
 
+	// GET /api/tun/state — TUN 实时状态 (mode + counters), 老版本 binary 有这 route 但
+	// 源码里 handler 不在了 (历史遗留: counters.GetTunStats 函数还在但没接 HTTP).
+	// backend P0 phase 用这个判加速器是否 ready, 不能少.
+	mux.HandleFunc("/api/tun/state", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_ = json.NewEncoder(w).Encode(server.GetTunStats())
+	})
+
 	// GET /api/tun/ip_health — 当前所有跟踪 IP 的健康状态 (含 fast-fail 不通的)
 	// 前端 / 用户能看到"哪些 PUBG IP 当前打不通", 知道是网络问题不是脚本问题.
 	mux.HandleFunc("/api/tun/ip_health", func(w http.ResponseWriter, r *http.Request) {
