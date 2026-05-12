@@ -61,11 +61,11 @@ TAP_VERIFY_RETRY = 3
 SEARCH_RETRY = 3
 POPUP_INTERCEPT_LIMIT = 5
 
-# ─────────── ROI ───────────
-MODE_OCR_ROI = (0.0, 0.10, 0.30, 0.90)     # 左侧栏
-MAP_OCR_ROI = (0.25, 0.10, 0.85, 0.85)     # 中央列表
-CONFIRM_OCR_ROI = (0.70, 0.70, 1.0, 1.0)   # 右下确定
-FILL_CHECKBOX_ROI = (0.49, 0.85, 0.55, 0.91)
+# ─────────── ROI (照搬 v1 config/roi.yaml) ───────────
+MODE_OCR_ROI = (0.02, 0.10, 0.21, 0.85)    # 左侧大类 tabs (覆盖 5 个 tab)
+MAP_OCR_ROI = (0.25, 0.08, 0.99, 0.85)     # 中央地图卡片列表
+CONFIRM_OCR_ROI = (0.78, 0.70, 1.0, 1.0)   # 右下"确定"按钮 (v1 精确)
+FILL_CHECKBOX_ROI = (0.66, 0.025, 0.69, 0.066)  # 顶部右上"愿意补位"勾选框 (v1 精确)
 POPUP_CHECK_ROI = (0.50, 0.0, 1.0, 0.5)
 
 
@@ -119,22 +119,29 @@ class P4MapSetup:
 
         # ── 2. 分支 ──
         if sub == "open":
-            # P4-1 直接固定坐标 (90, 92) tap 模式名按钮.
-            # 实测 (after_tap1.png 手动验证): P3a 关 panel 后大厅干净,
-            # 左上 "开始游戏"标签下方模式名按钮在 (90, 92) 附近.
-            # 不用 OCR 找"开始游戏"文字 — 7周年活动 UI 可能改了, 文字识别不出.
-            return await self._step_fixed_tap_with_verify(
-                ctx, shot, "open",
-                tap_coord=(90, 92),
-                verify_keywords=MODE_MENU_KEYWORDS,
-                verify_roi=MODE_OCR_ROI,
-                next_sub="mode",
-            )
+            # 照搬 v1 P4-1: OCR 找"开始游戏"文字 → tap (cx, cy + 60)
+            # cy+60 是按钮下方的模式名标签 (打开模式菜单的入口).
+            # OCR 失败兜底固定 (90, 92).
+            return await self._step_open_via_ocr(ctx, shot)
         if sub == "mode":
-            # mode 优先找用户配置 game_mode, 找不到任意模式名兜底 (说明菜单出来了)
+            # v1 "已在团竞" 快速路径: 右侧地图列表已含目标 map 关键词 → 已在正确 mode → skip
+            if await self._ocr_contains_any(
+                ctx, shot, st["map_keywords"], MAP_OCR_ROI,
+            ):
+                st["sub_step"] = "map"
+                st["tap_done"] = False
+                st["tap_retry"] = 0
+                st["search_retry"] = 0
+                st["popup_intercept_count"] = 0
+                ctx.mark("decide")
+                return step_retry(
+                    note=f"P4[mode] 已在 {st['game_mode']} (右侧含 {st['map_keywords']}) → map",
+                    outcome_hint="mode_already_correct",
+                )
+            # 否则必须切到 game_mode tab — 只搜 game_mode (不拿其他模式兜底, 防 tap 错)
             return await self._step_search_and_tap(
                 ctx, shot, "mode",
-                keywords=[st["game_mode"]] + MODE_MENU_KEYWORDS,
+                keywords=[st["game_mode"]],
                 search_roi=MODE_OCR_ROI,
                 target_text=st["game_mode"],
                 verify_keywords=MAP_LIST_KEYWORDS,
@@ -180,17 +187,14 @@ class P4MapSetup:
     async def _step_open_via_ocr(
         self, ctx: RunContext, shot,
     ) -> PhaseStep:
-        """P4-1 OCR 直接找"开始游戏"文字 → tap (cx, cy+60).
+        """P4-1 照搬 v1: OCR 找"开始游戏" → tap (cx, cy+60).
 
-        v1: 模板 → 模板 → OCR 三级. 用户实测模板不可靠, v2 跳过模板直接 OCR.
-        P3a-close 已经把好友 panel 关掉, 大厅画面干净, OCR 找"开始游戏"应该稳.
-
-        Tap (cx, cy + 60) — '开始游戏'下方 60px 是模式名按钮 (跟 v1 一致).
+        cx+60 是开始游戏按钮下方的模式名标签 (e.g. "团竞-狙击团竞"), 点它开模式菜单.
+        OCR 失败兜底固定 (90, 92) — 实测大厅干净时这是模式名按钮.
         """
         st = ctx._p4
 
         if not st["tap_done"]:
-            # 扩大 ROI 到左半屏上半, 防按钮位置漂移
             try:
                 hits = await ctx.ocr.recognize(
                     shot, roi=Roi(0.0, 0.0, 0.45, 0.40),
@@ -205,31 +209,32 @@ class P4MapSetup:
                     target = h
                     break
 
-            if target is None:
-                st["search_retry"] += 1
-                if st["search_retry"] >= SEARCH_RETRY:
-                    ctx.mark("decide")
-                    return step_fail(
-                        note="P4[open] OCR 找不到'开始游戏'文字",
-                        outcome_hint="search_fail_open",
-                    )
+            # OCR 找到 "开始游戏" → tap (cx, cy+60)
+            if target is not None:
+                cx, cy = self._hit_center(target)
+                tap_y = cy + 60
+                st["tap_done"] = True
                 ctx.mark("decide")
                 return step_retry(
-                    note=f"P4[open] OCR miss '开始游戏' "
-                         f"({st['search_retry']}/{SEARCH_RETRY})",
-                    outcome_hint="search_miss_open",
+                    note=f"P4[open] OCR hit '开始游戏'@({cx},{cy}) → tap@({cx},{tap_y})",
+                    outcome_hint="tap_open_ocr",
+                    action=PhaseAction(
+                        kind="tap", x=cx, y=tap_y,
+                        target="p4_open_mode_name", conf=0.9,
+                    ),
                 )
 
-            cx, cy = self._hit_center(target)
-            tap_y = cy + 60   # v1: 模式名在'开始游戏'下方 60px
+            # OCR miss → 兜底固定 (90, 92) (跳过 retry 直接 tap 兜底)
             st["tap_done"] = True
+            st["search_retry"] += 1
             ctx.mark("decide")
             return step_retry(
-                note=f"P4[open] OCR hit '开始游戏'@({cx},{cy}) → tap mode@({cx},{tap_y})",
-                outcome_hint="tap_open",
+                note=f"P4[open] OCR miss → 兜底 fixed tap@(90,92) "
+                     f"(search retry {st['search_retry']})",
+                outcome_hint="tap_open_fixed",
                 action=PhaseAction(
-                    kind="tap", x=cx, y=tap_y,
-                    target="p4_open_mode_name", conf=0.9,
+                    kind="tap", x=90, y=92,
+                    target="p4_open_fixed", conf=0.5,
                 ),
             )
 
@@ -416,45 +421,92 @@ class P4MapSetup:
         )
 
     async def _step_fill_check(self, ctx: RunContext, shot) -> PhaseStep:
-        """ROI 颜色检测补位勾选 (不 tap, 只记 state). 跟 v1 一致.
+        """照搬 v1: ROI 颜色检测补位勾选, 如果已勾 → tap 取消.
 
         黄色对勾 r>150 g>120 b<100, 占比 > 5% = 已勾选.
+        FILL_CHECKBOX_ROI = v1 精确 (0.66, 0.025, 0.69, 0.066) 顶部右上"愿意补位".
         """
         st = ctx._p4
+
+        # 已 tap 过 → verify (再算 ratio, 看是不是已经 < 5%)
+        if st["tap_done"]:
+            ratio = self._fill_orange_ratio(shot)
+            st["fill_state"] = {"ratio": round(ratio, 4), "checked": ratio > 0.05}
+            ctx.mark("decide")
+            # 不强 verify, 直接进 confirm (v1 也是 tap 完不 verify)
+            st["sub_step"] = "confirm"
+            st["tap_done"] = False
+            st["tap_retry"] = 0
+            st["popup_intercept_count"] = 0
+            return step_retry(
+                note=f"P4[fill] tap 后 ratio={ratio:.3f} → confirm",
+                outcome_hint="fill_unchecked",
+            )
+
+        # 首次进 fill: 算 ratio
         try:
             h_img, w_img = shot.shape[:2]
             x1, y1, x2, y2 = FILL_CHECKBOX_ROI
-            px1, py1 = max(0, int(w_img * x1)), max(0, int(h_img * y1))
-            px2, py2 = min(w_img, int(w_img * x2)), min(h_img, int(h_img * y2))
-            region = shot[py1:py2, px1:px2]
-            if region.size == 0:
-                ratio = 0.0
-            else:
-                r_ch = region[:, :, 2]
-                g_ch = region[:, :, 1]
-                b_ch = region[:, :, 0]
-                orange = int(((r_ch > 150) & (g_ch > 120) & (b_ch < 100)).sum())
-                total = int(region.shape[0] * region.shape[1])
-                ratio = orange / total if total > 0 else 0.0
+            px1 = max(0, int(w_img * x1)); py1 = max(0, int(h_img * y1))
+            px2 = min(w_img, int(w_img * x2)); py2 = min(h_img, int(h_img * y2))
+            ratio = self._fill_orange_ratio(shot)
+            tap_cx, tap_cy = (px1 + px2) // 2, (py1 + py2) // 2
             checked = ratio > 0.05
             st["fill_state"] = {
-                "ratio": round(ratio, 4),
-                "checked": checked,
+                "ratio": round(ratio, 4), "checked": checked,
+                "tap_cx": tap_cx, "tap_cy": tap_cy,
             }
         except Exception as e:
             logger.debug(f"P4[fill] err: {e}")
             st["fill_state"] = {"ratio": 0.0, "checked": False, "err": str(e)}
+            ctx.mark("decide")
+            st["sub_step"] = "confirm"
+            return step_retry(
+                note=f"P4[fill] ROI err={e} → 跳过 confirm",
+                outcome_hint="fill_err",
+            )
 
-        # 不阻塞业务, 直接进 confirm
+        # 已勾 → tap 取消
+        if checked:
+            st["tap_done"] = True
+            ctx.mark("decide")
+            return step_retry(
+                note=f"P4[fill] 补位已勾 ({ratio*100:.1f}%) → tap@({tap_cx},{tap_cy}) 取消",
+                outcome_hint="tap_fill_uncheck",
+                action=PhaseAction(
+                    kind="tap", x=tap_cx, y=tap_cy,
+                    target="p4_fill_uncheck", conf=0.9,
+                ),
+            )
+
+        # 未勾 → 直接进 confirm
         st["sub_step"] = "confirm"
         st["tap_done"] = False
         st["tap_retry"] = 0
         st["popup_intercept_count"] = 0
         ctx.mark("decide")
         return step_retry(
-            note=f"P4[fill] checked={st['fill_state'].get('checked')} → confirm",
-            outcome_hint="fill_done",
+            note=f"P4[fill] 补位未勾 ({ratio*100:.1f}%) → confirm",
+            outcome_hint="fill_skip",
         )
+
+    @staticmethod
+    def _fill_orange_ratio(shot) -> float:
+        """计算 FILL_CHECKBOX_ROI 区域内黄色像素占比. 用于判断补位是否已勾."""
+        try:
+            h_img, w_img = shot.shape[:2]
+            x1, y1, x2, y2 = FILL_CHECKBOX_ROI
+            px1 = max(0, int(w_img * x1)); py1 = max(0, int(h_img * y1))
+            px2 = min(w_img, int(w_img * x2)); py2 = min(h_img, int(h_img * y2))
+            region = shot[py1:py2, px1:px2]
+            if region.size == 0:
+                return 0.0
+            r_ch = region[:, :, 2]; g_ch = region[:, :, 1]; b_ch = region[:, :, 0]
+            orange = int(((r_ch > 150) & (g_ch > 120) & (b_ch < 100)).sum())
+            total = int(region.shape[0] * region.shape[1])
+            return orange / total if total > 0 else 0.0
+        except Exception:
+            return 0.0
 
     # ════════════════════════════════════════
     # 工具方法
