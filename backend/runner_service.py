@@ -926,8 +926,6 @@ class MultiRunnerService:
             self._workers_v2: dict[int, Any] = {}
         self._workers_v2[idx] = proc
 
-<<<<<<< Updated upstream
-=======
         # 修 CPython Windows pipe stdin 死锁 (bpo-34780 / gh-71019):
         # worker daemon thread sync readline() 触发 outstanding ReadFile,
         # 同时 main thread io.TextIOWrapper 初始化也 ReadFile → kernel 双 read 同 pipe → 死锁
@@ -939,7 +937,6 @@ class MultiRunnerService:
         except Exception as e:
             logger.debug(f"[v2/inst{idx}] stdin priming err: {e}")
 
->>>>>>> Stashed changes
         # 读 worker stdout, 解析 JSON 消息
         ok = False
         try:
