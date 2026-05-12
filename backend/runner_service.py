@@ -881,12 +881,10 @@ class MultiRunnerService:
 
         inst.state = "init"
 
-        # 防多 worker 同时 import (cv2 + onnxruntime + rapidocr ~1GB lib) 撞 Windows IO.
-        # 实测 3 实例并发 spawn → 全部 23MB RSS 卡 import 4+ 分钟 (disk 抢锁).
-        # 错开 5s spawn (idx=0 不延迟, idx=1 5s, idx=2 10s, ...), max 30s.
-        # 12 实例总额外启动延迟 60s, 但每 worker 能正常加载.
-        if idx > 0:
-            await asyncio.sleep(min(idx * 5.0, 30.0))
+        # 历史: 加过 5s spawn stagger 防"全卡 23MB" 现象, 但真因是 worker.py
+        # stdin daemon thread 启动顺序触发 Windows loader lock (numpy/OpenBLAS DllMain
+        # 内部 CreateThread 撞活跃 thread). cf52ea2 改 thread 顺序后解了, stagger 不再
+        # 需要 — 12 实例可并发 spawn, 启动时间从 60s+ 降到 ~10s.
 
         logger.info(f"[v2/inst{idx}] spawn worker subprocess: idx={idx} role={role} group={group}")
 
