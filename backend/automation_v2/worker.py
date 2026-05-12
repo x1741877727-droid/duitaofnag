@@ -44,6 +44,10 @@ def _trace(msg: str) -> None:
         pass
 
 _trace("worker.py top imports done")
+# dump 关键 env 看是否传到
+_trace(f"env OPENBLAS_NUM_THREADS={os.environ.get('OPENBLAS_NUM_THREADS','<unset>')}")
+_trace(f"env OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS','<unset>')}")
+_trace(f"env MKL_NUM_THREADS={os.environ.get('MKL_NUM_THREADS','<unset>')}")
 
 
 def _emit(msg: dict) -> None:
