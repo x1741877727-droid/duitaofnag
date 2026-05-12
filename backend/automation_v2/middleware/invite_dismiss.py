@@ -52,9 +52,15 @@ class InviteDismissMiddleware:
         self._last_dismiss_ts: dict[int, float] = {}   # inst_idx → 上次关闭时间
 
     def enable_for(self, phase_name: str) -> bool:
-        """所有 phase 启用. 邀请可能任何 phase 冒 (用户实测).
-        OCR pool 压力靠节流 3s + OcrPool disable (走主进程) 兜底."""
-        return True
+        """只在组队 phase (P3a/P3b) 启用.
+
+        历史: 之前所有 phase 启用, 但 v1 dismiss_known_popups 第一次见到陌生弹窗
+        会跑全套 yolo + OCR + 模板 ~1.5s. P1/P2 会被关公告/隐私等弹窗触发, 浪费
+        2-3 秒 wall time (实测 inst_2: P1 R105 1737ms + P2 R1 524ms + ...).
+
+        组队 phase 才需要邀请检测 (P3a 等队员加入, P3b 等队长发邀请). 业务实测
+        其它 phase 不需要."""
+        return phase_name in ("P3a", "P3b")
 
     async def before_round(self, ctx: RunContext, shot) -> BeforeRoundResult:
         """每 round 委托 v1 dismiss_known_popups (跑友邀请/网络/account_squeezed 全在 KNOWN_POPUPS)."""
