@@ -1,29 +1,35 @@
-"""P3a — 队长建队伍 (v2 真实现, 不再调 v1 600 行).
+"""P3a — 队长建队伍 (v2 真实现, event-driven).
 
-设计 (5 子步 + 状态机, 每 round 1 动作):
-  open    → tap 组队按钮 (22, 277)        固定坐标
-  tab     → tap 组队码 tab (309, 520)     固定坐标
-  qr      → tap 二维码组队 (156, 435)     固定坐标
-  decode  → 截屏 QR 解码 + HTTP fetch scheme
-  close   → 关闭组队面板 (yolo close_x 动态)
+设计: 每 round 完整跑完 1 个 sub_step (tap + 内部 poll verify 直到结果),
+而不是 "tap → 等 round_interval → 下 round verify". 总耗时跟 UI 渲染速度对齐,
+永远等结果不等死时间.
 
-每个 tap 步骤的双重护栏:
-  Tap 前: yolo 扫一眼有没有 close_x 弹窗 (50ms), 有先关 (intercept). 50ms 内未挡 → tap.
-  Tap 后: 下一 round 截图找"该出现的标志" (OCR/QR). 没找到 → retry 重 tap. 3 次 FAIL.
+5 子步 (每 round 1 个):
+  open    → tap 组队按钮 (22, 277) + 等"组队码"文字出现     ~0.5-1.5s
+  tab     → tap 组队码 tab (309, 520) + 等"二维码组队"出现  ~0.3-1s
+  qr      → tap 二维码组队 (156, 435) + 等 QR 解出非空      ~0.5-1.5s
+  decode  → QR 解码 + HTTP fetch scheme                      ~1-2s
+  close   → tap 空白 (720, 270) 关 panel                     ~0.3s
 
-坐标来源: 26000+ 历史 decision 日志统计中位数 + 最高频 (>80% 一致).
-v1 26 秒 → v2 目标 12-18 秒. 砍掉:
-  - v1 OCR 找按钮 3-5 次尝试 (单步 1-2s) → 固定坐标 + 验证标志 (单步 0.3-0.6s)
-  - v1 sub-step 内部 sleep 0.3-0.5s 多次 → runner round_interval 一次, retry 兜底
+每 sub_step 内部:
+  await adb.tap(x, y)             # 发 tap (200-300ms)
+  await asyncio.sleep(0.05)       # 给 UI 一点缓冲
+  while elapsed < timeout (1.5s):
+    shot = await screenshot()      # 截图 (~3ms)
+    if verify(shot): return True   # 立刻进下一步
+    await asyncio.sleep(0.05)      # 短轮询
+  # timeout → 重 tap (retry 1 次)
+  # 还失败 → step_fail
 
-注: yolo team_create_btn class 训练好后可启用替代固定坐标 (UI 改版鲁棒).
+预期 P3a 总: ~3-4s (vs 旧 round-based 7-8s).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from typing import Optional
+import time
+from typing import Optional, Callable, Awaitable
 
 from ..ctx import RunContext
 from ..perception.yolo import Roi
@@ -37,293 +43,285 @@ logger = logging.getLogger(__name__)
 # ─────────── 固定坐标 (LDPlayer 960×540, 历史 26000+ 决策统计) ───────────
 FIXED_TAPS = {
     "open":  (22, 277),     # 主菜单"组队"按钮 (26/32 = 81% 一致)
-    "tab":   (309, 520),    # 面板底部"组队码" tab (20/30 = 67%, x 偶尔 ±15)
+    "tab":   (309, 520),    # 面板底部"组队码" tab (20/30 = 67%)
     "qr":    (156, 435),    # "二维码组队"入口 (30/30 = 100% 一致)
 }
 
-# ─────────── Tap 后验证标志 (OCR 关键词) ───────────
+# Tap 后验证关键词 (OCR 找到 = tap 成功)
 VERIFY_KEYWORDS = {
-    "open":  ["组队码", "二维码"],     # 面板打开后底部应有这些字
-    "tab":   ["二维码组队"],            # 切到组队码 tab 后中间有"二维码组队"按钮
-    "qr":    [],                        # qr 步用 QR 检测代替 OCR
+    "open": ["组队码", "二维码"],
+    "tab":  ["二维码组队"],
 }
 
-# ─────────── 重试 / 守门 ───────────
-TAP_VERIFY_RETRY = 3            # tap 后验证失败重 tap 次数
-QR_DECODE_RETRY = 5             # QR 解码尝试次数 (跟 v1 一致)
-POPUP_INTERCEPT_LIMIT = 5       # 单 sub_step 内 popup 拦截上限 (防死循环)
+# ─────────── 守门参数 ───────────
+TAP_VERIFY_TIMEOUT = 1.5        # 单次 tap 后 poll verify 最大等待
+TAP_VERIFY_RETRY = 2            # tap 失败重试次数 (含初次共 3 次)
+POLL_INTERVAL = 0.05            # poll 间隔
+INITIAL_WAIT_AFTER_TAP = 0.05   # tap 后等 UI 开始响应的最小时间
+QR_DECODE_RETRY = 5
 
-# ─────────── ROI ───────────
-QR_DECODE_CROP_ROI = (0.30, 0.20, 0.85, 0.80)   # QR 大致区域
-QR_DECODE_SCALE = 2                              # crop 后放大倍数
-
-VERIFY_OCR_ROI = (0.10, 0.50, 0.85, 1.0)         # OCR 验证 ROI (panel 范围, 砍半节省 ~500ms)
-POPUP_CHECK_ROI = (0.50, 0.0, 1.0, 0.5)          # popup yolo 检测 ROI (右上 + 顶部)
+# ROI
+QR_DECODE_CROP_ROI = (0.30, 0.20, 0.85, 0.80)
+QR_DECODE_SCALE = 2
+VERIFY_OCR_ROI = (0.10, 0.40, 0.90, 1.0)
 
 
 class P3aTeamCreate:
     name = "P3a"
-    max_seconds = 45.0
-    round_interval_s = 0.2   # 0.3 → 0.2 砍 7 tap × 100ms = 700ms
+    max_seconds = 30.0
+    round_interval_s = 0.05   # round 之间几乎无 sleep, event-driven 内部已 poll
 
     async def enter(self, ctx: RunContext) -> None:
         ctx.reset_phase_state()
-        # 状态机字段挂在 ctx 上 (跨 round, runner 不重置)
         ctx._p3a = {
-            "sub_step": "open",          # open → tab → qr → decode → close → done
-            "tap_done": False,           # 当前 sub_step 是否已 tap
-            "tap_retry": 0,              # 当前 sub_step 验证失败重 tap 次数
-            "popup_intercept_count": 0,  # popup 拦截累计 (防死循环)
-            "qr_decode_attempts": 0,     # qr decode 尝试次数
-            "qr_url": "",                # 解出的二维码 URL
+            "sub_step": "open",
+            "qr_url": "",
         }
 
     async def handle_frame(self, ctx: RunContext) -> PhaseStep:
-        shot = ctx.current_shot
-        if shot is None:
-            ctx.mark("yolo_start"); ctx.mark("yolo_done"); ctx.mark("decide")
-            return step_retry(note="P3a: no shot")
-
         st = ctx._p3a
         sub = st["sub_step"]
 
-        # ── 1. Tap 前弹窗检查: 只在 "open" 子步 (panel 未打开) 跑.
-        # 进入 tab/qr 后 panel 已打开, yolo close_x 检出的多半是 panel 自带 X,
-        # 误识为 popup 会把 panel 关掉 → 用户感受"组队码开关循环" (bug 已修).
-        # decode/close 本来就不 tap, 不查.
-        if sub == "open":
-            ctx.mark("yolo_start")
-            popup_tap = await self._find_popup(ctx, shot)
-            ctx.mark("yolo_done")
-            if popup_tap and st["popup_intercept_count"] < POPUP_INTERCEPT_LIMIT:
-                x, y = popup_tap
-                ctx.add_blacklist(x, y, ttl=3.0)
-                st["popup_intercept_count"] += 1
-                st["tap_done"] = False
-                ctx.mark("decide")
-                return step_retry(
-                    note=f"P3a[open]: popup intercept @({x},{y}) "
-                         f"({st['popup_intercept_count']}/{POPUP_INTERCEPT_LIMIT})",
-                    outcome_hint="popup_intercept",
-                    action=PhaseAction(kind="tap", x=x, y=y, target="popup_close"),
-                )
-        else:
-            ctx.mark("yolo_start"); ctx.mark("yolo_done")
+        # 时间戳: round_start 已 set, mark capture_done 因为我们用最新 shot
+        # yolo_start/done 在每个 sub_step 内部 mark
 
-        # ── 2. 按 sub_step 分支 ──
+        if sub == "open":
+            return await self._step_open_close_panel_open(ctx)
+        if sub == "tab":
+            return await self._step_tab(ctx)
+        if sub == "qr":
+            return await self._step_qr(ctx)
         if sub == "decode":
-            return await self._step_decode(ctx, shot)
+            return await self._step_decode(ctx)
         if sub == "close":
-            return await self._step_close(ctx, shot)
+            return await self._step_close(ctx)
         if sub == "done":
-            ctx.mark("decide")
-            scheme_short = (ctx.game_scheme_url or "")[:40]
+            ctx.mark("yolo_start"); ctx.mark("yolo_done"); ctx.mark("decide")
+            scheme_short = (ctx.game_scheme_url or "")[:48]
             return step_next(
                 note=f"P3a 完成 scheme={scheme_short}",
                 outcome_hint="team_create_ok",
             )
 
-        # open / tab / qr 三个固定 tap 步
-        return await self._step_fixed_tap(ctx, shot, sub)
+        ctx.mark("yolo_start"); ctx.mark("yolo_done"); ctx.mark("decide")
+        return step_fail(note=f"P3a unknown sub_step={sub}", outcome_hint="bug")
 
     # ════════════════════════════════════════
-    # 子步骤实现
+    # 子步骤 (event-driven, 每 round 跑完一个)
     # ════════════════════════════════════════
 
-    async def _step_fixed_tap(
-        self, ctx: RunContext, shot, sub: str,
-    ) -> PhaseStep:
-        """open / tab / qr 共用: tap 固定坐标 → 下 round 验证."""
-        st = ctx._p3a
-        coord = FIXED_TAPS[sub]
-        keywords = VERIFY_KEYWORDS[sub]
-
-        if not st["tap_done"]:
-            # 第一次进, 还没 tap → tap 固定坐标
-            st["tap_done"] = True
-            ctx.mark("decide")
+    async def _step_open_close_panel_open(self, ctx: RunContext) -> PhaseStep:
+        """Tap 组队按钮 → 等"组队码"文字 (面板打开)."""
+        coord = FIXED_TAPS["open"]
+        kw = VERIFY_KEYWORDS["open"]
+        ok, elapsed_ms, last_note = await self._tap_then_poll_ocr(
+            ctx, coord[0], coord[1], "p3a_open", kw,
+            timeout=TAP_VERIFY_TIMEOUT, retry=TAP_VERIFY_RETRY,
+        )
+        if ok:
+            ctx._p3a["sub_step"] = "tab"
             return step_retry(
-                note=f"P3a[{sub}]: fixed tap@({coord[0]},{coord[1]})",
-                outcome_hint=f"tap_{sub}",
-                action=PhaseAction(
-                    kind="tap", x=coord[0], y=coord[1],
-                    target=f"p3a_{sub}_fixed", conf=1.0,
-                ),
+                note=f"P3a[open] panel 开 ({elapsed_ms:.0f}ms) → tab",
+                outcome_hint="open_ok",
             )
-
-        # 已 tap → 验证: 找 keywords (sub=qr 用 QR 检测)
-        verified = False
-        if sub == "qr":
-            try:
-                qr_data = await asyncio.to_thread(self._try_decode_qr, shot)
-            except Exception as e:
-                logger.debug(f"P3a[qr] decode probe err: {e}")
-                qr_data = ""
-            if qr_data:
-                st["qr_url"] = qr_data
-                verified = True
-        else:
-            verified = await self._ocr_contains_any(ctx, shot, keywords)
-
-        ctx.mark("decide")
-        if verified:
-            next_sub = {"open": "tab", "tab": "qr", "qr": "decode"}[sub]
-            st["sub_step"] = next_sub
-            st["tap_done"] = False
-            st["tap_retry"] = 0
-            st["popup_intercept_count"] = 0
-            note = f"P3a[{sub}] verify OK → {next_sub}"
-            if sub == "qr":
-                note += f" (qr_url len={len(st['qr_url'])})"
-            return step_retry(note=note, outcome_hint=f"verify_ok_{sub}")
-
-        # 验证失败 → 是否重 tap?
-        st["tap_retry"] += 1
-        if st["tap_retry"] >= TAP_VERIFY_RETRY:
-            return step_fail(
-                note=f"P3a[{sub}]: verify fail 3 次, FAIL",
-                outcome_hint=f"verify_fail_{sub}",
-            )
-        # 重 tap (下 round 进, 因为 tap_done 设 False)
-        st["tap_done"] = False
-        return step_retry(
-            note=f"P3a[{sub}] verify miss, retry tap "
-                 f"({st['tap_retry']}/{TAP_VERIFY_RETRY})",
-            outcome_hint=f"verify_miss_{sub}",
+        return step_fail(
+            note=f"P3a[open] timeout {elapsed_ms:.0f}ms: {last_note}",
+            outcome_hint="open_fail",
         )
 
-    async def _step_decode(self, ctx: RunContext, shot) -> PhaseStep:
-        """QR 解码 + HTTP fetch scheme. 多策略尝试."""
-        st = ctx._p3a
-        st["qr_decode_attempts"] += 1
+    async def _step_tab(self, ctx: RunContext) -> PhaseStep:
+        coord = FIXED_TAPS["tab"]
+        kw = VERIFY_KEYWORDS["tab"]
+        ok, elapsed_ms, last_note = await self._tap_then_poll_ocr(
+            ctx, coord[0], coord[1], "p3a_tab", kw,
+            timeout=TAP_VERIFY_TIMEOUT, retry=TAP_VERIFY_RETRY,
+        )
+        if ok:
+            ctx._p3a["sub_step"] = "qr"
+            return step_retry(
+                note=f"P3a[tab] 切到组队码 ({elapsed_ms:.0f}ms) → qr",
+                outcome_hint="tab_ok",
+            )
+        return step_fail(
+            note=f"P3a[tab] timeout {elapsed_ms:.0f}ms: {last_note}",
+            outcome_hint="tab_fail",
+        )
 
+    async def _step_qr(self, ctx: RunContext) -> PhaseStep:
+        """Tap 二维码组队 → poll QR 解码出非空 = 成功 (二维码已显示)."""
+        coord = FIXED_TAPS["qr"]
+        st = ctx._p3a
+
+        async def verify_qr(shot) -> bool:
+            qr_url = await asyncio.to_thread(self._try_decode_qr, shot)
+            if qr_url:
+                st["qr_url"] = qr_url
+                return True
+            return False
+
+        ok, elapsed_ms, last_note = await self._tap_then_poll(
+            ctx, coord[0], coord[1], "p3a_qr",
+            verify_fn=verify_qr,
+            timeout=2.0,    # QR 显示动画 ~0.5-1s
+            retry=TAP_VERIFY_RETRY,
+        )
+        if ok:
+            st["sub_step"] = "decode"
+            return step_retry(
+                note=f"P3a[qr] QR 解出 ({elapsed_ms:.0f}ms) → decode",
+                outcome_hint="qr_ok",
+            )
+        return step_fail(
+            note=f"P3a[qr] timeout {elapsed_ms:.0f}ms",
+            outcome_hint="qr_fail",
+        )
+
+    async def _step_decode(self, ctx: RunContext) -> PhaseStep:
+        """QR 已解出 (st['qr_url']), 这步只跑 HTTP fetch scheme."""
+        ctx.mark("yolo_start"); ctx.mark("yolo_done")
+        st = ctx._p3a
         qr_url = st["qr_url"]
         if not qr_url:
-            try:
-                qr_url = await asyncio.to_thread(self._try_decode_qr, shot)
-            except Exception as e:
-                logger.debug(f"P3a[decode] err: {e}")
-                qr_url = ""
-
-        if not qr_url:
-            if st["qr_decode_attempts"] >= QR_DECODE_RETRY:
-                ctx.mark("decide")
-                return step_fail(
-                    note=f"P3a[decode] {QR_DECODE_RETRY} 次全 miss",
-                    outcome_hint="qr_decode_fail",
-                )
             ctx.mark("decide")
-            return step_retry(
-                note=f"P3a[decode] miss "
-                     f"{st['qr_decode_attempts']}/{QR_DECODE_RETRY}",
-                outcome_hint="qr_decoding",
-            )
+            return step_fail(note="P3a[decode] qr_url 空", outcome_hint="decode_no_url")
 
-        # 解到 URL → HTTP fetch scheme
         try:
             scheme = await asyncio.to_thread(self._fetch_scheme, qr_url)
         except Exception as e:
-            logger.warning(f"P3a[decode] fetch scheme err: {e}")
+            logger.warning(f"P3a[decode] fetch err: {e}")
             scheme = ""
 
         ctx.mark("decide")
         if not scheme:
             return step_fail(
-                note=f"P3a[decode] fetch scheme 空 (qr_url={qr_url[:40]})",
+                note=f"P3a[decode] fetch scheme 空",
                 outcome_hint="fetch_fail",
             )
 
         ctx.game_scheme_url = scheme
         st["sub_step"] = "close"
-        st["tap_done"] = False
-        st["tap_retry"] = 0
-        st["popup_intercept_count"] = 0
         return step_retry(
-            note=f"P3a[decode] OK scheme={scheme[:48]}",
+            note=f"P3a[decode] scheme={scheme[:48]} → close",
             outcome_hint="scheme_ok",
         )
 
-    async def _step_close(self, ctx: RunContext, shot) -> PhaseStep:
-        """关闭组队面板. 简单粗暴: 点 1 次空白 → done (不严格验证).
-
-        历史教训:
-        - yolo 'lobby' class 看到角色画面就命中 — 误判 (panel 挂着也算)
-        - 模板 lobby_start_btn 用户实测不可靠 — UI 版本 / 像素差异
-        - 强行严格验证 → 永远 done 不了, 卡死
-
-        用户原话: '我代码点空白已经把 panel 关掉了, 你一直不点击模式切换'.
-        采纳: 点空白 1 次 = panel 关掉 = done. P4 接手, 自己 tap 模式名.
-        """
-        st = ctx._p3a
+    async def _step_close(self, ctx: RunContext) -> PhaseStep:
+        """关 panel: tap 屏幕右下空白. 用户实测有效, 不严格验证."""
         ctx.mark("yolo_start"); ctx.mark("yolo_done")
 
-        if not st.get("blank_done", False):
-            st["blank_done"] = True
-            ctx.mark("decide")
-            return step_retry(
-                note="P3a[close] tap 空白 (720, 270) 关 panel",
-                outcome_hint="tap_blank",
-                action=PhaseAction(
-                    kind="tap", x=720, y=270,
-                    target="blank_close_panel", conf=0.5,
-                ),
-            )
+        # tap 空白
+        ctx.mark("tap_send")
+        try:
+            await ctx.adb.tap(720, 270)
+        except Exception as e:
+            logger.debug(f"P3a[close] tap err: {e}")
+        ctx.mark("tap_done")
+        # 给 UI 一点关闭动画时间
+        await asyncio.sleep(0.2)
 
-        # 已点过空白, 直接 done. P4 接手.
-        st["sub_step"] = "done"
+        ctx._p3a["sub_step"] = "done"
         ctx.mark("decide")
         return step_retry(
-            note="P3a[close] 空白点过, panel 关掉, → P4",
-            outcome_hint="back_to_lobby",
+            note="P3a[close] tap (720,270) 关 panel → done",
+            outcome_hint="close_done",
         )
 
     # ════════════════════════════════════════
-    # 工具方法
+    # Event-driven helper: tap + poll verify
     # ════════════════════════════════════════
 
-    async def _find_popup(self, ctx: RunContext, shot) -> Optional[tuple]:
-        """tap 前轻量 yolo 检测: 有 close_x 弹窗就返 (cx, cy), 没返 None.
-        ROI 限右上 + 顶部 (popup 通常在这), 30-50ms."""
-        try:
-            dets = await ctx.yolo.detect(
-                shot, roi=Roi(*POPUP_CHECK_ROI), conf_thresh=0.40,
-            )
-        except Exception as e:
-            logger.debug(f"P3a popup check err: {e}")
-            return None
-        for d in dets:
-            if d.name == "close_x" and d.conf >= 0.50:
-                if not ctx.is_blacklisted(d.cx, d.cy):
-                    return (d.cx, d.cy)
-        return None
+    async def _tap_then_poll(
+        self,
+        ctx: RunContext,
+        x: int, y: int, tap_target: str,
+        verify_fn: Callable[..., Awaitable[bool]],
+        timeout: float = 1.5,
+        retry: int = 2,
+    ) -> tuple[bool, float, str]:
+        """
+        Tap 一次 → poll verify 直到成功或 timeout. 失败重试 retry 次.
 
-    async def _ocr_contains_any(
-        self, ctx: RunContext, shot, keywords: list,
-    ) -> bool:
-        """OCR 中下半屏看有没有任何 keyword. 200ms 内返."""
-        if not keywords:
+        Returns:
+            (success, total_elapsed_ms, last_note)
+        """
+        t0 = time.perf_counter()
+        for attempt in range(retry + 1):  # initial + retry
+            # tap
+            ctx.mark("tap_send")
+            try:
+                await ctx.adb.tap(x, y)
+            except Exception as e:
+                logger.debug(f"[{tap_target}] tap err: {e}")
+            ctx.mark("tap_done")
+
+            await asyncio.sleep(INITIAL_WAIT_AFTER_TAP)
+
+            # poll verify
+            ctx.mark("yolo_start")
+            poll_t0 = time.perf_counter()
+            while time.perf_counter() - poll_t0 < timeout:
+                try:
+                    shot = await ctx.adb.screenshot()
+                except Exception:
+                    shot = None
+                if shot is not None:
+                    try:
+                        ok = await verify_fn(shot)
+                    except Exception as e:
+                        logger.debug(f"[{tap_target}] verify err: {e}")
+                        ok = False
+                    if ok:
+                        ctx.mark("yolo_done")
+                        ctx.mark("decide")
+                        return (True, (time.perf_counter() - t0) * 1000,
+                                f"attempt {attempt+1} verify ok")
+                await asyncio.sleep(POLL_INTERVAL)
+            ctx.mark("yolo_done")
+
+            if attempt < retry:
+                logger.debug(f"[{tap_target}] attempt {attempt+1} timeout, retry")
+                await asyncio.sleep(0.2)   # 给 UI 多点时间再 retry
+
+        ctx.mark("decide")
+        return (False, (time.perf_counter() - t0) * 1000,
+                f"{retry + 1} attempts timeout")
+
+    async def _tap_then_poll_ocr(
+        self,
+        ctx: RunContext,
+        x: int, y: int, tap_target: str,
+        keywords: list,
+        timeout: float = 1.5,
+        retry: int = 2,
+    ) -> tuple[bool, float, str]:
+        """tap 后 poll OCR 找 keywords. Wraps _tap_then_poll."""
+        async def verify(shot) -> bool:
+            try:
+                hits = await ctx.ocr.recognize(shot, roi=Roi(*VERIFY_OCR_ROI))
+            except Exception:
+                hits = []
+            for h in hits:
+                text = h.text if hasattr(h, "text") else (
+                    h.get("text", "") if isinstance(h, dict) else ""
+                )
+                for kw in keywords:
+                    if kw in text:
+                        return True
             return False
-        try:
-            hits = await ctx.ocr.recognize(shot, roi=Roi(*VERIFY_OCR_ROI))
-        except Exception as e:
-            logger.debug(f"P3a OCR verify err: {e}")
-            return False
-        for h in hits:
-            text = h.text if hasattr(h, "text") else (
-                h.get("text", "") if isinstance(h, dict) else ""
-            )
-            for kw in keywords:
-                if kw in text:
-                    return True
-        return False
+
+        return await self._tap_then_poll(
+            ctx, x, y, tap_target, verify, timeout, retry,
+        )
+
+    # ════════════════════════════════════════
+    # QR 解码 + HTTP fetch (跟 v1 一致)
+    # ════════════════════════════════════════
 
     def _try_decode_qr(self, shot) -> str:
-        """对当前帧 crop ROI + 跑 5 策略 QR 解码 (跟 v1 一致)."""
         if shot is None:
             return ""
         try:
             import cv2
-            import numpy as np  # noqa: F401  (cv2 内部用)
         except Exception:
             return ""
 
@@ -347,63 +345,44 @@ class P3aTeamCreate:
             _pyzbar = None
             has_pyzbar = False
 
-        # ① pyzbar 灰度
         if has_pyzbar:
+            for prep in ("gray", "otsu", "adaptive"):
+                try:
+                    if prep == "gray":
+                        img = gray
+                    elif prep == "otsu":
+                        _, img = cv2.threshold(gray, 0, 255,
+                                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    else:
+                        img = cv2.adaptiveThreshold(
+                            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY, 21, 5,
+                        )
+                    res = _pyzbar.decode(img)
+                    if res:
+                        d = res[0].data.decode("utf-8", errors="ignore")
+                        if d:
+                            return d
+                except Exception:
+                    continue
+
+        # cv2 fallback
+        for prep in ("otsu", "hard128"):
             try:
-                res = _pyzbar.decode(gray)
-                if res:
-                    d = res[0].data.decode("utf-8", errors="ignore")
-                    if d:
-                        return d
+                if prep == "otsu":
+                    _, img = cv2.threshold(gray, 0, 255,
+                                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                else:
+                    _, img = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
+                d, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+                if d:
+                    return d
             except Exception:
-                pass
-        # ② pyzbar + OTSU
-        if has_pyzbar:
-            try:
-                _, otsu = cv2.threshold(gray, 0, 255,
-                                        cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                res = _pyzbar.decode(otsu)
-                if res:
-                    d = res[0].data.decode("utf-8", errors="ignore")
-                    if d:
-                        return d
-            except Exception:
-                pass
-        # ③ pyzbar + adaptive
-        if has_pyzbar:
-            try:
-                adapt = cv2.adaptiveThreshold(
-                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY, 21, 5,
-                )
-                res = _pyzbar.decode(adapt)
-                if res:
-                    d = res[0].data.decode("utf-8", errors="ignore")
-                    if d:
-                        return d
-            except Exception:
-                pass
-        # ④ cv2 + OTSU
-        try:
-            _, otsu = cv2.threshold(gray, 0, 255,
-                                    cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            d, _, _ = cv2.QRCodeDetector().detectAndDecode(otsu)
-            if d:
-                return d
-        except Exception:
-            pass
-        # ⑤ cv2 + hard 128
-        try:
-            _, hard = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
-            d, _, _ = cv2.QRCodeDetector().detectAndDecode(hard)
-            if d:
-                return d
-        except Exception:
-            pass
+                continue
+
         return ""
 
     def _fetch_scheme(self, qr_url: str) -> str:
-        """HTTP GET qr_url, 从 HTML 里 regex 提 pubgmhd<digits>://... scheme."""
         import urllib.request
         req = urllib.request.Request(
             qr_url,
