@@ -161,14 +161,10 @@ class P4MapSetup:
         if sub == "fill":
             return await self._step_fill_check(ctx, shot)
         if sub == "confirm":
-            return await self._step_fixed_tap_with_verify(
-                ctx, shot, "confirm",
-                tap_coord=FIXED_TAPS["confirm"],
-                verify_keywords=[],
-                verify_roi=None,
-                next_sub="done",
-                verify_use_lobby=True,
-            )
+            # 照搬 v1: tap 确定 后不 verify (lobby_start_btn 模板 7周年下 conf=0.375
+            # 永远 miss; OCR 找'开始游戏'还行但耗时). 直接信赖 tap → done.
+            # 上一轮 verify_use_lobby 失败导致 R11/R13 再 tap (885,507) 误点大厅仓库.
+            return await self._step_confirm_trust(ctx)
         if sub == "done":
             ctx.mark("decide")
             fill = st.get("fill_state")
@@ -265,6 +261,20 @@ class P4MapSetup:
             note=f"P4[open] verify miss, retry "
                  f"({st['tap_retry']}/{TAP_VERIFY_RETRY})",
             outcome_hint="verify_miss_open",
+        )
+
+    async def _step_confirm_trust(self, ctx: RunContext) -> PhaseStep:
+        """P4-5 照搬 v1: tap 确定 (885, 507), 信赖, 不 verify, 直接 done."""
+        st = ctx._p4
+        st["sub_step"] = "done"
+        ctx.mark("decide")
+        return step_retry(
+            note="P4[confirm]: tap 确定@(885,507) → done (不 verify, 信赖 tap)",
+            outcome_hint="tap_confirm_trust",
+            action=PhaseAction(
+                kind="tap", x=FIXED_TAPS["confirm"][0], y=FIXED_TAPS["confirm"][1],
+                target="p4_confirm", conf=1.0,
+            ),
         )
 
     async def _step_fixed_tap_with_verify(
