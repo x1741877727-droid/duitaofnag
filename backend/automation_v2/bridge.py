@@ -69,6 +69,62 @@ class V1YoloAdapter:
         pass
 
 
+class V1OcrAdapter:
+    """包 v1 OcrDismisser 成 v2 OcrProto.
+
+    - 加 async (v1 _ocr_all_async 已 async; _ocr_roi_named 是 sync, 包 to_thread)
+    - ROI crop + 坐标 offset 还原 (跟 V1YoloAdapter 一致)
+    - v1 TextHit (text/cx/cy) → 包 OcrHitAdapter, 暴露 .text/.cx/.cy/.bbox
+    """
+
+    class OcrHitAdapter:
+        """OcrHit 兼容对象: 既有 .text/.cx/.cy 又有 .bbox/.conf, 适配 v2 phase."""
+        __slots__ = ("text", "cx", "cy", "bbox", "conf")
+
+        def __init__(self, text: str, cx: int, cy: int, conf: float = 0.9):
+            self.text = text
+            self.cx = cx
+            self.cy = cy
+            self.bbox = (cx - 5, cy - 5, cx + 5, cy + 5)  # v1 无 bbox, 估个小区域
+            self.conf = conf
+
+    def __init__(self, v1_ocr: Any):
+        self._ocr = v1_ocr
+
+    async def recognize(self, shot, *, roi=None, mode: str = "auto") -> list:
+        if shot is None or getattr(shot, "size", 0) == 0:
+            return []
+
+        offset_x = offset_y = 0
+        target = shot
+        if roi is not None:
+            h, w = shot.shape[:2]
+            x1 = int(roi[0] * w); y1 = int(roi[1] * h)
+            x2 = int(roi[2] * w); y2 = int(roi[3] * h)
+            target = shot[y1:y2, x1:x2]
+            offset_x, offset_y = x1, y1
+            if target.size == 0:
+                return []
+
+        try:
+            v1_hits = await self._ocr._ocr_all_async(target)
+        except Exception as e:
+            logger.debug(f"[bridge/ocr] recognize err: {e}")
+            return []
+
+        out = []
+        for h in v1_hits or []:
+            text = getattr(h, "text", "") or ""
+            cx = int(getattr(h, "cx", 0)) + offset_x
+            cy = int(getattr(h, "cy", 0)) + offset_y
+            out.append(self.OcrHitAdapter(text=text, cx=cx, cy=cy))
+        return out
+
+    async def warmup(self) -> None:
+        """v1 ocr_dismisser 在 single_runner init 时已 warmup."""
+        pass
+
+
 class V1AdbAdapter:
     """v1 ADBController 转发. 暴露 v2 phase 用的 tap/screenshot/start_app. ._adb 给底层访问."""
 
@@ -118,11 +174,16 @@ def build_v2_ctx(
     yolo_v1 = getattr(v1_runner, "yolo_dismisser", None)
     yolo_adapter = V1YoloAdapter(yolo_v1) if yolo_v1 is not None else None
 
+    # v2 P3a/P4 真重写后需要 OCR (找模式名/地图名/验证关键词).
+    # v1 ocr_dismisser 是 ImageRunner, ImageRunner 模式下不创建会 None
+    ocr_v1 = getattr(v1_runner, "ocr_dismisser", None)
+    ocr_adapter = V1OcrAdapter(ocr_v1) if ocr_v1 is not None else None
+
     adb_adapter = V1AdbAdapter(v1_runner.adb)
 
     ctx = RunContext(
         yolo=yolo_adapter,
-        ocr=None,                  # Day 4 P0/P1/P2 不用 OCR; P3a/P4 走 flows → v1_runner.ocr_dismisser
+        ocr=ocr_adapter,
         matcher=getattr(v1_runner, "matcher", None),
         adb=adb_adapter,
         log=decision_log,
