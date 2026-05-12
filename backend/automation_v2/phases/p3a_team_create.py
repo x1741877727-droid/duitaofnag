@@ -206,75 +206,114 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext) -> PhaseStep:
-        """关 P3a 打开的 panel — 2 层 (用户实测确认).
+        """关 P3a 打开的 panel — v1-aligned 完整逻辑 (single_runner.py:1487-1582).
 
-        Layer 1: 组队 panel — 右上有显式 close_x (yolo 能检出, e.g. (729, 122))
-                  → tap yolo conf 最高的 close_x
-        Layer 2: 好友列表 panel — 没显式 X, 用 `<` 收起箭头 (team_list_kill 模板)
-                  → 模板命中 tap, miss 兜底点空白 (720, 270)
+        实测 v1 跑了几个月稳定. 核心: 4 轮 retry + 每轮先 verify lobby +
+        模板族遍历 (find_dialog_close 含 8 个 close_x_* 模板).
 
-        每步后等 200ms UI 动画.
+        每轮流程:
+          1. verify: matcher lobby_start_btn/lobby_start_game 命中 → done
+          2. find_dialog_close() — 遍历 close_x_dialog/announce/activity/... 8 个
+          3. yolo close_x conf >= 0.40 (放后, 因为会误识)
+          4. team_list_kill 模板 (好友 panel `<` 收起箭头)
+          5. 都 miss → tap 空白 (720, 270)
+          每轮 tap 后 sleep 0.3s 等动画
+
+        最多 4 轮, 然后强制 done (P4 自己兜底).
         """
         notes = []
-
-        # ── Layer 1: yolo close_x 关组队 panel ──
-        ctx.mark("yolo_start")
-        try:
-            shot = await ctx.adb.screenshot()
-            dets = await ctx.yolo.detect(shot, conf_thresh=0.40) if shot is not None else []
-        except Exception:
-            dets = []
-
-        close_xs = sorted(
-            (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
-            key=lambda d: -d.conf,
-        )
-        if close_xs:
-            d = close_xs[0]
-            notes.append(f"L1 close_x@({d.cx},{d.cy}) conf={d.conf:.2f}")
+        for attempt in range(4):
             try:
-                await ctx.adb.tap(d.cx, d.cy)
+                shot = await ctx.adb.screenshot()
+            except Exception:
+                shot = None
+
+            if shot is None:
+                await asyncio.sleep(0.2)
+                continue
+
+            # ── Step 0: verify 是否已回大厅 (lobby 模板命中即 done) ──
+            if ctx.matcher is not None:
+                try:
+                    h = ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7) \
+                        or ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
+                    if h is not None:
+                        ctx.mark("yolo_start"); ctx.mark("yolo_done")
+                        ctx.mark("tap_send"); ctx.mark("tap_done"); ctx.mark("decide")
+                        ctx._p3a["sub_step"] = "done"
+                        notes.append(f"R{attempt+1} lobby_start_btn 命中, 已回大厅")
+                        return step_retry(
+                            note=f"P3a[close] {' | '.join(notes)} → done",
+                            outcome_hint="lobby_confirmed",
+                        )
+                except Exception:
+                    pass
+
+            # ── Step 1: find_dialog_close 模板族 (v1 真正干活的层) ──
+            close_hit = None
+            close_method = ""
+            if ctx.matcher is not None:
+                try:
+                    close_hit = ctx.matcher.find_dialog_close(shot)
+                    if close_hit is not None:
+                        close_method = "find_dialog_close"
+                except Exception as e:
+                    logger.debug(f"P3a[close] find_dialog_close err: {e}")
+
+            # ── Step 2: yolo close_x (放后, 因为会误识) ──
+            if close_hit is None:
+                ctx.mark("yolo_start")
+                try:
+                    dets = await ctx.yolo.detect(shot, conf_thresh=0.40)
+                except Exception:
+                    dets = []
+                ctx.mark("yolo_done")
+                close_xs = sorted(
+                    (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
+                    key=lambda d: -d.conf,
+                )
+                if close_xs:
+                    d = close_xs[0]
+                    # 包成 hit-like 对象 (.cx/.cy)
+                    class _YoloHit:
+                        def __init__(s, cx, cy, conf):
+                            s.cx, s.cy, s.confidence = cx, cy, conf
+                    close_hit = _YoloHit(d.cx, d.cy, d.conf)
+                    close_method = f"yolo close_x conf={d.conf:.2f}"
+            else:
+                ctx.mark("yolo_start"); ctx.mark("yolo_done")
+
+            # ── Step 3: team_list_kill 模板 (好友 panel `<` 收起箭头) ──
+            if close_hit is None and ctx.matcher is not None:
+                try:
+                    h = ctx.matcher.match_one(shot, "team_list_kill", threshold=0.7)
+                    if h is not None:
+                        close_hit = h
+                        close_method = "team_list_kill"
+                except Exception:
+                    pass
+
+            # ── Step 4: tap (close_hit 或 空白 720,270) ──
+            ctx.mark("tap_send")
+            if close_hit is not None:
+                tx, ty = int(close_hit.cx), int(close_hit.cy)
+                notes.append(f"R{attempt+1} {close_method}@({tx},{ty})")
+            else:
+                tx, ty = 720, 270
+                notes.append(f"R{attempt+1} blank@(720,270)")
+            try:
+                await ctx.adb.tap(tx, ty)
             except Exception:
                 pass
-            await asyncio.sleep(0.3)   # 等组队 panel 关闭动画
-        else:
-            notes.append("L1 no close_x")
-        ctx.mark("yolo_done")
+            ctx.mark("tap_done")
+            ctx.mark("decide")
+            await asyncio.sleep(0.3)   # 等关闭动画
 
-        # ── Layer 2: team_list_kill 模板, miss 点空白 ──
-        try:
-            shot = await ctx.adb.screenshot()
-        except Exception:
-            shot = None
-
-        hit = None
-        if shot is not None and ctx.matcher is not None:
-            try:
-                hit = ctx.matcher.match_one(shot, "team_list_kill", threshold=0.5)
-            except Exception as e:
-                logger.debug(f"P3a[close] template err: {e}")
-
-        ctx.mark("tap_send")
-        if hit is not None:
-            notes.append(f"L2 team_list_kill@({hit.cx},{hit.cy}) conf={hit.confidence:.2f}")
-            try:
-                await ctx.adb.tap(int(hit.cx), int(hit.cy))
-            except Exception:
-                pass
-        else:
-            notes.append("L2 template miss → tap blank (720,270)")
-            try:
-                await ctx.adb.tap(720, 270)
-            except Exception:
-                pass
-        ctx.mark("tap_done")
-        await asyncio.sleep(0.2)
-
-        ctx.mark("decide")
+        # 4 轮都没回大厅 — 强制 done, P4 自己兜底
         ctx._p3a["sub_step"] = "done"
         return step_retry(
-            note=f"P3a[close] {' | '.join(notes)} → done",
-            outcome_hint="closed_2layer",
+            note=f"P3a[close] 4 轮: {' | '.join(notes)} → force done",
+            outcome_hint="closed_force_done",
         )
 
     # ════════════════════════════════════════
