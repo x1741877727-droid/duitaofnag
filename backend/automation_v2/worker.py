@@ -170,16 +170,20 @@ async def _run_worker(args) -> int:
     _trace("_run_worker: enter")
     state = {"stop_requested": False, "game_scheme_url": args.game_scheme or ""}
 
-    # stdin reader (Windows: 必须 threading 同步读, asyncio.connect_read_pipe 不支持 stdin)
-    _start_stdin_thread(state)
-    _trace("_run_worker: stdin thread started")
-    stdin_task = None    # 不再用 asyncio task
+    # 关键: 先 import 重 lib (numpy/cv2/onnxruntime DllMain), 后启 stdin thread.
+    # Windows loader lock: 进程已有别的 thread 时, LoadLibrary 持 loader lock 期间,
+    # OpenBLAS DllMain 试图 CreateThread → 新 thread 也要 loader lock → 死锁.
+    # 单 thread 状态下 LoadLibrary 安全.
+    stdin_task = None
 
     # 加载组件
     try:
-        _trace("_run_worker: calling _build_components")
+        _trace("_run_worker: calling _build_components (single-thread)")
         v1_runner, raw_adb = _build_components(args.idx, args.role)
         _trace("_run_worker: _build_components returned")
+        # imports 完了再启 stdin daemon thread
+        _start_stdin_thread(state)
+        _trace("_run_worker: stdin thread started (after imports)")
     except Exception as e:
         _emit({"type": "error", "msg": f"init err: {e}\n{traceback.format_exc()[:1000]}"})
         return 1
