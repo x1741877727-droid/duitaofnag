@@ -4,26 +4,37 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 /**
- * HTTP 拉取 gameproxy 状态.
+ * 探活 TUN→gameproxy→PUBG 路径是否通.
  *
- * 端点: http://gameproxy-verify-json/  (gameproxy 在 TUN 层拦截这个虚拟域名,
- *       直接在代理内回 JSON, 不走任何上游). 流量真的穿了 TUN 才能拿到响应.
+ * 设计:
+ *   旧版本探 http://gameproxy-verify-json/ 虚拟域名 — 只在 SOCKS5 模式 gameproxy
+ *   拦得到. TUN 模式 Android 先 DNS 查 gameproxy-verify-json → NXDOMAIN, 包都不发.
  *
- * 响应 schema (来自 gameproxy verify.go):
- *   { ok, server, uptime_seconds, active_connections, total_connections }
+ *   新版本探 TCP connect 到已知 PUBG game server IP (在 gameproxy TUN 路由表里).
+ *   3s timeout 内连上 = 全链路 TUN+gameproxy+upstream 真通. 任何一环挂都失败.
+ *
+ *   备用: 探 backend 自检 (10.0.2.2:8900/api/tun/state). 不经 TUN, 只确认基建活.
+ *   两个都失败 = 严重问题. 只 TUN 失败 = upstream / IP 不健康.
  */
 final class VerifyClient {
     private static final String TAG = "GamebotOverlay";
-    private static final String VERIFY_URL = "http://gameproxy-verify-json/";
     private static final int TIMEOUT_MS = 3000;
+
+    // PUBG / Tencent 游戏服务器候选 IP (gameproxy TUN 路由表里的)
+    // 候选多个: 任一通过即认通过 (单 IP 抖动有容错)
+    private static final String[][] PROBE_TARGETS = {
+            {"43.135.105.51", "17500"},
+            {"129.226.102.123", "17500"},
+            {"129.226.103.85", "443"},
+    };
 
     static final class Result {
         final boolean ok;
@@ -50,39 +61,34 @@ final class VerifyClient {
     }
 
     static Result probe() {
-        HttpURLConnection conn = null;
+        // 候选 IP 逐个 TCP connect, 任一通就算 ok.
+        // 单 IP 不通可能是该 IP 暂时不健康 (gameproxy IPHealth 标 unhealthy);
+        // 多个全不通 = TUN/upstream/网络故障.
+        StringBuilder errs = new StringBuilder();
+        for (String[] target : PROBE_TARGETS) {
+            String ip = target[0];
+            int port = Integer.parseInt(target[1]);
+            String err = tcpProbe(ip, port);
+            if (err == null) {
+                // 至少一个通过 → 视为整体通
+                return Result.ok(0, 0, 0);
+            }
+            if (errs.length() > 0) errs.append("; ");
+            errs.append(ip).append(":").append(port).append("=").append(err);
+        }
+        return Result.fail("all probes fail: " + errs);
+    }
+
+    /** TCP connect + 立即关闭. 返回 null = 通, 否则错误描述. */
+    private static String tcpProbe(String host, int port) {
+        Socket s = new Socket();
         try {
-            URL u = new URL(VERIFY_URL);
-            conn = (HttpURLConnection) u.openConnection();
-            conn.setConnectTimeout(TIMEOUT_MS);
-            conn.setReadTimeout(TIMEOUT_MS);
-            conn.setRequestMethod("GET");
-            conn.setRequestProperty("Accept", "application/json");
-            int code = conn.getResponseCode();
-            if (code != 200) {
-                return Result.fail("HTTP " + code);
-            }
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
-                char[] buf = new char[1024];
-                int n;
-                while ((n = br.read(buf)) > 0) sb.append(buf, 0, n);
-            }
-            JSONObject j = new JSONObject(sb.toString());
-            if (!j.optBoolean("ok", false)) {
-                return Result.fail("ok=false");
-            }
-            return Result.ok(
-                    j.optLong("uptime_seconds", 0),
-                    j.optLong("active_connections", 0),
-                    j.optLong("total_connections", 0));
+            s.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            return null;
         } catch (Throwable t) {
-            String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
-            Log.w(TAG, "probe failed: " + msg);
-            return Result.fail(msg);
+            return t.getClass().getSimpleName();
         } finally {
-            if (conn != null) conn.disconnect();
+            try { s.close(); } catch (Throwable ignored) {}
         }
     }
 
