@@ -12,6 +12,7 @@
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:icon="@drawable/ic_launcher"
+        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.Light">
 
         <activity
