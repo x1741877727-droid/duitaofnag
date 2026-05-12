@@ -87,8 +87,11 @@ class P3aTeamCreate:
         st = ctx._p3a
         sub = st["sub_step"]
 
-        # ── 1. Tap 前弹窗检查 (仅 open/tab/qr 子步; decode/close 不查) ──
-        if sub in ("open", "tab", "qr"):
+        # ── 1. Tap 前弹窗检查: 只在 "open" 子步 (panel 未打开) 跑.
+        # 进入 tab/qr 后 panel 已打开, yolo close_x 检出的多半是 panel 自带 X,
+        # 误识为 popup 会把 panel 关掉 → 用户感受"组队码开关循环" (bug 已修).
+        # decode/close 本来就不 tap, 不查.
+        if sub == "open":
             ctx.mark("yolo_start")
             popup_tap = await self._find_popup(ctx, shot)
             ctx.mark("yolo_done")
@@ -96,11 +99,10 @@ class P3aTeamCreate:
                 x, y = popup_tap
                 ctx.add_blacklist(x, y, ttl=3.0)
                 st["popup_intercept_count"] += 1
-                # popup 拦截 = 屏幕被打断, 当前 sub_step 已 tap 的状态作废, 重 tap
                 st["tap_done"] = False
                 ctx.mark("decide")
                 return step_retry(
-                    note=f"P3a[{sub}]: popup intercept @({x},{y}) "
+                    note=f"P3a[open]: popup intercept @({x},{y}) "
                          f"({st['popup_intercept_count']}/{POPUP_INTERCEPT_LIMIT})",
                     outcome_hint="popup_intercept",
                     action=PhaseAction(kind="tap", x=x, y=y, target="popup_close"),

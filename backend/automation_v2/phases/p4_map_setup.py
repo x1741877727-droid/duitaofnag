@@ -112,8 +112,10 @@ class P4MapSetup:
         st = ctx._p4
         sub = st["sub_step"]
 
-        # ── 1. Tap 前弹窗检查 (open/confirm) ──
-        if sub in ("open", "confirm"):
+        # ── 1. Tap 前弹窗检查: 只在 "open" 子步 (主菜单状态, panel 未打开) 跑.
+        # mode/map/fill 在 panel 内, confirm 时 panel 还开着 — 这些状态 yolo
+        # 看到的 close_x 多半是 panel 自带, 误识 popup 会把 panel 关掉.
+        if sub == "open":
             ctx.mark("yolo_start")
             popup_tap = await self._find_popup(ctx, shot)
             ctx.mark("yolo_done")
@@ -124,7 +126,7 @@ class P4MapSetup:
                 st["tap_done"] = False
                 ctx.mark("decide")
                 return step_retry(
-                    note=f"P4[{sub}]: popup intercept @({x},{y}) "
+                    note=f"P4[open]: popup intercept @({x},{y}) "
                          f"({st['popup_intercept_count']}/{POPUP_INTERCEPT_LIMIT})",
                     outcome_hint="popup_intercept",
                     action=PhaseAction(kind="tap", x=x, y=y, target="popup_close"),
@@ -134,13 +136,10 @@ class P4MapSetup:
 
         # ── 2. 分支 ──
         if sub == "open":
-            return await self._step_fixed_tap_with_verify(
-                ctx, shot, "open",
-                tap_coord=FIXED_TAPS["open"],
-                verify_keywords=MODE_MENU_KEYWORDS,
-                verify_roi=MODE_OCR_ROI,
-                next_sub="mode",
-            )
+            # P4-1 改 OCR 找"开始游戏" → tap 下方 60px (跟 v1 一致).
+            # 实测固定坐标 (90, 92) 历史 v1 数据只有 36% 一致, 现版本游戏 UI
+            # 模式名 cy 漂移. OCR 找"开始游戏"文字 + cy+60 一直可靠.
+            return await self._step_open_via_ocr(ctx, shot)
         if sub == "mode":
             # mode 优先找用户配置 game_mode, 找不到任意模式名兜底 (说明菜单出来了)
             return await self._step_search_and_tap(
@@ -187,6 +186,89 @@ class P4MapSetup:
     # ════════════════════════════════════════
     # 子步骤
     # ════════════════════════════════════════
+
+    async def _step_open_via_ocr(
+        self, ctx: RunContext, shot,
+    ) -> PhaseStep:
+        """P4-1 用 OCR 找"开始游戏" + tap 下方 60px (跟 v1 一致 single_runner:585).
+
+        v1 实测: "开始游戏"文字位置稳定, 但下方模式名 (cx, cy+60) 才是真正打开
+        地图菜单的按钮. 比固定坐标 (90, 92) 鲁棒多了.
+        """
+        st = ctx._p4
+
+        if not st["tap_done"]:
+            try:
+                hits = await ctx.ocr.recognize(
+                    shot, roi=Roi(0.0, 0.0, 0.30, 0.35),
+                )
+            except Exception as e:
+                logger.debug(f"P4[open] OCR err: {e}")
+                hits = []
+
+            target = None
+            for h in hits:
+                if "开始游戏" in self._hit_text(h):
+                    target = h
+                    break
+
+            if target is None:
+                st["search_retry"] += 1
+                if st["search_retry"] >= SEARCH_RETRY:
+                    ctx.mark("decide")
+                    return step_fail(
+                        note="P4[open] OCR 找不到'开始游戏'",
+                        outcome_hint="search_fail_open",
+                    )
+                ctx.mark("decide")
+                return step_retry(
+                    note=f"P4[open] OCR miss '开始游戏' "
+                         f"({st['search_retry']}/{SEARCH_RETRY})",
+                    outcome_hint="search_miss_open",
+                )
+
+            cx, cy = self._hit_center(target)
+            tap_y = cy + 60   # v1: 模式名在'开始游戏'下方 60px
+            st["tap_done"] = True
+            ctx.mark("decide")
+            return step_retry(
+                note=f"P4[open] OCR hit '开始游戏'@({cx},{cy}) → "
+                     f"tap mode_name@({cx},{tap_y})",
+                outcome_hint="tap_open",
+                action=PhaseAction(
+                    kind="tap", x=cx, y=tap_y,
+                    target="p4_open_mode_name", conf=0.9,
+                ),
+            )
+
+        # verify (mode 菜单出来了 = 任一模式名可见)
+        verified = await self._ocr_contains_any(
+            ctx, shot, MODE_MENU_KEYWORDS, MODE_OCR_ROI,
+        )
+        ctx.mark("decide")
+        if verified:
+            st["sub_step"] = "mode"
+            st["tap_done"] = False
+            st["tap_retry"] = 0
+            st["search_retry"] = 0
+            st["popup_intercept_count"] = 0
+            return step_retry(
+                note="P4[open] verify OK → mode",
+                outcome_hint="verify_ok_open",
+            )
+
+        st["tap_retry"] += 1
+        if st["tap_retry"] >= TAP_VERIFY_RETRY:
+            return step_fail(
+                note="P4[open]: verify fail 3 次",
+                outcome_hint="verify_fail_open",
+            )
+        st["tap_done"] = False
+        return step_retry(
+            note=f"P4[open] verify miss, retry "
+                 f"({st['tap_retry']}/{TAP_VERIFY_RETRY})",
+            outcome_hint="verify_miss_open",
+        )
 
     async def _step_fixed_tap_with_verify(
         self, ctx: RunContext, shot, sub: str,
