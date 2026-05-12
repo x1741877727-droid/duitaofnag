@@ -206,62 +206,75 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext) -> PhaseStep:
-        """关 panel: 优先 team_list_kill 模板, miss 再点空白.
+        """关 P3a 打开的 panel — 2 层 (用户实测确认).
 
-        策略:
-          1. 截图, 模板匹配 `team_list_kill` (用户裁的好友/邀请面板关闭按钮)
-             - 命中 → tap 模板位置, done
-          2. miss → tap (720, 270) 屏幕右下空白
-             - 等 200ms, 直接 done (信赖空白生效)
+        Layer 1: 组队 panel — 右上有显式 close_x (yolo 能检出, e.g. (729, 122))
+                  → tap yolo conf 最高的 close_x
+        Layer 2: 好友列表 panel — 没显式 X, 用 `<` 收起箭头 (team_list_kill 模板)
+                  → 模板命中 tap, miss 兜底点空白 (720, 270)
 
-        team_list_kill 模板需要用户后续裁图加到 fixtures/templates/.
-        没这个模板时自动 fallback 到点空白, 不会破业务.
+        每步后等 200ms UI 动画.
         """
-        ctx.mark("yolo_start"); ctx.mark("yolo_done")
+        notes = []
 
+        # ── Layer 1: yolo close_x 关组队 panel ──
+        ctx.mark("yolo_start")
+        try:
+            shot = await ctx.adb.screenshot()
+            dets = await ctx.yolo.detect(shot, conf_thresh=0.40) if shot is not None else []
+        except Exception:
+            dets = []
+
+        close_xs = sorted(
+            (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
+            key=lambda d: -d.conf,
+        )
+        if close_xs:
+            d = close_xs[0]
+            notes.append(f"L1 close_x@({d.cx},{d.cy}) conf={d.conf:.2f}")
+            try:
+                await ctx.adb.tap(d.cx, d.cy)
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)   # 等组队 panel 关闭动画
+        else:
+            notes.append("L1 no close_x")
+        ctx.mark("yolo_done")
+
+        # ── Layer 2: team_list_kill 模板, miss 点空白 ──
         try:
             shot = await ctx.adb.screenshot()
         except Exception:
             shot = None
 
-        # ─ 第一步: 模板 team_list_kill ─
         hit = None
         if shot is not None and ctx.matcher is not None:
             try:
-                hit = ctx.matcher.match_one(shot, "team_list_kill", threshold=0.7)
+                hit = ctx.matcher.match_one(shot, "team_list_kill", threshold=0.5)
             except Exception as e:
-                logger.debug(f"P3a[close] template team_list_kill err: {e}")
-                hit = None
+                logger.debug(f"P3a[close] template err: {e}")
 
         ctx.mark("tap_send")
         if hit is not None:
-            # 模板命中 → tap 那个位置
+            notes.append(f"L2 team_list_kill@({hit.cx},{hit.cy}) conf={hit.confidence:.2f}")
             try:
                 await ctx.adb.tap(int(hit.cx), int(hit.cy))
-            except Exception as e:
-                logger.debug(f"P3a[close] template tap err: {e}")
-            ctx.mark("tap_done")
-            await asyncio.sleep(0.2)
-            ctx.mark("decide")
-            ctx._p3a["sub_step"] = "done"
-            return step_retry(
-                note=f"P3a[close] 模板 team_list_kill@({hit.cx},{hit.cy}) → done",
-                outcome_hint="closed_by_template",
-            )
-
-        # ─ 第二步: miss → 点空白 ─
-        try:
-            await ctx.adb.tap(720, 270)
-        except Exception as e:
-            logger.debug(f"P3a[close] blank tap err: {e}")
+            except Exception:
+                pass
+        else:
+            notes.append("L2 template miss → tap blank (720,270)")
+            try:
+                await ctx.adb.tap(720, 270)
+            except Exception:
+                pass
         ctx.mark("tap_done")
         await asyncio.sleep(0.2)
 
         ctx.mark("decide")
         ctx._p3a["sub_step"] = "done"
         return step_retry(
-            note="P3a[close] team_list_kill miss → tap 空白 (720,270) → done",
-            outcome_hint="closed_by_blank",
+            note=f"P3a[close] {' | '.join(notes)} → done",
+            outcome_hint="closed_2layer",
         )
 
     # ════════════════════════════════════════
