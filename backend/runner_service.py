@@ -906,6 +906,8 @@ class MultiRunnerService:
         # adbutils POC ~128ms 不比 subprocess (~120ms) 快, 不引入新依赖.
         worker_env["GAMEBOT_USE_MAATOUCH"] = "0"
         worker_env["GAMEBOT_TAP_PERSISTENT"] = "0"
+        # 死锁诊断 tracer
+        worker_env["GAMEBOT_WORKER_TRACE"] = str(session_dir / f"worker_trace_inst{idx}.log")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,

@@ -26,9 +26,24 @@ import json
 import logging
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Optional
+
+
+# 死锁诊断: 每步打 file trace, 跟 py-spy stack 对比
+_TRACE_PATH = os.environ.get("GAMEBOT_WORKER_TRACE", "")
+def _trace(msg: str) -> None:
+    if not _TRACE_PATH:
+        return
+    try:
+        with open(_TRACE_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.time():.3f}] pid={os.getpid()} {msg}\n")
+    except Exception:
+        pass
+
+_trace("worker.py top imports done")
 
 
 def _emit(msg: dict) -> None:
@@ -104,8 +119,11 @@ def _start_stdin_thread(state: dict):
 def _build_components(instance_idx: int, role: str):
     """worker 内独立 init: adb / matcher / yolo / ocr.
     复用 v1 类 (代码不动), 但在这个 subprocess 里独立的 session."""
+    _trace("_build_components: begin")
     from backend.config import config
+    _trace("_build_components: config imported")
     config.load()
+    _trace("_build_components: config.load() done")
     settings = config.settings
 
     # resolve adb path (跟 runner_service.py:274 同款)
@@ -115,8 +133,11 @@ def _build_components(instance_idx: int, role: str):
     serial = f"emulator-{5554 + instance_idx * 2}"
 
     # ADBController
+    _trace("_build_components: importing adb_lite (cv2/numpy)")
     from backend.automation.adb_lite import ADBController
+    _trace("_build_components: adb_lite imported")
     raw_adb = ADBController(serial, adb_path)
+    _trace("_build_components: ADBController constructed")
 
     # ScreenMatcher (shared template dir)
     from backend.automation.screen_matcher import ScreenMatcher
@@ -142,15 +163,19 @@ def _build_components(instance_idx: int, role: str):
 
 async def _run_worker(args) -> int:
     """Worker 主流程. 返 exit code (0=success)."""
+    _trace("_run_worker: enter")
     state = {"stop_requested": False, "game_scheme_url": args.game_scheme or ""}
 
     # stdin reader (Windows: 必须 threading 同步读, asyncio.connect_read_pipe 不支持 stdin)
     _start_stdin_thread(state)
+    _trace("_run_worker: stdin thread started")
     stdin_task = None    # 不再用 asyncio task
 
     # 加载组件
     try:
+        _trace("_run_worker: calling _build_components")
         v1_runner, raw_adb = _build_components(args.idx, args.role)
+        _trace("_run_worker: _build_components returned")
     except Exception as e:
         _emit({"type": "error", "msg": f"init err: {e}\n{traceback.format_exc()[:1000]}"})
         return 1
@@ -249,6 +274,7 @@ async def _run_worker(args) -> int:
 
 
 def main():
+    _trace("main(): start")
     ap = argparse.ArgumentParser(description="v2 worker subprocess")
     ap.add_argument("--idx", type=int, required=True, help="instance index")
     ap.add_argument("--role", required=True, choices=["captain", "member"])
@@ -256,9 +282,12 @@ def main():
     ap.add_argument("--game-scheme", default="", help="member 用: captain 已建好的 scheme")
     ap.add_argument("--session-dir", default="", help="session log 目录")
     args = ap.parse_args()
+    _trace(f"main(): args parsed idx={args.idx} role={args.role}")
 
     _setup_logging(args.idx)
+    _trace("main(): logging setup done")
     try:
+        _trace("main(): asyncio.run(_run_worker)")
         rc = asyncio.run(_run_worker(args))
     except KeyboardInterrupt:
         rc = 130
