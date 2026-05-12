@@ -310,6 +310,8 @@ class SingleRunner:
                 outcome = step.outcome_hint or step.result.value
                 note = step.note
 
+            # detailed 模式: shot 透传, DecisionDetailed 异步 imwrite → img/<trace_id>.jpg
+            # simple 模式: shot kwarg 被忽略 (DecisionSimple.record 接 **kwargs 吃掉)
             self.ctx.log.record(
                 inst=self.ctx.instance_idx,
                 phase=phase_name,
@@ -328,6 +330,7 @@ class SingleRunner:
                 trace_id=self.ctx.trace_id,
                 dets_count=0,
                 note=note,
+                shot=self.ctx.current_shot,
             )
         except Exception as e:
             logger.debug(f"[runner] _record_decision err: {e}")

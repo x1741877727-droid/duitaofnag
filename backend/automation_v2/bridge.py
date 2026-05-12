@@ -164,12 +164,13 @@ def build_v2_ctx(
         (ctx, decision_log) — ctx 给 v2 SingleRunner, decision_log 给 runner_service 关闭
     """
     from .ctx import RunContext
-    from .log.decision_simple import DecisionSimple
+    from .log.decision_detailed import make_decision_log
     from pathlib import Path
 
     # v2 decision 写 session_dir/inst_{N}_v2/decisions.jsonl, 跟 v1 detailed 不冲突
+    # GAMEBOT_DETAILED_LOG=1 → DecisionDetailed (含 img/<id>.jpg), 默认 DecisionSimple
     log_dir = Path(session_dir) / f"inst_{instance_idx}_v2"
-    decision_log = DecisionSimple(log_dir)
+    decision_log = make_decision_log(log_dir)
 
     yolo_v1 = getattr(v1_runner, "yolo_dismisser", None)
     yolo_adapter = V1YoloAdapter(yolo_v1) if yolo_v1 is not None else None
