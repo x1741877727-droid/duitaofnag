@@ -926,6 +926,20 @@ class MultiRunnerService:
             self._workers_v2: dict[int, Any] = {}
         self._workers_v2[idx] = proc
 
+<<<<<<< Updated upstream
+=======
+        # 修 CPython Windows pipe stdin 死锁 (bpo-34780 / gh-71019):
+        # worker daemon thread sync readline() 触发 outstanding ReadFile,
+        # 同时 main thread io.TextIOWrapper 初始化也 ReadFile → kernel 双 read 同 pipe → 死锁
+        # 解: master 立即 write 一个 newline 让 worker 第一次 readline 立刻返回 → 解 outstanding read.
+        # worker daemon thread json.loads("\n") fail, 跳过, 继续等下一行 (正常工作循环).
+        try:
+            proc.stdin.write(b"\n")
+            await proc.stdin.drain()
+        except Exception as e:
+            logger.debug(f"[v2/inst{idx}] stdin priming err: {e}")
+
+>>>>>>> Stashed changes
         # 读 worker stdout, 解析 JSON 消息
         ok = False
         try:
