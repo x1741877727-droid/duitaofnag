@@ -244,16 +244,46 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext, shot) -> PhaseStep:
-        """关闭组队面板 + 任何挂着的 panel (跟 v1 line 1487-1577 同款 4 层).
+        """关闭组队面板 + 所有挂着的 panel (好友列表 / 邀请等).
 
-        优先级:
-          1. 已回大厅 (yolo lobby class 连续 2 帧) → done
-          2. yolo close_x conf >= 0.40 → tap (关 panel 角的 X)
-          3. 都没有 → 点屏幕右下空白 (720, 270) 兜底关好友/邀请等挂着的 panel
-                     (v1 line 1559-1567 同款兜底)
+        用户实测: yolo 'lobby' class 看到右侧人物画面就命中, 即使左侧好友 panel
+        挂着也算 lobby — 不可信. 改用 **模板 lobby_start_game/lobby_start_btn**
+        判 lobby (跟 v1 line 1499-1502 一致, 严格: panel 挡住 → 模板 miss → 继续关).
+
+        必经流程:
+          1. 第一次进 close: 强制点屏幕右下空白 (720, 270) — 无论怎样
+          2. 之后每 round:
+             - 模板 lobby_start_game/btn 命中 → 连续 2 帧 → done
+             - 模板 miss → 看 yolo close_x → 有就 tap
+             - 都没 → 继续点空白
         """
         st = ctx._p3a
+
+        # ── 1. 第一次进 close: 强制点空白 (用户要求"无论怎样都要点击空白") ──
+        if not st.get("blank_done", False):
+            st["blank_done"] = True
+            ctx.mark("yolo_start"); ctx.mark("yolo_done"); ctx.mark("decide")
+            return step_retry(
+                note="P3a[close] 强制点屏幕右下空白 (1st)",
+                outcome_hint="tap_blank_force",
+                action=PhaseAction(
+                    kind="tap", x=720, y=270,
+                    target="blank_force", conf=0.5,
+                ),
+            )
+
+        # ── 2. 已点过空白, 严格判 lobby (用模板, 不用 yolo lobby class) ──
         ctx.mark("yolo_start")
+        has_lobby = False
+        if ctx.matcher is not None:
+            try:
+                if (ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
+                        or ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)):
+                    has_lobby = True
+            except Exception as e:
+                logger.debug(f"P3a[close] matcher err: {e}")
+
+        # 同时也跑 yolo, 拿 close_x 做兜底
         try:
             dets = await ctx.yolo.detect(shot, conf_thresh=0.40)
         except Exception as e:
@@ -261,15 +291,13 @@ class P3aTeamCreate:
             dets = []
         ctx.mark("yolo_done")
 
-        # ── 1. 先看是否已回大厅 ──
-        has_lobby = any(d.name == "lobby" and d.conf >= 0.55 for d in dets)
         if has_lobby:
             ctx.lobby_streak += 1
             ctx.mark("decide")
             if ctx.lobby_streak >= 2:
                 st["sub_step"] = "done"
                 return step_retry(
-                    note="P3a[close] lobby ×2, panel 关掉",
+                    note="P3a[close] lobby_start_btn ×2 帧, panel 真关掉",
                     outcome_hint="back_to_lobby",
                 )
             return step_retry(
@@ -278,7 +306,7 @@ class P3aTeamCreate:
             )
         ctx.lobby_streak = 0
 
-        # ── 2. yolo close_x ──
+        # ── 3. 不在大厅 → 看 close_x → 关 ──
         close_xs = sorted(
             (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
             key=lambda d: -d.conf,
@@ -296,18 +324,16 @@ class P3aTeamCreate:
                     ),
                 )
 
-        # ── 3. 兜底: 点右下空白 (关好友面板/邀请面板等没显式 close_x 的) ──
-        # 960*3//4=720, 540//2=270. 大厅人物画面区域, 点这里只是关 panel 不点其它按钮.
-        BLANK_TAP_X, BLANK_TAP_Y = 720, 270
-        if not ctx.is_blacklisted(BLANK_TAP_X, BLANK_TAP_Y):
-            ctx.add_blacklist(BLANK_TAP_X, BLANK_TAP_Y, ttl=2.0)
+        # ── 4. 没 close_x → 再点空白 ──
+        if not ctx.is_blacklisted(720, 270):
+            ctx.add_blacklist(720, 270, ttl=2.0)
             ctx.mark("decide")
             return step_retry(
-                note="P3a[close] 无 close_x 无 lobby, 点右下空白兜底",
-                outcome_hint="tap_blank",
+                note="P3a[close] 无 close_x 无 lobby → 再点空白",
+                outcome_hint="tap_blank_retry",
                 action=PhaseAction(
-                    kind="tap", x=BLANK_TAP_X, y=BLANK_TAP_Y,
-                    target="blank_fallback", conf=0.5,
+                    kind="tap", x=720, y=270,
+                    target="blank_retry", conf=0.5,
                 ),
             )
 

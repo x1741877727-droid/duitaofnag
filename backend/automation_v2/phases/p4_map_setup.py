@@ -315,11 +315,17 @@ class P4MapSetup:
 
         verified = False
         if verify_use_lobby:
-            try:
-                dets = await ctx.yolo.detect(shot, conf_thresh=0.40)
-            except Exception:
-                dets = []
-            if any(d.name == "lobby" and d.conf >= 0.55 for d in dets):
+            # 用模板严格判 lobby (跟 P3a-close 一致, yolo lobby class 不可信:
+            # 看到右侧人物画面就命中, panel 挂着也算 lobby).
+            has_lobby = False
+            if ctx.matcher is not None:
+                try:
+                    if (ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
+                            or ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)):
+                        has_lobby = True
+                except Exception:
+                    pass
+            if has_lobby:
                 ctx.lobby_streak += 1
                 if ctx.lobby_streak >= 2:
                     verified = True
