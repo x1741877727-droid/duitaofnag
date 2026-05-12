@@ -914,12 +914,18 @@ class MultiRunnerService:
         worker_env["OPENBLAS_MAIN_FREE"] = "1"
         worker_env["OMP_NUM_THREADS"] = "1"
         worker_env["MKL_NUM_THREADS"] = "1"
+        # stderr 重定向到 file 而不是 PIPE: numpy/OpenBLAS DllMain init 时会
+        # 往 stderr 写诊断 (BLAS detect / DLL warnings), 若 stderr=PIPE 且 master
+        # 不读, pipe buffer 64KB 满 → WriteFile 阻塞 → DllMain 永远不返 →
+        # MainThread 永远卡在 import. 实测复现: 手动跑 worker 121ms 完成,
+        # asyncio PIPE spawn 死. 走文件后 master 仍能从 stdout JSON 读决策事件.
+        stderr_log = open(session_dir / f"worker_stderr_inst{idx}.log", "wb")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=stderr_log,
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 env=worker_env,
             )
@@ -972,6 +978,10 @@ class MultiRunnerService:
                 except Exception:
                     pass
             self._workers_v2.pop(idx, None)
+            try:
+                stderr_log.close()
+            except Exception:
+                pass
 
         if not ok:
             inst.state = "error"
