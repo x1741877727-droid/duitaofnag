@@ -76,6 +76,11 @@ class InviteDismissMiddleware:
             logger.warning(f"[middleware/invite] v1 popup_dismiss 不可用: {e}")
             return BeforeRoundResult(intercept=False)
 
+        # 节流时间戳: 在 attempt 前就更新, 不管成败. 防止"没找到 popup"导致
+        # 下一 round 又重跑全套 yolo+OCR (实测 R1 yolo_q=524ms 的真因).
+        # 邀请检测是低优先级 (3s 内出现一次足够), 错过 1 次没大事.
+        self._last_dismiss_ts[ctx.instance_idx] = now
+
         try:
             dismissed = await dismiss_known_popups(
                 proxy, pre_shot=shot, current_phase="middleware",
@@ -89,7 +94,6 @@ class InviteDismissMiddleware:
             return BeforeRoundResult(intercept=False)
 
         if dismissed:
-            self._last_dismiss_ts[ctx.instance_idx] = now
             logger.info(f"[middleware/invite] inst{ctx.instance_idx} dismissed: {dismissed}")
             return BeforeRoundResult(intercept=True, note=f"dismissed:{dismissed}")
         return BeforeRoundResult(intercept=False)
