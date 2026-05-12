@@ -31,6 +31,13 @@ import traceback
 from pathlib import Path
 from typing import Any, Optional
 
+# Windows 中文系统默认 GBK, 写带 mojibake 的日志到 pipe 会 UnicodeEncodeError
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 # 死锁诊断: 每步打 file trace, 跟 py-spy stack 对比
 _TRACE_PATH = os.environ.get("GAMEBOT_WORKER_TRACE", "")

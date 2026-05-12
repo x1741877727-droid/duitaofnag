@@ -13,6 +13,16 @@ import socket
 import sys
 import threading
 
+# Windows 中文系统 sys.stdout/stderr 默认 GBK, 遇 � / emoji 等非 GBK 字符崩
+# (UnicodeEncodeError 直接挂 uvicorn loop). 进 utf-8 + errors=replace 解.
+# 同时给子进程读到 PYTHONIOENCODING.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
 import uvicorn
 
 # native crash 保护 — faulthandler 写到独立 crash.log (而不是 stderr).
