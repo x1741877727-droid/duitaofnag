@@ -72,7 +72,7 @@ POPUP_CHECK_ROI = (0.50, 0.0, 1.0, 0.5)
 class P4MapSetup:
     name = "P4"
     max_seconds = 30.0
-    round_interval_s = 0.3
+    round_interval_s = 0.2   # 0.3 → 0.2 砍 sleep 时间
 
     async def enter(self, ctx: RunContext) -> None:
         ctx.reset_phase_state()
@@ -190,50 +190,73 @@ class P4MapSetup:
     async def _step_open_via_ocr(
         self, ctx: RunContext, shot,
     ) -> PhaseStep:
-        """P4-1 用 OCR 找"开始游戏" + tap 下方 60px (跟 v1 一致 single_runner:585).
+        """P4-1 用模板 lobby_start_game (v1 风格) 找"开始游戏"按钮 → tap (cx, cy+60).
 
-        v1 实测: "开始游戏"文字位置稳定, 但下方模式名 (cx, cy+60) 才是真正打开
-        地图菜单的按钮. 比固定坐标 (90, 92) 鲁棒多了.
+        v1 实测路径 (single_runner:543-604):
+          ① 模板 lobby_start_game (用户裁的)
+          ② 模板 lobby_start_btn (旧版)
+          ③ OCR "开始游戏" 文字 兜底
+          tap (hit.cx, hit.cy + 60) — '开始游戏'下方 60px 是真正模式名按钮
+
+        改 OCR 主路径为模板主路径: 因为大厅"开始游戏"按钮是图标 + 小文字,
+        OCR 经常漏识 (实测 P4 search_miss × 3 → FAIL).
         """
         st = ctx._p4
 
         if not st["tap_done"]:
+            # 模板优先 — 跟 v1 一样
+            hit = None
+            tmpl = ""
             try:
-                hits = await ctx.ocr.recognize(
-                    shot, roi=Roi(0.0, 0.0, 0.30, 0.35),
-                )
+                if ctx.matcher is not None:
+                    h = ctx.matcher.match_one(shot, "lobby_start_game", threshold=0.7)
+                    if h:
+                        hit = h; tmpl = "lobby_start_game"
+                    else:
+                        h = ctx.matcher.match_one(shot, "lobby_start_btn", threshold=0.7)
+                        if h:
+                            hit = h; tmpl = "lobby_start_btn"
             except Exception as e:
-                logger.debug(f"P4[open] OCR err: {e}")
-                hits = []
+                logger.debug(f"P4[open] matcher err: {e}")
+                hit = None
 
-            target = None
-            for h in hits:
-                if "开始游戏" in self._hit_text(h):
-                    target = h
-                    break
+            # OCR 兜底
+            if hit is None:
+                try:
+                    hits = await ctx.ocr.recognize(
+                        shot, roi=Roi(0.0, 0.0, 0.30, 0.35),
+                    )
+                except Exception as e:
+                    logger.debug(f"P4[open] OCR err: {e}")
+                    hits = []
+                for h in hits:
+                    if "开始游戏" in self._hit_text(h):
+                        hit = h
+                        tmpl = "OCR·开始游戏"
+                        break
 
-            if target is None:
+            if hit is None:
                 st["search_retry"] += 1
                 if st["search_retry"] >= SEARCH_RETRY:
                     ctx.mark("decide")
                     return step_fail(
-                        note="P4[open] OCR 找不到'开始游戏'",
+                        note="P4[open] 模板+OCR 都找不到'开始游戏'",
                         outcome_hint="search_fail_open",
                     )
                 ctx.mark("decide")
                 return step_retry(
-                    note=f"P4[open] OCR miss '开始游戏' "
+                    note=f"P4[open] miss '开始游戏' "
                          f"({st['search_retry']}/{SEARCH_RETRY})",
                     outcome_hint="search_miss_open",
                 )
 
-            cx, cy = self._hit_center(target)
+            # hit 可能是 matcher 的 hit (有 .cx/.cy) 或 OCR hit
+            cx, cy = self._hit_center(hit)
             tap_y = cy + 60   # v1: 模式名在'开始游戏'下方 60px
             st["tap_done"] = True
             ctx.mark("decide")
             return step_retry(
-                note=f"P4[open] OCR hit '开始游戏'@({cx},{cy}) → "
-                     f"tap mode_name@({cx},{tap_y})",
+                note=f"P4[open] {tmpl} hit@({cx},{cy}) → tap mode@({cx},{tap_y})",
                 outcome_hint="tap_open",
                 action=PhaseAction(
                     kind="tap", x=cx, y=tap_y,

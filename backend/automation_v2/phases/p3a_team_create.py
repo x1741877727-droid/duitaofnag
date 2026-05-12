@@ -57,14 +57,14 @@ POPUP_INTERCEPT_LIMIT = 5       # 单 sub_step 内 popup 拦截上限 (防死循
 QR_DECODE_CROP_ROI = (0.30, 0.20, 0.85, 0.80)   # QR 大致区域
 QR_DECODE_SCALE = 2                              # crop 后放大倍数
 
-VERIFY_OCR_ROI = (0.0, 0.30, 1.0, 1.0)           # OCR 验证 ROI (中下半屏)
+VERIFY_OCR_ROI = (0.10, 0.50, 0.85, 1.0)         # OCR 验证 ROI (panel 范围, 砍半节省 ~500ms)
 POPUP_CHECK_ROI = (0.50, 0.0, 1.0, 0.5)          # popup yolo 检测 ROI (右上 + 顶部)
 
 
 class P3aTeamCreate:
     name = "P3a"
     max_seconds = 45.0
-    round_interval_s = 0.3
+    round_interval_s = 0.2   # 0.3 → 0.2 砍 7 tap × 100ms = 700ms
 
     async def enter(self, ctx: RunContext) -> None:
         ctx.reset_phase_state()
@@ -244,7 +244,14 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext, shot) -> PhaseStep:
-        """关闭组队面板. 用 yolo close_x 找到关 (位置不固定)."""
+        """关闭组队面板 + 任何挂着的 panel (跟 v1 line 1487-1577 同款 4 层).
+
+        优先级:
+          1. 已回大厅 (yolo lobby class 连续 2 帧) → done
+          2. yolo close_x conf >= 0.40 → tap (关 panel 角的 X)
+          3. 都没有 → 点屏幕右下空白 (720, 270) 兜底关好友/邀请等挂着的 panel
+                     (v1 line 1559-1567 同款兜底)
+        """
         st = ctx._p3a
         ctx.mark("yolo_start")
         try:
@@ -254,6 +261,24 @@ class P3aTeamCreate:
             dets = []
         ctx.mark("yolo_done")
 
+        # ── 1. 先看是否已回大厅 ──
+        has_lobby = any(d.name == "lobby" and d.conf >= 0.55 for d in dets)
+        if has_lobby:
+            ctx.lobby_streak += 1
+            ctx.mark("decide")
+            if ctx.lobby_streak >= 2:
+                st["sub_step"] = "done"
+                return step_retry(
+                    note="P3a[close] lobby ×2, panel 关掉",
+                    outcome_hint="back_to_lobby",
+                )
+            return step_retry(
+                note=f"P3a[close] lobby streak {ctx.lobby_streak}/2",
+                outcome_hint="lobby_pending",
+            )
+        ctx.lobby_streak = 0
+
+        # ── 2. yolo close_x ──
         close_xs = sorted(
             (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
             key=lambda d: -d.conf,
@@ -271,23 +296,21 @@ class P3aTeamCreate:
                     ),
                 )
 
-        # 找不到 close_x → 看 lobby class, 检测是否已回大厅
-        has_lobby = any(d.name == "lobby" and d.conf >= 0.55 for d in dets)
-        if has_lobby:
-            ctx.lobby_streak += 1
+        # ── 3. 兜底: 点右下空白 (关好友面板/邀请面板等没显式 close_x 的) ──
+        # 960*3//4=720, 540//2=270. 大厅人物画面区域, 点这里只是关 panel 不点其它按钮.
+        BLANK_TAP_X, BLANK_TAP_Y = 720, 270
+        if not ctx.is_blacklisted(BLANK_TAP_X, BLANK_TAP_Y):
+            ctx.add_blacklist(BLANK_TAP_X, BLANK_TAP_Y, ttl=2.0)
             ctx.mark("decide")
-            if ctx.lobby_streak >= 2:
-                st["sub_step"] = "done"
-                return step_retry(
-                    note="P3a[close] lobby 连续 2 帧, panel 已关",
-                    outcome_hint="back_to_lobby",
-                )
             return step_retry(
-                note=f"P3a[close] lobby streak {ctx.lobby_streak}/2",
-                outcome_hint="lobby_pending",
+                note="P3a[close] 无 close_x 无 lobby, 点右下空白兜底",
+                outcome_hint="tap_blank",
+                action=PhaseAction(
+                    kind="tap", x=BLANK_TAP_X, y=BLANK_TAP_Y,
+                    target="blank_fallback", conf=0.5,
+                ),
             )
 
-        ctx.lobby_streak = 0
         ctx.mark("decide")
         return step_retry(
             note="P3a[close] 等画面变化",
