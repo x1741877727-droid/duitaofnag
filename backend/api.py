@@ -849,6 +849,65 @@ def create_app(config: ConfigManager) -> FastAPI:
         except Exception as e:
             return {"ok": False, "reason": f"stop 异常: {e}"}
 
+    # ============================
+    # APK 周期 verifier → backend 失败上报
+    # ============================
+    # 内存计数, 进程重启清零. 用于"短时间重复上报抑制 + 监控页面查看".
+    _network_failures: dict[int, list[dict]] = {}
+    _network_failures_lock = asyncio.Lock()
+
+    @app.post("/api/v2/network/failure")
+    async def network_failure(payload: dict):
+        """APK PeriodicVerifier 失败 3 次后调.
+        body: {"inst": int, "reason": str, "ts": int(ms)}.
+
+        当前行为: 记 log, 30s 内同 inst 重复仅 log 不动作 (防 spam),
+        间隔过了再上报触发 1 次 P0 加速器重启.
+        TODO: 接 runner_service 的 P0 重启 hook 自动恢复链路.
+        """
+        import time as _t
+        inst = int(payload.get("inst", -1) or -1)
+        reason = str(payload.get("reason", ""))[:200]
+        now = _t.time()
+
+        async with _network_failures_lock:
+            lst = _network_failures.setdefault(inst, [])
+            # 清 5 分钟前的
+            lst[:] = [x for x in lst if now - x["ts"] < 300]
+            recent_30s = [x for x in lst if now - x["ts"] < 30]
+            lst.append({"ts": now, "reason": reason})
+
+        if recent_30s:
+            logger.info(f"[net-fail/inst{inst}] 抑制 (30s 内已上报). reason={reason}")
+            return {"ok": True, "action": "suppressed", "inst": inst}
+
+        logger.warning(f"[net-fail/inst{inst}] APK 报: {reason}")
+        # 触发 gameproxy reload (尝试). reload endpoint 可能不存在 (老版本),
+        # 失败也无所谓 - prober 自己会探活恢复.
+        try:
+            import urllib.request as _ur
+            req = _ur.Request("http://127.0.0.1:9901/api/tun/reload", method="POST")
+            with _ur.urlopen(req, timeout=2) as resp:
+                _ = resp.read()
+            logger.info(f"[net-fail/inst{inst}] 已请求 gameproxy reload")
+        except Exception as e:
+            logger.info(f"[net-fail/inst{inst}] gameproxy reload skip ({e})")
+        return {"ok": True, "action": "logged", "inst": inst, "recent_failures": len(lst)}
+
+    @app.get("/api/v2/network/failures")
+    async def network_failures_list():
+        """查询最近 5 分钟内的 network failure (前端监控页用)."""
+        import time as _t
+        now = _t.time()
+        async with _network_failures_lock:
+            return {
+                "ok": True,
+                "by_inst": {
+                    inst: [{"ago_s": int(now - x["ts"]), "reason": x["reason"]} for x in lst]
+                    for inst, lst in _network_failures.items() if lst
+                },
+            }
+
     @app.get("/api/proxy_verify")
     async def proxy_verify():
         """反代 gameproxy :9901/verify HTML, 让 cloudflare 公网 UI 也能 access.

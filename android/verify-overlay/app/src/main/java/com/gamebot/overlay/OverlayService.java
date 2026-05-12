@@ -27,6 +27,8 @@ public class OverlayService extends Service {
     private static final String NOTIF_CHANNEL = "gamebot_overlay";
     private WindowManager wm;
     private View root;
+    private TextView bubble;
+    private PeriodicVerifier verifier;
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
@@ -36,14 +38,42 @@ public class OverlayService extends Service {
         super.onCreate();
         startForegroundCompat();
         showOverlay();
+        startPeriodicVerify();
     }
 
     @Override
     public void onDestroy() {
+        if (verifier != null) {
+            verifier.stop();
+            verifier = null;
+        }
         if (wm != null && root != null) {
             try { wm.removeView(root); } catch (Throwable ignored) {}
         }
         super.onDestroy();
+    }
+
+    private void startPeriodicVerify() {
+        InstanceConfig cfg = InstanceConfig.load(getContentResolver());
+        android.util.Log.i("GamebotOverlay",
+                "starting verifier: inst=" + cfg.instIdx + " backend=" + cfg.backendBaseUrl);
+        verifier = new PeriodicVerifier(cfg, (r, consecutiveFails) -> {
+            // 主线程更新浮窗文字 / 颜色
+            if (bubble == null) return;
+            bubble.post(() -> {
+                if (r.ok) {
+                    bubble.setText(getString(R.string.overlay_text));
+                    bubble.setTextColor(0xFFFFFFFF);
+                } else if (consecutiveFails == 1) {
+                    bubble.setText("加速器抖动…");
+                    bubble.setTextColor(0xFFFFA500);
+                } else {
+                    bubble.setText("加速器异常 x" + consecutiveFails);
+                    bubble.setTextColor(0xFFFF4444);
+                }
+            });
+        });
+        verifier.start();
     }
 
     private void startForegroundCompat() {
@@ -87,7 +117,7 @@ public class OverlayService extends Service {
         col.setGravity(Gravity.CENTER_HORIZONTAL);
 
         // 文字气泡: 半透明 ink 黑底 + 白字, 跟猫之间留 4dp 间距
-        TextView bubble = new TextView(this);
+        bubble = new TextView(this);
         bubble.setText(getString(R.string.overlay_text));
         bubble.setTextColor(0xFFFFFFFF);
         bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f);

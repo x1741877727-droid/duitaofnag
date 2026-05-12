@@ -190,7 +190,27 @@ def start_overlay_service(adb: str, serial: str) -> tuple[bool, str]:
 # 单台 + 全量部署
 # =====================
 
-def deploy_to(adb: str, serial: str, apk: str) -> tuple[bool, str]:
+def inject_instance_settings(adb: str, serial: str, inst_idx: int, backend_url: str) -> None:
+    """注入 inst idx + backend URL 到模拟器 Settings.Global, APK 读它们做周期校验上报.
+    APK 失败时 POST backend, backend 知道哪个实例 + 重启加速器."""
+    _run(adb, "-s", serial, "shell", "settings", "put", "global", "gamebot_inst", str(inst_idx),
+         timeout=5)
+    _run(adb, "-s", serial, "shell", "settings", "put", "global", "gamebot_backend", backend_url,
+         timeout=5)
+
+
+def serial_to_inst_idx(serial: str) -> int:
+    """emulator-5554 → 0, emulator-5556 → 1, ... (LDPlayer 端口惯例 5554+idx*2)."""
+    try:
+        if serial.startswith("emulator-"):
+            port = int(serial.split("-", 1)[1])
+            return max(0, (port - 5554) // 2)
+    except Exception:
+        pass
+    return 0
+
+
+def deploy_to(adb: str, serial: str, apk: str, backend_url: str = "http://10.0.2.2:8900") -> tuple[bool, str]:
     """一台模拟器走完整套流程. 返回 (ok, summary)."""
     try:
         if not is_installed(adb, serial):
@@ -207,12 +227,16 @@ def deploy_to(adb: str, serial: str, apk: str) -> tuple[bool, str]:
 
         grant_post_notifications(adb, serial)
 
+        # 注入 inst idx + backend url, APK 周期 verifier 用这俩
+        inst_idx = serial_to_inst_idx(serial)
+        inject_instance_settings(adb, serial, inst_idx, backend_url)
+
         ok, msg = start_overlay_service(adb, serial)
         if not ok:
             return False, f"[{serial}] {msg}"
 
         tag = "新装" if installed_now else "已装"
-        return True, f"[{serial}] OK ({tag} + 浮窗已启)"
+        return True, f"[{serial}] OK ({tag} + inst={inst_idx} + 浮窗已启)"
     except Exception as e:
         return False, f"[{serial}] 异常: {e}"
 

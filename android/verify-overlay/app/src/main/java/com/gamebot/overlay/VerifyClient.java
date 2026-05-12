@@ -6,8 +6,10 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 
 /**
  * HTTP 拉取 gameproxy 状态.
@@ -79,6 +81,40 @@ final class VerifyClient {
             String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
             Log.w(TAG, "probe failed: " + msg);
             return Result.fail(msg);
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    /**
+     * 校验失败时 POST 到 backend, backend 收到后触发"重启加速器 + 重试"恢复链路.
+     * <p>
+     * 端点: {backendBaseUrl}/api/v2/network/failure
+     * body: {"inst": <idx>, "reason": "<msg>", "ts": <unix_ms>}
+     * 5s timeout, 失败/网络断也只忍不抛 (浮窗服务继续跑).
+     */
+    static void reportFailure(String backendBaseUrl, int instIdx, String reason) {
+        HttpURLConnection conn = null;
+        try {
+            URL u = new URL(backendBaseUrl + "/api/v2/network/failure");
+            conn = (HttpURLConnection) u.openConnection();
+            conn.setConnectTimeout(TIMEOUT_MS);
+            conn.setReadTimeout(TIMEOUT_MS);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            conn.setDoOutput(true);
+            JSONObject body = new JSONObject();
+            body.put("inst", instIdx);
+            body.put("reason", reason == null ? "" : reason);
+            body.put("ts", System.currentTimeMillis());
+            byte[] data = body.toString().getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(data);
+            }
+            int code = conn.getResponseCode();
+            Log.i(TAG, "reportFailure inst=" + instIdx + " → HTTP " + code);
+        } catch (Throwable t) {
+            Log.w(TAG, "reportFailure swallow: " + t.getMessage());
         } finally {
             if (conn != null) conn.disconnect();
         }
