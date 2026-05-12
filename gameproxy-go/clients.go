@@ -227,6 +227,21 @@ func StartAPIServer(addr string, server *Socks5Server) {
 		_ = json.NewEncoder(w).Encode(server.GetVerifyJSON())
 	})
 
+	// GET /api/tun/ip_health — 当前所有跟踪 IP 的健康状态 (含 fast-fail 不通的)
+	// 前端 / 用户能看到"哪些 PUBG IP 当前打不通", 知道是网络问题不是脚本问题.
+	mux.HandleFunc("/api/tun/ip_health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		ips := []map[string]any{}
+		if server.ipHealth != nil {
+			ips = server.ipHealth.Snapshot()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":  true,
+			"ips": ips,
+		})
+	})
+
 	logInfo("HTTP API 启动: %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		logWarn("HTTP API 启动失败: %v", err)

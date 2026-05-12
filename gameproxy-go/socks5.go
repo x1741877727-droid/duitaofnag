@@ -89,6 +89,9 @@ type Socks5Server struct {
 	uuidMu       sync.Mutex
 	uuidByClient map[string]string
 
+	// TUN dial 健康跟踪 (避免对最近频繁失败的 IP 重复 5s timeout)
+	ipHealth *IPHealth
+
 	listener net.Listener
 }
 
@@ -110,6 +113,7 @@ func NewSocks5Server(cfg ServerConfig) *Socks5Server {
 		dropNonG617500Enforce:    cfg.DropNonG617500Enforce,
 		uuidByClient:  make(map[string]string),
 		failCache:     NewFailCache(),
+		ipHealth:      NewIPHealth(),
 		clientTracker: NewClientTracker(),
 		maxConns:      500,
 		startTime:     time.Now(),

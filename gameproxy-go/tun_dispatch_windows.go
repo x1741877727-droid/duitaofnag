@@ -83,11 +83,28 @@ func startTunDispatch(srv *Socks5Server, dev tun.Device, mtu uint32) (*stack.Sta
 		// 先 dial 真目标 — 失败就 RST 不浪费 endpoint 创建
 		// dialerForRelay 在 Windows 上绑物理网卡, 避免 wintun routing loop
 		target := net.JoinHostPort(dstAddr, strconv.Itoa(dstPort))
+
+		// 快失败: 该 IP 最近 30s 内 dial 失败 >=3 次 → 不实际 dial 立即 RST,
+		// 把"卡 5s"换成"卡 < 100ms", 游戏 socket 会重试 (可能换 IP).
+		// 后台 prober 探活 → 通了自动解除 unhealthy.
+		if srv.ipHealth != nil && !srv.ipHealth.IsHealthy(dstAddr) {
+			stats.TunTCPFastFail.Add(1)
+			logInfo("[TUN] TCP FAST-FAIL %s (recently unhealthy)", target)
+			req.Complete(true)
+			return
+		}
+
 		remote, dialErr := dialerForRelay(5 * time.Second).Dial("tcp", target)
 		if dialErr != nil {
+			if srv.ipHealth != nil {
+				srv.ipHealth.RecordFail(dstAddr, dstPort)
+			}
 			logInfo("[TUN] TCP %s dial 失败: %v", target, dialErr)
 			req.Complete(true)
 			return
+		}
+		if srv.ipHealth != nil {
+			srv.ipHealth.RecordSuccess(dstAddr, dstPort)
 		}
 
 		// gVisor endpoint: 接管 emulator 端的 TCP 半连接
@@ -156,6 +173,11 @@ func startTunDispatch(srv *Socks5Server, dev tun.Device, mtu uint32) (*stack.Sta
 
 	go pumpWintunToStack(dev, linkEP)
 	go pumpStackToWintun(dev, linkEP)
+
+	// 启 IPHealth prober: 后台每 10s 探活 unhealthy IP, 通了自动解除标记.
+	if srv.ipHealth != nil {
+		srv.ipHealth.StartProber()
+	}
 
 	return s, nil
 }
