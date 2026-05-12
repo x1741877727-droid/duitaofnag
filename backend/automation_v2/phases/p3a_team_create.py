@@ -206,30 +206,63 @@ class P3aTeamCreate:
         )
 
     async def _step_close(self, ctx: RunContext) -> PhaseStep:
-        """关 P3a 打开的 panel — 极简: tap (720, 270) 等动画就 done.
+        """关 P3a 打开的 panel — yolo 找 close_x 逐层关, 关完最后一层 tap 空白收尾.
 
-        历史教训:
-          - lobby_start_btn 模板在 7 周年活动 UI 下 conf 仅 0.375 (远低 0.7),
-            无法用模板 verify "已回大厅"
-          - 用户实测 + 手动 ADB tap 确认: tap (720, 270) 100% 关掉 panel
-          - 复杂多层 fallback 反而拖慢, 没收益
+        实际遇到的层级 (decode 后):
+          1. 内层 二维码组队 dialog (X 大约 655, 178)
+          2. 外层 组队码 panel    (X 大约 729, 122)
 
-        现在做法: 信赖 tap, 不 verify. P4 自己处理屏幕状态.
+        策略: loop 找 yolo close_x → tap 最高 conf → 等 0.3s → 再找,
+        直到没 close_x. 最后 tap (720, 270) 安全空白区收尾.
         """
-        ctx.mark("yolo_start"); ctx.mark("yolo_done")
+        max_close_iters = 4   # 防卡死, 实际只需 2 轮 (内+外)
+        closed = 0
+        last_target: Optional[str] = None
+
+        ctx.mark("yolo_start")
+        for _ in range(max_close_iters):
+            shot = await ctx.adb.screenshot()
+            if shot is None:
+                await asyncio.sleep(0.15)
+                continue
+
+            try:
+                dets = await ctx.yolo.detect(shot, conf_thresh=0.30)
+            except Exception as e:
+                logger.debug(f"P3a[close] yolo err: {e}")
+                dets = []
+
+            close_xs = sorted(
+                (d for d in dets if d.name == "close_x" and d.conf >= 0.40),
+                key=lambda d: -d.conf,
+            )
+            if not close_xs:
+                break
+
+            best = close_xs[0]
+            try:
+                await ctx.adb.tap(best.cx, best.cy)
+            except Exception as e:
+                logger.debug(f"P3a[close] tap close_x err: {e}")
+            last_target = f"close_x@({best.cx},{best.cy}) conf={best.conf:.2f}"
+            closed += 1
+            await asyncio.sleep(0.3)   # 等 panel 关闭动画
+        ctx.mark("yolo_done")
+
+        # 关完最后一层 → tap 空白区收尾 (清除可能残留的 tooltip / 提示)
         ctx.mark("tap_send")
         try:
             await ctx.adb.tap(720, 270)
         except Exception as e:
-            logger.debug(f"P3a[close] tap err: {e}")
+            logger.debug(f"P3a[close] blank tap err: {e}")
         ctx.mark("tap_done")
-        await asyncio.sleep(0.4)   # 等 panel 关闭动画
+        await asyncio.sleep(0.25)
 
         ctx._p3a["sub_step"] = "done"
         ctx.mark("decide")
         return step_retry(
-            note="P3a[close] tap (720,270) → done",
-            outcome_hint="closed_simple",
+            note=f"P3a[close] yolo 关 {closed} 层 (last={last_target}) → blank → done",
+            outcome_hint="closed_yolo",
         )
 
     # ════════════════════════════════════════
